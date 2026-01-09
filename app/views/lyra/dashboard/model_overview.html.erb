@@ -1,0 +1,115 @@
+<style>
+  .lyra-model-overview { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-model-overview h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-model-overview h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-model-overview .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-model-overview .back-link:hover { text-decoration: underline; }
+  .lyra-model-overview .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+  .lyra-model-overview .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+  .lyra-model-overview .summary-card .value { font-size: 36px; font-weight: 700; color: #1a1a2e; }
+  .lyra-model-overview .summary-card .label { color: #6c757d; font-size: 14px; margin-top: 5px; }
+  .lyra-model-overview .info-table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden; }
+  .lyra-model-overview .info-table th { background: #f8f9fa; padding: 12px 15px; text-align: left; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; }
+  .lyra-model-overview .info-table td { padding: 12px 15px; border-bottom: 1px solid #eee; }
+  .lyra-model-overview .info-table tr:last-child td { border-bottom: none; }
+  .lyra-model-overview .badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-model-overview .badge-success { background: #d4edda; color: #155724; }
+  .lyra-model-overview .badge-warning { background: #fff3cd; color: #856404; }
+  .lyra-model-overview .badge-info { background: #cce5ff; color: #004085; }
+  .lyra-model-overview .recent-events { margin-top: 20px; }
+  .lyra-model-overview .event-item { background: #fff; border: 1px solid #dee2e6; border-radius: 6px; padding: 12px 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-model-overview .event-item .event-info { display: flex; align-items: center; gap: 10px; }
+  .lyra-model-overview .event-item .timestamp { color: #6c757d; font-size: 12px; }
+  .lyra-model-overview .action-links { margin-top: 20px; display: flex; gap: 10px; }
+  .lyra-model-overview .action-links a { padding: 10px 20px; background: #4a4e69; color: #fff; text-decoration: none; border-radius: 6px; font-size: 14px; }
+  .lyra-model-overview .action-links a:hover { background: #22223b; }
+  .lyra-model-overview .action-links a.secondary { background: #e9ecef; color: #495057; }
+  .lyra-model-overview .action-links a.secondary:hover { background: #dee2e6; }
+</style>
+
+<div class="lyra-model-overview">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Model Overview: <%= @model_class.name %></h1>
+  <p style="color: #6c757d; margin-bottom: 20px;">
+    Detailed view of the <%= @model_class.name %> model, including record counts, event statistics, and recent activity.
+  </p>
+
+  <h2 style="margin-top: 0;">Statistics</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Overview of records and events for this model.
+  </p>
+  <div class="summary-cards">
+    <div class="summary-card">
+      <div class="value"><%= @records_count %></div>
+      <div class="label">Total Records</div>
+    </div>
+    <div class="summary-card">
+      <div class="value"><%= @events_count %></div>
+      <div class="label">Total Events</div>
+    </div>
+    <div class="summary-card">
+      <div class="value"><%= @records_count > 0 ? (@events_count.to_f / @records_count).round(1) : 0 %></div>
+      <div class="label">Avg Events/Record</div>
+    </div>
+  </div>
+
+  <h2>Model Information</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Schema and configuration details for this model.
+  </p>
+  <table class="info-table">
+    <tbody>
+      <tr>
+        <th style="width: 200px;">Table Name</th>
+        <td><code><%= @model_class.table_name %></code></td>
+      </tr>
+      <tr>
+        <th>Primary Key</th>
+        <td><code><%= @model_class.primary_key %></code></td>
+      </tr>
+      <tr>
+        <th>Columns</th>
+        <td>
+          <% @model_class.column_names.each do |col| %>
+            <span class="badge badge-info" style="margin-right: 5px; margin-bottom: 5px;"><%= col %></span>
+          <% end %>
+        </td>
+      </tr>
+      <tr>
+        <th>Lyra Stream Pattern</th>
+        <td><code><%= @model_class.name %>$:id</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Quick Actions</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Common operations for this model.
+  </p>
+  <div class="action-links">
+    <%= link_to "View Discrepancies", discrepancies_path(model_class: @model_class.name) %>
+    <%= link_to "Audit Trail Lookup", audit_trail_path(model_class: @model_class.name), class: "secondary" %>
+    <%= link_to "Event Timeline", timeline_path(model: @model_class.name), class: "secondary" %>
+    <%= link_to "CRUD Mapping", crud_mapping_path, class: "secondary" %>
+  </div>
+
+  <h2>Recent Records</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Most recently updated records for this model (showing up to 10). Click "Audit" to view the complete change history.
+  </p>
+  <div class="recent-events">
+    <% @model_class.order(updated_at: :desc).limit(10).each do |record| %>
+      <div class="event-item">
+        <div class="event-info">
+          <span class="badge badge-info">#<%= record.id %></span>
+          <span><%= record.try(:name) || record.try(:title) || record.try(:email) || "Record ##{record.id}" %></span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 15px;">
+          <%= link_to "Audit", audit_trail_for_record_path(model_class: @model_class.name, id: record.id), style: "font-size: 12px; color: #4a4e69; text-decoration: none; padding: 4px 10px; background: #e9ecef; border-radius: 4px;" %>
+          <span class="timestamp">Updated: <%= record.updated_at.strftime("%Y-%m-%d %H:%M") %></span>
+        </div>
+      </div>
+    <% end %>
+  </div>
+</div>

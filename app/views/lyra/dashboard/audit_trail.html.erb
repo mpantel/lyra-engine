@@ -1,0 +1,324 @@
+<style>
+  .lyra-audit { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-audit h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-audit h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-audit .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-audit .back-link:hover { text-decoration: underline; }
+  .lyra-audit .section-desc { color: #6c757d; font-size: 13px; margin-bottom: 15px; }
+  .lyra-audit .lookup-form { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .lyra-audit .lookup-form h3 { margin: 0 0 15px 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-audit .form-row { display: flex; gap: 15px; align-items: flex-end; flex-wrap: wrap; }
+  .lyra-audit .form-group { flex: 1; min-width: 200px; }
+  .lyra-audit .form-group label { display: block; font-size: 13px; color: #495057; margin-bottom: 5px; font-weight: 600; }
+  .lyra-audit .form-group select, .lyra-audit .form-group input { width: 100%; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px; }
+  .lyra-audit .form-group select:focus, .lyra-audit .form-group input:focus { outline: none; border-color: #4a4e69; box-shadow: 0 0 0 2px rgba(74, 78, 105, 0.1); }
+  .lyra-audit .btn { padding: 8px 20px; background: #4a4e69; color: #fff; border: none; border-radius: 4px; font-size: 14px; cursor: pointer; }
+  .lyra-audit .btn:hover { background: #22223b; }
+  .lyra-audit .btn-secondary { background: #e9ecef; color: #495057; }
+  .lyra-audit .btn-secondary:hover { background: #dee2e6; }
+  .lyra-audit .record-picker { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 30px; }
+  .lyra-audit .record-picker h3 { margin: 0 0 15px 0; font-size: 16px; color: #1a1a2e; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-audit .record-picker .record-count { font-size: 12px; color: #6c757d; font-weight: normal; }
+  .lyra-audit .search-bar { display: flex; gap: 10px; margin-bottom: 15px; }
+  .lyra-audit .search-bar input { flex: 1; padding: 8px 12px; border: 1px solid #ced4da; border-radius: 4px; font-size: 14px; }
+  .lyra-audit .record-list { max-height: 300px; overflow-y: auto; border: 1px solid #e9ecef; border-radius: 6px; }
+  .lyra-audit .record-item { padding: 12px 15px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: background 0.15s; }
+  .lyra-audit .record-item:last-child { border-bottom: none; }
+  .lyra-audit .record-item:hover { background: #f8f9fa; }
+  .lyra-audit .record-item.selected { background: #e7f1ff; border-left: 3px solid #007bff; }
+  .lyra-audit .record-item .record-main { display: flex; align-items: center; gap: 10px; }
+  .lyra-audit .record-item .record-id { background: #e9ecef; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; color: #495057; }
+  .lyra-audit .record-item .record-name { font-weight: 500; color: #1a1a2e; }
+  .lyra-audit .record-item .record-extra { font-size: 12px; color: #6c757d; }
+  .lyra-audit .record-item .record-meta { text-align: right; }
+  .lyra-audit .record-item .record-updated { font-size: 11px; color: #6c757d; }
+  .lyra-audit .no-records { padding: 30px; text-align: center; color: #6c757d; }
+  .lyra-audit .record-info { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px 20px; margin-bottom: 20px; }
+  .lyra-audit .record-info h3 { margin: 0 0 10px 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-audit .record-info .meta { font-size: 13px; color: #6c757d; }
+  .lyra-audit .record-deleted { background: #f8d7da; border-color: #f5c6cb; }
+  .lyra-audit .record-deleted h3 { color: #721c24; }
+  .lyra-audit .timeline { position: relative; padding-left: 30px; }
+  .lyra-audit .timeline::before { content: ''; position: absolute; left: 10px; top: 0; bottom: 0; width: 2px; background: #dee2e6; }
+  .lyra-audit .timeline-entry { position: relative; margin-bottom: 20px; }
+  .lyra-audit .timeline-entry::before { content: ''; position: absolute; left: -24px; top: 5px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; }
+  .lyra-audit .timeline-entry.created::before { background: #28a745; }
+  .lyra-audit .timeline-entry.updated::before { background: #007bff; }
+  .lyra-audit .timeline-entry.destroyed::before { background: #dc3545; }
+  .lyra-audit .entry-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; overflow: hidden; }
+  .lyra-audit .entry-header { background: #f8f9fa; padding: 12px 15px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-audit .entry-header .operation { font-weight: 600; text-transform: uppercase; font-size: 12px; }
+  .lyra-audit .entry-header .operation.created { color: #28a745; }
+  .lyra-audit .entry-header .operation.updated { color: #007bff; }
+  .lyra-audit .entry-header .operation.destroyed { color: #dc3545; }
+  .lyra-audit .entry-header .timestamp { font-size: 12px; color: #6c757d; }
+  .lyra-audit .entry-header .user { font-size: 12px; color: #495057; margin-left: 15px; }
+  .lyra-audit .entry-body { padding: 15px; }
+  .lyra-audit .changes-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .lyra-audit .changes-table th { text-align: left; padding: 8px 12px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; }
+  .lyra-audit .changes-table td { padding: 8px 12px; border-bottom: 1px solid #eee; vertical-align: top; }
+  .lyra-audit .changes-table tr:last-child td { border-bottom: none; }
+  .lyra-audit .old-value { color: #dc3545; text-decoration: line-through; }
+  .lyra-audit .new-value { color: #28a745; }
+  .lyra-audit .attr-value { font-family: monospace; font-size: 12px; background: #f8f9fa; padding: 2px 6px; border-radius: 3px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; display: inline-block; }
+  .lyra-audit .empty-state { text-align: center; padding: 60px 20px; color: #6c757d; background: #f8f9fa; border: 1px dashed #dee2e6; border-radius: 8px; }
+  .lyra-audit .empty-state h3 { margin: 0 0 10px 0; color: #495057; }
+  .lyra-audit .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+  .lyra-audit .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; text-align: center; }
+  .lyra-audit .summary-card .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+  .lyra-audit .summary-card .label { color: #6c757d; font-size: 12px; margin-top: 5px; }
+  .lyra-audit .summary-card.created .value { color: #28a745; }
+  .lyra-audit .summary-card.updated .value { color: #007bff; }
+  .lyra-audit .summary-card.destroyed .value { color: #dc3545; }
+  .lyra-audit .expandable { cursor: pointer; }
+  .lyra-audit .expandable:hover { background: #e9ecef; }
+  .lyra-audit .expand-toggle { color: #4a4e69; font-size: 11px; margin-left: 5px; }
+</style>
+
+<div class="lyra-audit">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Audit Trail</h1>
+  <p class="section-desc">
+    View the complete history of changes for any record. The audit trail shows every create, update,
+    and delete operation with timestamps, user IDs, and field-level changes.
+  </p>
+
+  <div class="lookup-form">
+    <h3>Step 1: Select Model</h3>
+    <%= form_tag(audit_trail_path, method: :get, id: "model-form") do %>
+      <div class="form-row">
+        <div class="form-group">
+          <label for="model_class">Model</label>
+          <select name="model_class" id="model_class" onchange="this.form.submit()">
+            <option value="">Select a model...</option>
+            <% @monitored_models.each do |model| %>
+              <option value="<%= model.name %>" <%= 'selected' if @selected_model == model.name %>><%= model.name %></option>
+            <% end %>
+          </select>
+        </div>
+      </div>
+    <% end %>
+  </div>
+
+  <% if @selected_model.present? && @available_records.present? %>
+    <div class="record-picker">
+      <h3>
+        Step 2: Select Record
+        <span class="record-count">Showing <%= @available_records.size %> records</span>
+      </h3>
+
+      <%= form_tag(audit_trail_path, method: :get, id: "search-form") do %>
+        <input type="hidden" name="model_class" value="<%= @selected_model %>">
+        <div class="search-bar">
+          <input type="text" name="search" placeholder="Search by name, email, or other fields..." value="<%= @search_query %>" id="record-search">
+          <button type="submit" class="btn btn-secondary">Search</button>
+          <% if @search_query.present? %>
+            <%= link_to "Clear", audit_trail_path(model_class: @selected_model), class: "btn btn-secondary" %>
+          <% end %>
+        </div>
+      <% end %>
+
+      <div class="record-list">
+        <% @available_records.each do |record| %>
+          <%= link_to audit_trail_path(model_class: @selected_model, record_id: record[:id]), class: "record-item #{'selected' if @selected_id == record[:id].to_s}", style: "text-decoration: none;" do %>
+            <div class="record-main">
+              <span class="record-id">#<%= record[:id] %></span>
+              <div>
+                <span class="record-name"><%= record[:display_name] %></span>
+                <% if record[:extra_info].present? %>
+                  <div class="record-extra"><%= record[:extra_info] %></div>
+                <% end %>
+              </div>
+            </div>
+            <div class="record-meta">
+              <span class="record-updated">Updated <%= record[:updated_at]&.strftime("%b %d, %Y") %></span>
+            </div>
+          <% end %>
+        <% end %>
+        <% if @available_records.empty? %>
+          <div class="no-records">
+            <% if @search_query.present? %>
+              No records found matching "<%= @search_query %>"
+            <% else %>
+              No records found for <%= @selected_model %>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% elsif @selected_model.present? && @available_records&.empty? %>
+    <div class="record-picker">
+      <h3>Step 2: Select Record</h3>
+      <div class="no-records">
+        No records found for <%= @selected_model %>. You can still enter a record ID manually below.
+      </div>
+      <%= form_tag(audit_trail_path, method: :get) do %>
+        <input type="hidden" name="model_class" value="<%= @selected_model %>">
+        <div class="form-row" style="margin-top: 15px;">
+          <div class="form-group">
+            <label for="record_id">Enter Record ID Manually</label>
+            <input type="text" name="record_id" id="record_id" placeholder="Enter record ID" value="<%= @selected_id %>">
+          </div>
+          <button type="submit" class="btn">View Audit Trail</button>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <% if @audit_entries.present? %>
+    <h2 style="margin-top: 0;">Audit Trail for <%= @model_class.name %> #<%= @selected_id || @model_id %></h2>
+
+    <% if @record %>
+      <div class="record-info">
+        <h3>Current Record State</h3>
+        <p class="meta">
+          Created: <%= @record.created_at&.strftime("%Y-%m-%d %H:%M:%S") %> |
+          Updated: <%= @record.updated_at&.strftime("%Y-%m-%d %H:%M:%S") %>
+        </p>
+      </div>
+    <% else %>
+      <div class="record-info record-deleted">
+        <h3>Record Not Found (Deleted)</h3>
+        <p class="meta">
+          This record no longer exists in the database, but its audit history is preserved in the event store.
+        </p>
+      </div>
+    <% end %>
+
+    <%
+      created_count = @audit_entries.count { |e| e[:operation].to_sym == :created }
+      updated_count = @audit_entries.count { |e| e[:operation].to_sym == :updated }
+      destroyed_count = @audit_entries.count { |e| e[:operation].to_sym == :destroyed }
+    %>
+    <div class="summary-cards">
+      <div class="summary-card">
+        <div class="value"><%= @audit_entries.count %></div>
+        <div class="label">Total Events</div>
+      </div>
+      <div class="summary-card created">
+        <div class="value"><%= created_count %></div>
+        <div class="label">Created</div>
+      </div>
+      <div class="summary-card updated">
+        <div class="value"><%= updated_count %></div>
+        <div class="label">Updated</div>
+      </div>
+      <div class="summary-card destroyed">
+        <div class="value"><%= destroyed_count %></div>
+        <div class="label">Destroyed</div>
+      </div>
+    </div>
+
+    <div class="timeline">
+      <% @audit_entries.reverse_each do |entry| %>
+        <% operation = entry[:operation].to_s %>
+        <div class="timeline-entry <%= operation %>">
+          <div class="entry-card">
+            <div class="entry-header">
+              <div>
+                <span class="operation <%= operation %>"><%= operation %></span>
+                <% if entry[:user_id] %>
+                  <span class="user">by <%= user_display_name(entry[:user_id]) %></span>
+                <% end %>
+              </div>
+              <span class="timestamp"><%= entry[:timestamp].is_a?(String) ? entry[:timestamp] : entry[:timestamp]&.strftime("%Y-%m-%d %H:%M:%S.%L") %></span>
+            </div>
+            <div class="entry-body">
+              <% if operation == 'created' && entry[:attributes].present? %>
+                <table class="changes-table">
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Initial Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% entry[:attributes].each do |field, value| %>
+                      <tr>
+                        <td><strong><%= field %></strong></td>
+                        <td><span class="attr-value new-value"><%= value.to_s.truncate(100) %></span></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              <% elsif operation == 'updated' && entry[:changes].present? %>
+                <table class="changes-table">
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Old Value</th>
+                      <th>New Value</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% entry[:changes].each do |field, change| %>
+                      <% old_val, new_val = change.is_a?(Array) ? change : [nil, change] %>
+                      <tr>
+                        <td><strong><%= field %></strong></td>
+                        <td><span class="attr-value old-value"><%= old_val.to_s.truncate(100) %></span></td>
+                        <td><span class="attr-value new-value"><%= new_val.to_s.truncate(100) %></span></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              <% elsif operation == 'destroyed' %>
+                <p style="color: #6c757d; margin: 0; font-size: 13px;">Record was permanently deleted.</p>
+                <% if entry[:attributes].present? %>
+                  <details style="margin-top: 10px;">
+                    <summary style="cursor: pointer; color: #4a4e69; font-size: 13px;">View final state before deletion</summary>
+                    <table class="changes-table" style="margin-top: 10px;">
+                      <thead>
+                        <tr>
+                          <th>Field</th>
+                          <th>Final Value</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <% entry[:attributes].each do |field, value| %>
+                          <tr>
+                            <td><strong><%= field %></strong></td>
+                            <td><span class="attr-value"><%= value.to_s.truncate(100) %></span></td>
+                          </tr>
+                        <% end %>
+                      </tbody>
+                    </table>
+                  </details>
+                <% end %>
+              <% else %>
+                <p style="color: #6c757d; margin: 0; font-size: 13px;">No detailed changes recorded.</p>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+  <% elsif @selected_model.present? && @selected_id.present? %>
+    <div class="empty-state">
+      <h3>No Audit Trail Found</h3>
+      <p>No events were found for <%= @selected_model %> #<%= @selected_id %>.</p>
+      <p style="font-size: 13px; margin-top: 10px;">
+        This could mean the record was created before Lyra was enabled,
+        or the record ID doesn't exist.
+      </p>
+    </div>
+
+  <% elsif !@selected_model.present? %>
+    <div class="empty-state">
+      <h3>Select a Model to Begin</h3>
+      <p>Choose a model from the dropdown above to browse available records.</p>
+      <p style="font-size: 13px; margin-top: 10px;">
+        The audit trail shows every change made to a record, including who made the change and when.
+      </p>
+    </div>
+  <% elsif @selected_model.present? && !@selected_id.present? %>
+    <div class="empty-state">
+      <h3>Select a Record</h3>
+      <p>Click on a record above to view its complete audit trail.</p>
+      <p style="font-size: 13px; margin-top: 10px;">
+        You can search by name, email, or other identifying fields.
+      </p>
+    </div>
+  <% end %>
+</div>

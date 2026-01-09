@@ -1,0 +1,155 @@
+<style>
+  .lyra-visualization { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1400px; margin: 0 auto; padding: 20px; }
+  .lyra-visualization h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-visualization h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-visualization .breadcrumb { margin-bottom: 20px; font-size: 14px; }
+  .lyra-visualization .breadcrumb a { color: #4a4e69; text-decoration: none; }
+  .lyra-visualization .breadcrumb a:hover { text-decoration: underline; }
+  .lyra-visualization .controls { background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 15px; align-items: center; }
+  .lyra-visualization .controls label { font-weight: 500; color: #495057; }
+  .lyra-visualization .controls select { padding: 8px 12px; border: 1px solid #dee2e6; border-radius: 4px; }
+  .lyra-visualization .controls button { padding: 8px 16px; background: #4a4e69; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  .lyra-visualization .controls button:hover { background: #22223b; }
+  .lyra-visualization .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
+  .lyra-visualization .stat-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; text-align: center; }
+  .lyra-visualization .stat-card .value { font-size: 32px; font-weight: 700; color: #4a4e69; }
+  .lyra-visualization .stat-card .label { font-size: 14px; color: #6c757d; margin-top: 5px; }
+  .lyra-visualization .heatmap-grid { display: grid; grid-template-columns: 80px repeat(24, 1fr); gap: 2px; margin: 20px 0; }
+  .lyra-visualization .heatmap-cell { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: 11px; border-radius: 3px; }
+  .lyra-visualization .heatmap-header { background: #f8f9fa; font-weight: 600; font-size: 10px; color: #495057; }
+  .lyra-visualization .heatmap-row-label { background: #f8f9fa; font-weight: 500; font-size: 12px; color: #495057; display: flex; align-items: center; justify-content: flex-end; padding-right: 8px; }
+  .lyra-visualization .breakdown-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+  .lyra-visualization .breakdown-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; }
+  .lyra-visualization .breakdown-card h3 { margin: 0 0 15px 0; color: #1a1a2e; font-size: 16px; }
+  .lyra-visualization .bar-chart { display: flex; flex-direction: column; gap: 8px; }
+  .lyra-visualization .bar-row { display: flex; align-items: center; gap: 10px; }
+  .lyra-visualization .bar-label { width: 60px; font-size: 13px; color: #495057; }
+  .lyra-visualization .bar-container { flex: 1; height: 24px; background: #e9ecef; border-radius: 4px; overflow: hidden; }
+  .lyra-visualization .bar-fill { height: 100%; background: linear-gradient(90deg, #667eea, #764ba2); border-radius: 4px; transition: width 0.3s; }
+  .lyra-visualization .bar-value { width: 50px; text-align: right; font-size: 13px; color: #495057; font-weight: 500; }
+  .lyra-visualization .op-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .lyra-visualization .op-card { background: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center; }
+  .lyra-visualization .op-card .op-name { font-weight: 600; text-transform: uppercase; margin-bottom: 5px; }
+  .lyra-visualization .op-card .op-count { font-size: 24px; font-weight: 700; color: #4a4e69; }
+  .lyra-visualization .op-created { color: #28a745; }
+  .lyra-visualization .op-updated { color: #ffc107; }
+  .lyra-visualization .op-destroyed { color: #dc3545; }
+</style>
+
+<div class="lyra-visualization">
+  <div class="breadcrumb">
+    <%= link_to "Dashboard", lyra.dashboard_path %> &rsaquo; Activity Heatmap
+  </div>
+
+  <h1>Activity Heatmap</h1>
+  <p style="color: #6c757d;">
+    Visualize event activity patterns across time. Identify peak hours and days for database operations.
+  </p>
+
+  <div class="controls">
+    <%= form_tag(heatmap_view_path, method: :get, style: "display: flex; gap: 15px; align-items: center;") do %>
+      <label for="days">Time period:</label>
+      <%= select_tag :days, options_for_select([["Last 7 days", 7], ["Last 14 days", 14], ["Last 30 days", 30], ["Last 90 days", 90]], @days), id: "days" %>
+      <button type="submit">Update</button>
+    <% end %>
+    <a href="<%= heatmap_data_path(days: @days, format: :json) %>" style="color: #4a4e69; text-decoration: none; font-size: 14px;">Download JSON</a>
+  </div>
+
+  <% metadata = @heatmap_data[:metadata] || {} %>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="value"><%= metadata[:total_events] || 0 %></div>
+      <div class="label">Total Events</div>
+    </div>
+    <div class="stat-card">
+      <% peak_hour = metadata[:peak_hour] %>
+      <div class="value"><%= peak_hour ? peak_hour[:label] : "N/A" %></div>
+      <div class="label">Peak Hour</div>
+    </div>
+    <div class="stat-card">
+      <% peak_day = metadata[:peak_day] %>
+      <div class="value"><%= peak_day ? peak_day[:label] : "N/A" %></div>
+      <div class="label">Peak Day</div>
+    </div>
+    <div class="stat-card">
+      <% busiest = metadata[:busiest_slot] %>
+      <div class="value"><%= busiest ? "#{busiest[:day_label][0..2]} #{busiest[:hour_label]}" : "N/A" %></div>
+      <div class="label">Busiest Time Slot</div>
+    </div>
+  </div>
+
+  <% operations = metadata[:operations_breakdown] || {} %>
+  <% if operations.any? %>
+    <h2>Operations Summary</h2>
+    <div class="op-grid">
+      <% operations.each do |op, count| %>
+        <div class="op-card">
+          <div class="op-name op-<%= op %>"><%= op %></div>
+          <div class="op-count"><%= count %></div>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <h2>Weekly Heatmap (Hour × Day)</h2>
+  <% days = %w[Sun Mon Tue Wed Thu Fri Sat] %>
+  <% heatmap_data = @heatmap_data[:data] || [] %>
+  <% max_count = heatmap_data.map { |d| d[:count] }.max || 1 %>
+
+  <div class="heatmap-grid">
+    <div class="heatmap-cell"></div>
+    <% (0..23).each do |hour| %>
+      <div class="heatmap-cell heatmap-header"><%= hour %></div>
+    <% end %>
+
+    <% days.each_with_index do |day, day_idx| %>
+      <div class="heatmap-cell heatmap-row-label"><%= day %></div>
+      <% (0..23).each do |hour| %>
+        <% cell = heatmap_data.find { |d| d[:day] == day_idx && d[:hour] == hour } %>
+        <% count = cell ? cell[:count] : 0 %>
+        <% intensity = max_count > 0 ? (count.to_f / max_count * 100).round : 0 %>
+        <% bg_color = intensity == 0 ? "#f8f9fa" : "rgba(102, 126, 234, #{intensity / 100.0})" %>
+        <div class="heatmap-cell" style="background: <%= bg_color %>; color: <%= intensity > 50 ? '#fff' : '#495057' %>;">
+          <%= count > 0 ? count : "" %>
+        </div>
+      <% end %>
+    <% end %>
+  </div>
+
+  <h2>Breakdowns</h2>
+  <div class="breakdown-grid">
+    <div class="breakdown-card">
+      <h3>Hourly Distribution</h3>
+      <div class="bar-chart">
+        <% max_hourly = (@hourly || []).map { |h| h[:count] }.max || 1 %>
+        <% (@hourly || []).each do |h| %>
+          <% pct = max_hourly > 0 ? (h[:count].to_f / max_hourly * 100).round : 0 %>
+          <div class="bar-row">
+            <div class="bar-label"><%= h[:label] %></div>
+            <div class="bar-container">
+              <div class="bar-fill" style="width: <%= pct %>%;"></div>
+            </div>
+            <div class="bar-value"><%= h[:count] %></div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+
+    <div class="breakdown-card">
+      <h3>Daily Distribution</h3>
+      <div class="bar-chart">
+        <% max_daily = (@daily || []).map { |d| d[:count] }.max || 1 %>
+        <% (@daily || []).each do |d| %>
+          <% pct = max_daily > 0 ? (d[:count].to_f / max_daily * 100).round : 0 %>
+          <div class="bar-row">
+            <div class="bar-label"><%= d[:day][0..2] %></div>
+            <div class="bar-container">
+              <div class="bar-fill" style="width: <%= pct %>%;"></div>
+            </div>
+            <div class="bar-value"><%= d[:count] %></div>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  </div>
+</div>

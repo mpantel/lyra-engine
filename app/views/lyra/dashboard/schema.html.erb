@@ -1,0 +1,283 @@
+<style>
+  .lyra-schema { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-schema h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-schema h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-schema .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-schema .back-link:hover { text-decoration: underline; }
+  .lyra-schema .section-desc { color: #6c757d; font-size: 13px; margin-bottom: 15px; }
+  .lyra-schema .config-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-schema .config-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-schema .config-header h3 { margin: 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-schema .config-body { padding: 20px; }
+  .lyra-schema .config-table { width: 100%; border-collapse: collapse; }
+  .lyra-schema .config-table th { text-align: left; padding: 10px 15px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; width: 200px; }
+  .lyra-schema .config-table td { padding: 10px 15px; border-bottom: 1px solid #eee; }
+  .lyra-schema .config-table tr:last-child td { border-bottom: none; }
+  .lyra-schema .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-schema .badge-success { background: #d4edda; color: #155724; }
+  .lyra-schema .badge-warning { background: #fff3cd; color: #856404; }
+  .lyra-schema .badge-info { background: #cce5ff; color: #004085; }
+  .lyra-schema .badge-secondary { background: #e2e3e5; color: #383d41; }
+  .lyra-schema .badge-danger { background: #f8d7da; color: #721c24; }
+  .lyra-schema .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; margin: 20px 0; }
+  .lyra-schema .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; text-align: center; }
+  .lyra-schema .summary-card .value { font-size: 24px; font-weight: 700; color: #1a1a2e; word-break: break-all; }
+  .lyra-schema .summary-card .value.small { font-size: 14px; font-family: monospace; }
+  .lyra-schema .summary-card .label { color: #6c757d; font-size: 14px; margin-top: 5px; }
+  .lyra-schema .model-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 15px; overflow: hidden; }
+  .lyra-schema .model-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-schema .model-header h4 { margin: 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-schema .model-body { padding: 20px; }
+  .lyra-schema .field-list { margin: 0; padding: 0; list-style: none; }
+  .lyra-schema .field-list li { padding: 8px 12px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-schema .field-list li:last-child { border-bottom: none; }
+  .lyra-schema .field-name { font-family: monospace; font-size: 13px; color: #495057; }
+  .lyra-schema .field-type { font-size: 12px; color: #6c757d; }
+  .lyra-schema .pii-badge { background: #f8d7da; color: #721c24; font-size: 10px; padding: 2px 6px; border-radius: 3px; margin-left: 8px; }
+  .lyra-schema .event-prefix { font-family: monospace; font-size: 13px; color: #6c757d; }
+  .lyra-schema .change-list { margin: 15px 0; padding: 0; list-style: none; }
+  .lyra-schema .change-item { padding: 12px 15px; border-left: 4px solid #ffc107; background: #fffbea; margin-bottom: 10px; border-radius: 0 4px 4px 0; }
+  .lyra-schema .change-item.added { border-left-color: #28a745; background: #f0fff4; }
+  .lyra-schema .change-item.removed { border-left-color: #dc3545; background: #fff5f5; }
+  .lyra-schema .change-item.modified { border-left-color: #007bff; background: #f0f7ff; }
+  .lyra-schema .change-type { font-weight: 600; font-size: 12px; text-transform: uppercase; margin-bottom: 4px; }
+  .lyra-schema .change-detail { font-size: 13px; color: #495057; }
+  .lyra-schema .no-changes { color: #28a745; font-style: italic; }
+  .lyra-schema .no-schema { text-align: center; padding: 40px; color: #6c757d; }
+  .lyra-schema .no-schema h3 { color: #495057; }
+  .lyra-schema code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .lyra-schema .alert { padding: 15px 20px; border-radius: 6px; margin-bottom: 20px; }
+  .lyra-schema .alert-warning { background: #fff3cd; border: 1px solid #ffc107; color: #856404; }
+  .lyra-schema .alert-info { background: #cce5ff; border: 1px solid #007bff; color: #004085; }
+</style>
+
+<div class="lyra-schema">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Schema Registry</h1>
+  <p class="section-desc">
+    The schema registry tracks your event structure<%= ", model configurations, and PII field mappings" if pam_dsl_available? %><%= " and model configurations" unless pam_dsl_available? %>.
+    Version your schema to detect breaking changes and maintain event compatibility.
+  </p>
+
+  <% if @version.nil? %>
+    <div class="no-schema">
+      <h3>No Schema Version Committed</h3>
+      <p>Run <code>rake lyra:schema:commit</code> to create your first schema version.</p>
+      <p>This will snapshot your current model configurations and event structures.</p>
+    </div>
+  <% else %>
+    <% if @has_pending_changes %>
+      <div class="alert alert-warning">
+        <strong>Pending Changes Detected</strong> &mdash;
+        Your schema has uncommitted changes. Run <code>rake lyra:schema:commit</code> to version them.
+      </div>
+    <% end %>
+
+    <h2 style="margin-top: 0;">Schema Version</h2>
+    <p class="section-desc">
+      Current committed schema version and metadata.
+    </p>
+
+    <div class="summary-cards">
+      <div class="summary-card">
+        <div class="value"><%= @version %></div>
+        <div class="label">Version</div>
+      </div>
+      <div class="summary-card">
+        <div class="value small"><%= @fingerprint&.first(12) %>...</div>
+        <div class="label">Fingerprint</div>
+      </div>
+      <div class="summary-card">
+        <div class="value small"><%= @created_at&.is_a?(String) ? @created_at : @created_at&.strftime("%Y-%m-%d") %></div>
+        <div class="label">Created At</div>
+      </div>
+      <div class="summary-card">
+        <div class="value small"><%= @lyra_version || "unknown" %></div>
+        <div class="label">Lyra Version</div>
+      </div>
+    </div>
+
+    <h2>Configuration</h2>
+    <p class="section-desc">
+      Global Lyra configuration captured in this schema version.
+    </p>
+
+    <div class="config-card">
+      <div class="config-header">
+        <h3>Lyra Settings</h3>
+        <span class="badge badge-info">v<%= @version %></span>
+      </div>
+      <div class="config-body">
+        <table class="config-table">
+          <tr>
+            <th>Operating Mode</th>
+            <td>
+              <span class="badge badge-<%= @configuration[:mode] == 'event_sourcing' ? 'info' : (@configuration[:mode] == 'hijack' ? 'warning' : 'success') %>">
+                <%= @configuration[:mode]&.to_s&.titleize || "Not set" %>
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>Projection Mode</th>
+            <td>
+              <span class="badge badge-secondary">
+                <%= @configuration[:projection_mode]&.to_s&.titleize || "Not set" %>
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>Strict Projections</th>
+            <td>
+              <span class="badge <%= @configuration[:strict_projections] ? 'badge-warning' : 'badge-secondary' %>">
+                <%= @configuration[:strict_projections] ? "Enabled" : "Disabled" %>
+              </span>
+            </td>
+          </tr>
+          <tr>
+            <th>Monitored Models</th>
+            <td><%= @models.keys.count %> models</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+
+    <h2>Model Schemas</h2>
+    <p class="section-desc">
+      Each monitored model's field definitions<%= " and types" unless pam_dsl_available? %><%= ", types, and PII classifications" if pam_dsl_available? %> as captured in the schema.
+    </p>
+
+    <% @models.each do |model_name, model_data| %>
+      <div class="model-card">
+        <div class="model-header">
+          <h4><%= model_name %></h4>
+          <span class="event-prefix">Events: <%= model_data[:event_prefix] || model_name %>.*</span>
+        </div>
+        <div class="model-body">
+          <% columns = model_data[:columns] || model_data["columns"] || {} %>
+          <% pii_columns = columns.select { |_, c| c[:pii] || c["pii"] } %>
+
+          <% if columns.any? %>
+            <ul class="field-list">
+              <% columns.each do |col_name, col_info| %>
+                <li>
+                  <span class="field-name">
+                    <%= col_name %>
+                    <% if pam_dsl_available? && (col_info[:pii] || col_info["pii"]) %>
+                      <span class="pii-badge"><%= col_info[:pii_type] || col_info["pii_type"] || "PII" %></span>
+                    <% end %>
+                    <% if col_info[:primary_key] || col_info["primary_key"] %>
+                      <span class="pii-badge" style="background: #cce5ff; color: #004085;">PK</span>
+                    <% end %>
+                  </span>
+                  <span class="field-type">
+                    <%= col_info[:type] || col_info["type"] || "unknown" %>
+                    <% if col_info[:nullable] == false || col_info["nullable"] == false %>
+                      <span style="color: #dc3545;">NOT NULL</span>
+                    <% end %>
+                  </span>
+                </li>
+              <% end %>
+            </ul>
+          <% else %>
+            <p style="color: #6c757d; font-style: italic; margin: 0;">No columns captured in schema</p>
+          <% end %>
+
+          <% if pam_dsl_available? && pii_columns.any? %>
+            <p style="margin-top: 15px; margin-bottom: 0; font-size: 12px; color: #721c24;">
+              <strong>PII Fields:</strong> <%= pii_columns.keys.join(", ") %>
+            </p>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+
+    <% if @models.empty? %>
+      <div class="alert alert-info">
+        No models captured in the current schema. Add <code>monitor_with_lyra</code> to your models and re-commit the schema.
+      </div>
+    <% end %>
+
+    <h2>Pending Changes</h2>
+    <p class="section-desc">
+      Differences between the committed schema and current configuration.
+      Commit changes to maintain an accurate schema history.
+    </p>
+
+    <% if @pending_changes.any? %>
+      <ul class="change-list">
+        <% @pending_changes.each do |change| %>
+          <li class="change-item <%= change[:type] || change['type'] %>">
+            <div class="change-type"><%= change[:type] || change['type'] %></div>
+            <div class="change-detail">
+              <% if change[:model] || change['model'] %>
+                <strong>Model:</strong> <%= change[:model] || change['model'] %>
+              <% end %>
+              <% if change[:column] || change['column'] %>
+                 &rarr; <strong>Column:</strong> <code><%= change[:column] || change['column'] %></code>
+              <% end %>
+              <br>
+              <% if change[:message] || change['message'] %>
+                <%= change[:message] || change['message'] %>
+              <% end %>
+              <% if change[:old_value] || change['old_value'] || change[:new_value] || change['new_value'] %>
+                <br>
+                <strong>From:</strong> <code><%= change[:old_value] || change['old_value'] || "(none)" %></code> &rarr;
+                <strong>To:</strong> <code><%= change[:new_value] || change['new_value'] || "(none)" %></code>
+              <% end %>
+            </div>
+          </li>
+        <% end %>
+      </ul>
+    <% else %>
+      <p class="no-changes">No pending changes. Schema is up to date.</p>
+    <% end %>
+
+    <% if @history.any? %>
+      <h2>Version History</h2>
+      <p class="section-desc">
+        All committed schema versions. Click on a version to view its complete details and compare with previous versions.
+      </p>
+
+      <div class="config-card">
+        <div class="config-body" style="padding: 0;">
+          <table class="config-table" style="margin: 0;">
+            <thead>
+              <tr>
+                <th style="width: 80px;">Version</th>
+                <th style="width: 180px;">Created At</th>
+                <th style="width: 100px;">Lyra</th>
+                <th>Fingerprint</th>
+                <th style="width: 100px;">Models</th>
+                <th style="width: 80px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <% @history.each do |entry| %>
+                <tr>
+                  <td>
+                    <span class="badge <%= entry[:version] == @version ? 'badge-success' : 'badge-secondary' %>">
+                      v<%= entry[:version] %>
+                    </span>
+                    <% if entry[:version] == @version %>
+                      <span style="font-size: 10px; color: #28a745; margin-left: 4px;">current</span>
+                    <% end %>
+                  </td>
+                  <td style="font-size: 13px; color: #6c757d;">
+                    <%= entry[:created_at].is_a?(String) ? entry[:created_at] : entry[:created_at]&.strftime("%Y-%m-%d %H:%M") %>
+                  </td>
+                  <td><code style="font-size: 12px;"><%= entry[:lyra_version] %></code></td>
+                  <td><code style="font-size: 11px; color: #6c757d;"><%= entry[:fingerprint]&.first(20) %>...</code></td>
+                  <td style="text-align: center;"><%= entry[:models_count] || "-" %></td>
+                  <td>
+                    <%= link_to "View", schema_version_path(version: entry[:version]), style: "font-size: 12px; color: #007bff; text-decoration: none;" %>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+</div>

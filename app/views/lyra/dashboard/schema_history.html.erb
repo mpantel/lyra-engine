@@ -1,0 +1,78 @@
+<style>
+  .lyra-schema-history { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-schema-history h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-schema-history .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-schema-history .back-link:hover { text-decoration: underline; }
+  .lyra-schema-history .section-desc { color: #6c757d; font-size: 13px; margin-bottom: 15px; }
+  .lyra-schema-history .config-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-schema-history .config-table { width: 100%; border-collapse: collapse; }
+  .lyra-schema-history .config-table th { text-align: left; padding: 12px 15px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; }
+  .lyra-schema-history .config-table td { padding: 12px 15px; border-bottom: 1px solid #eee; }
+  .lyra-schema-history .config-table tr:last-child td { border-bottom: none; }
+  .lyra-schema-history .config-table tr:hover { background: #f8f9fa; }
+  .lyra-schema-history .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-schema-history .badge-success { background: #d4edda; color: #155724; }
+  .lyra-schema-history .badge-secondary { background: #e2e3e5; color: #383d41; }
+  .lyra-schema-history code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  .lyra-schema-history .view-btn { padding: 6px 12px; background: #4a4e69; color: #fff; text-decoration: none; border-radius: 4px; font-size: 12px; }
+  .lyra-schema-history .view-btn:hover { background: #22223b; }
+  .lyra-schema-history .empty-state { text-align: center; padding: 40px; color: #6c757d; }
+</style>
+
+<div class="lyra-schema-history">
+  <%= link_to "&larr; Back to Schema Registry".html_safe, schema_path, class: "back-link" %>
+
+  <h1>Schema Version History</h1>
+  <p class="section-desc">
+    Complete history of all committed schema versions. Each version is an immutable snapshot of your
+    model configurations and event structures at a point in time.
+  </p>
+
+  <% if @history.any? %>
+    <div class="config-card">
+      <table class="config-table">
+        <thead>
+          <tr>
+            <th style="width: 100px;">Version</th>
+            <th style="width: 200px;">Created At</th>
+            <th style="width: 100px;">Lyra</th>
+            <th>Fingerprint</th>
+            <th style="width: 80px;">Models</th>
+            <th style="width: 100px;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <% @history.each do |entry| %>
+            <tr>
+              <td>
+                <span class="badge <%= entry[:version] == @current_version ? 'badge-success' : 'badge-secondary' %>">
+                  v<%= entry[:version] %>
+                </span>
+                <% if entry[:version] == @current_version %>
+                  <br><span style="font-size: 10px; color: #28a745;">current</span>
+                <% end %>
+              </td>
+              <td style="font-size: 13px;">
+                <%= entry[:created_at].is_a?(String) ? entry[:created_at] : entry[:created_at]&.strftime("%Y-%m-%d %H:%M:%S") %>
+              </td>
+              <td><code><%= entry[:lyra_version] %></code></td>
+              <td><code style="font-size: 11px; color: #6c757d;"><%= entry[:fingerprint] %></code></td>
+              <td style="text-align: center;"><%= entry[:models_count] || "-" %></td>
+              <td>
+                <%= link_to "View Details", schema_version_path(version: entry[:version]), class: "view-btn" %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+    </div>
+  <% else %>
+    <div class="config-card">
+      <div class="empty-state">
+        <h3>No Schema Versions</h3>
+        <p>No schema versions have been committed yet.</p>
+        <p>Run <code>rake lyra:schema:commit</code> to create your first schema version.</p>
+      </div>
+    </div>
+  <% end %>
+</div>

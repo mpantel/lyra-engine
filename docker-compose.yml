@@ -1,0 +1,29 @@
+# PostgreSQL container for Lyra testing and benchmarks
+# Used by: test/dummy, examples/aegean_epay_testbed, examples/blog_app
+#
+# Usage:
+#   rake docker:start   # Start PostgreSQL container
+#   rake docker:stop    # Stop PostgreSQL container
+#   rake docker:status  # Check container status
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: lyra_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # Multiple databases will be created by Rails apps as needed
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - lyra_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  lyra_postgres_data:

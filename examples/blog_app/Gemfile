@@ -1,0 +1,23 @@
+source "https://rubygems.org"
+
+ruby ">= 3.0.0"
+
+# Rails
+gem "rails", "~> 7.1"
+gem "sqlite3", "~> 1.4"
+gem "puma", "~> 6.0"
+
+# Lyra - Event Sourcing with Privacy
+gem "lyra", path: "../.."
+
+# RailsEventStore for event storage
+gem "rails_event_store", "~> 2.14"
+
+group :development, :test do
+  gem "debug"
+  gem "faker"
+end
+
+group :development do
+  gem "annotate"
+end

@@ -1,0 +1,188 @@
+<style>
+  .lyra-policy { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-policy h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-policy h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-policy h3 { color: #495057; margin-top: 20px; font-size: 16px; }
+  .lyra-policy .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-policy .back-link:hover { text-decoration: underline; }
+  .lyra-policy .policy-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-policy .policy-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-policy .policy-header h3 { margin: 0; font-size: 18px; }
+  .lyra-policy .policy-header .badge { padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-policy .policy-header .badge-default { background: #d4edda; color: #155724; }
+  .lyra-policy .policy-body { padding: 20px; }
+  .lyra-policy .section { margin-bottom: 25px; }
+  .lyra-policy .section:last-child { margin-bottom: 0; }
+  .lyra-policy .field-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 15px; }
+  .lyra-policy .field-item { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 12px 15px; }
+  .lyra-policy .field-item .field-name { font-weight: 600; color: #1a1a2e; margin-bottom: 5px; }
+  .lyra-policy .field-item .field-meta { display: flex; gap: 8px; flex-wrap: wrap; }
+  .lyra-policy .field-item .field-meta span { font-size: 11px; padding: 2px 8px; border-radius: 3px; }
+  .lyra-policy .type-badge { background: #cce5ff; color: #004085; }
+  .lyra-policy .sensitivity-internal { background: #d4edda; color: #155724; }
+  .lyra-policy .sensitivity-confidential { background: #fff3cd; color: #856404; }
+  .lyra-policy .sensitivity-restricted { background: #f8d7da; color: #721c24; }
+  .lyra-policy .purpose-item { background: #fff; border: 1px solid #e9ecef; border-radius: 6px; padding: 15px; margin-bottom: 10px; }
+  .lyra-policy .purpose-item h4 { margin: 0 0 8px 0; color: #1a1a2e; font-size: 15px; }
+  .lyra-policy .purpose-item p { margin: 0 0 10px 0; color: #6c757d; font-size: 13px; }
+  .lyra-policy .purpose-item .legal-basis { display: inline-block; background: #e9ecef; padding: 3px 10px; border-radius: 4px; font-size: 12px; color: #495057; }
+  .lyra-policy .purpose-item .required-fields { margin-top: 10px; font-size: 12px; color: #6c757d; }
+  .lyra-policy .retention-table { width: 100%; border-collapse: collapse; }
+  .lyra-policy .retention-table th { background: #f8f9fa; padding: 10px 15px; text-align: left; border-bottom: 1px solid #dee2e6; font-weight: 600; }
+  .lyra-policy .retention-table td { padding: 10px 15px; border-bottom: 1px solid #eee; }
+  .lyra-policy .retention-table tr:last-child td { border-bottom: none; }
+  .lyra-policy .empty-state { text-align: center; padding: 40px; color: #6c757d; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; }
+  .lyra-policy .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+  .lyra-policy .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; text-align: center; }
+  .lyra-policy .summary-card .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+  .lyra-policy .summary-card .label { color: #6c757d; font-size: 12px; margin-top: 5px; }
+</style>
+
+<div class="lyra-policy">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Privacy Policy (PAM DSL)</h1>
+  <p style="color: #6c757d; margin-bottom: 20px;">
+    Privacy Access Management policies defined using PAM DSL. These policies control data access,
+    define PII field types, processing purposes, and data retention rules.
+  </p>
+
+  <% if !@pam_dsl_available %>
+    <div class="empty-state" style="background: #fff3cd; border-color: #ffc107;">
+      <h3>PAM DSL Not Available</h3>
+      <p>Privacy policy features require PAM DSL to be installed.</p>
+      <p style="margin-top: 15px; font-size: 13px;">
+        Add <code>gem 'pam_dsl'</code> to your Gemfile and run <code>bundle install</code>.
+      </p>
+    </div>
+  <% elsif @policies.any? %>
+    <h2 style="margin-top: 0;">Registered Policies</h2>
+    <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+      Overview of all privacy policies defined in the application.
+    </p>
+
+    <% @policies.each do |name, policy| %>
+      <div class="policy-card">
+        <div class="policy-header">
+          <h3><%= name.to_s.titleize %></h3>
+          <% if @default_policy_name&.to_sym == name %>
+            <span class="badge badge-default">Default Policy</span>
+          <% end %>
+        </div>
+        <div class="policy-body">
+          <% policy_data = policy.respond_to?(:to_h) ? policy.to_h : {} %>
+
+          <div class="summary-cards">
+            <div class="summary-card">
+              <div class="value"><%= policy.respond_to?(:fields) ? policy.fields.count : 0 %></div>
+              <div class="label">PII Fields</div>
+            </div>
+            <div class="summary-card">
+              <div class="value"><%= policy.respond_to?(:purposes) ? policy.purposes.count : 0 %></div>
+              <div class="label">Purposes</div>
+            </div>
+            <div class="summary-card">
+              <div class="value"><%= policy.respond_to?(:sensitive_fields) ? policy.sensitive_fields.count : 0 %></div>
+              <div class="label">Sensitive Fields</div>
+            </div>
+            <div class="summary-card">
+              <div class="value"><%= policy.respond_to?(:restricted_fields) ? policy.restricted_fields.count : 0 %></div>
+              <div class="label">Restricted Fields</div>
+            </div>
+          </div>
+
+          <% if policy.respond_to?(:fields) && policy.fields.any? %>
+            <div class="section">
+              <h3>PII Fields</h3>
+              <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+                Fields containing personally identifiable information with their type and sensitivity level.
+              </p>
+              <div class="field-grid">
+                <% policy.fields.each do |field_name, field| %>
+                  <div class="field-item">
+                    <div class="field-name"><%= field_name %></div>
+                    <div class="field-meta">
+                      <span class="type-badge"><%= field.respond_to?(:type) ? field.type : 'unknown' %></span>
+                      <% sensitivity = field.respond_to?(:sensitivity) ? field.sensitivity : :internal %>
+                      <span class="sensitivity-<%= sensitivity %>"><%= sensitivity.to_s.titleize %></span>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+
+          <% if policy.respond_to?(:purposes) && policy.purposes.any? %>
+            <div class="section">
+              <h3>Processing Purposes</h3>
+              <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+                Legal bases and purposes for processing personal data under GDPR.
+              </p>
+              <% policy.purposes.each do |purpose_name, purpose| %>
+                <div class="purpose-item">
+                  <h4><%= purpose_name.to_s.titleize %></h4>
+                  <% if purpose.respond_to?(:description) && purpose.description.present? %>
+                    <p><%= purpose.description %></p>
+                  <% end %>
+                  <% if purpose.respond_to?(:legal_basis) %>
+                    <span class="legal-basis">Legal Basis: <%= purpose.legal_basis.to_s.titleize %></span>
+                  <% end %>
+                  <% if purpose.respond_to?(:required_fields) && purpose.required_fields.any? %>
+                    <div class="required-fields">
+                      <strong>Required fields:</strong> <%= purpose.required_fields.join(', ') %>
+                    </div>
+                  <% end %>
+                </div>
+              <% end %>
+            </div>
+          <% end %>
+
+          <% if policy.respond_to?(:retention_policy) %>
+            <% retention = policy.retention_policy %>
+            <% if retention.respond_to?(:rules) && retention.rules.any? %>
+              <div class="section">
+                <h3>Data Retention</h3>
+                <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+                  How long personal data is retained before deletion or anonymization.
+                </p>
+                <table class="retention-table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Retention Period</th>
+                      <th>On Expiry</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% if retention.respond_to?(:default_duration) && retention.default_duration %>
+                      <tr>
+                        <td><em>Default</em></td>
+                        <td><%= retention.default_duration.inspect %></td>
+                        <td>Delete</td>
+                      </tr>
+                    <% end %>
+                    <% retention.rules.each do |rule| %>
+                      <tr>
+                        <td><%= rule.respond_to?(:model_class) ? rule.model_class : 'Unknown' %></td>
+                        <td><%= rule.respond_to?(:duration) ? rule.duration.inspect : 'N/A' %></td>
+                        <td><%= rule.respond_to?(:deletion_strategy) ? rule.deletion_strategy.to_s.titleize : 'Delete' %></td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% else %>
+    <div class="empty-state">
+      <h3>No Privacy Policies Defined</h3>
+      <p>Use PAM DSL to define privacy policies for your application.</p>
+      <p style="margin-top: 15px; font-size: 13px;">
+        Add <code>PamDsl.define_policy :my_policy do ... end</code> in an initializer.
+      </p>
+    </div>
+  <% end %>
+</div>

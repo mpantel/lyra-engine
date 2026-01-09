@@ -1,0 +1,46 @@
+#!/usr/bin/env ruby
+
+require "bundler/setup"
+
+# CI-friendly test runner script
+exit_code = 0
+
+puts "=" * 80
+puts "Lyra Monorepo Test Suite"
+puts "=" * 80
+
+# Component test runners
+components = [
+  { name: "PetriFlow", dir: "gems/petri_flow" },
+  { name: "PAM DSL", dir: "gems/pam_dsl" },
+  { name: "Lyra", dir: "." }
+]
+
+failed_components = []
+
+components.each do |component|
+  puts "\n#{'-' * 80}"
+  puts "Testing #{component[:name]}"
+  puts '-' * 80
+
+  Dir.chdir(component[:dir]) do
+    if system("bundle exec rake test")
+      puts "✓ #{component[:name]} tests passed"
+    else
+      puts "✗ #{component[:name]} tests failed"
+      failed_components << component[:name]
+      exit_code = 1
+    end
+  end
+end
+
+puts "\n#{'=' * 80}"
+if failed_components.empty?
+  puts "All tests passed! ✓"
+  puts '=' * 80
+else
+  puts "Failed components: #{failed_components.join(', ')}"
+  puts '=' * 80
+end
+
+exit exit_code

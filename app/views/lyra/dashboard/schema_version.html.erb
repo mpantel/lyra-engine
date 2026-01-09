@@ -1,0 +1,340 @@
+<style>
+  .lyra-schema-version { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-schema-version h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-schema-version h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-schema-version h3 { color: #495057; margin-top: 20px; font-size: 16px; }
+  .lyra-schema-version .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-schema-version .back-link:hover { text-decoration: underline; }
+  .lyra-schema-version .section-desc { color: #6c757d; font-size: 13px; margin-bottom: 15px; }
+  .lyra-schema-version .nav-buttons { display: flex; gap: 10px; }
+  .lyra-schema-version .nav-btn { padding: 6px 12px; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 4px; color: #495057; text-decoration: none; font-size: 13px; }
+  .lyra-schema-version .nav-btn:hover { background: #e9ecef; }
+  .lyra-schema-version .nav-btn.disabled { opacity: 0.5; pointer-events: none; }
+  .lyra-schema-version .config-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-schema-version .config-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-schema-version .config-header h4 { margin: 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-schema-version .config-body { padding: 20px; }
+  .lyra-schema-version .config-table { width: 100%; border-collapse: collapse; }
+  .lyra-schema-version .config-table th { text-align: left; padding: 10px 15px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; width: 180px; }
+  .lyra-schema-version .config-table td { padding: 10px 15px; border-bottom: 1px solid #eee; }
+  .lyra-schema-version .config-table tr:last-child td { border-bottom: none; }
+  .lyra-schema-version .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-schema-version .badge-success { background: #d4edda; color: #155724; }
+  .lyra-schema-version .badge-warning { background: #fff3cd; color: #856404; }
+  .lyra-schema-version .badge-info { background: #cce5ff; color: #004085; }
+  .lyra-schema-version .badge-secondary { background: #e2e3e5; color: #383d41; }
+  .lyra-schema-version .badge-danger { background: #f8d7da; color: #721c24; }
+  .lyra-schema-version .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+  .lyra-schema-version .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; text-align: center; }
+  .lyra-schema-version .summary-card .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+  .lyra-schema-version .summary-card .label { color: #6c757d; font-size: 12px; margin-top: 5px; }
+  .lyra-schema-version .model-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-schema-version .model-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; }
+  .lyra-schema-version .model-header h4 { margin: 0 0 5px 0; font-size: 18px; color: #1a1a2e; }
+  .lyra-schema-version .model-header .model-meta { font-size: 12px; color: #6c757d; }
+  .lyra-schema-version .model-body { padding: 20px; }
+  .lyra-schema-version .column-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .lyra-schema-version .column-table th { text-align: left; padding: 8px 12px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; }
+  .lyra-schema-version .column-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
+  .lyra-schema-version .column-table tr:last-child td { border-bottom: none; }
+  .lyra-schema-version .column-table code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+  .lyra-schema-version .pii-badge { background: #f8d7da; color: #721c24; font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+  .lyra-schema-version .pk-badge { background: #cce5ff; color: #004085; font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+  .lyra-schema-version .events-list { margin: 15px 0 0 0; padding: 0; list-style: none; }
+  .lyra-schema-version .events-list li { padding: 10px 15px; background: #f8f9fa; border-radius: 6px; margin-bottom: 8px; }
+  .lyra-schema-version .events-list .event-name { font-weight: 600; color: #1a1a2e; font-family: monospace; }
+  .lyra-schema-version .events-list .event-operation { font-size: 12px; color: #6c757d; margin-left: 10px; }
+  .lyra-schema-version .events-list .event-fields { font-size: 11px; color: #6c757d; margin-top: 5px; }
+  .lyra-schema-version .change-list { margin: 15px 0; padding: 0; list-style: none; }
+  .lyra-schema-version .change-item { padding: 12px 15px; border-left: 4px solid #ffc107; background: #fffbea; margin-bottom: 10px; border-radius: 0 4px 4px 0; }
+  .lyra-schema-version .change-item.added { border-left-color: #28a745; background: #f0fff4; }
+  .lyra-schema-version .change-item.removed { border-left-color: #dc3545; background: #fff5f5; }
+  .lyra-schema-version .change-item.modified { border-left-color: #007bff; background: #f0f7ff; }
+  .lyra-schema-version .change-type { font-weight: 600; font-size: 12px; text-transform: uppercase; margin-bottom: 4px; }
+  .lyra-schema-version .change-detail { font-size: 13px; color: #495057; }
+  .lyra-schema-version .no-changes { color: #28a745; font-style: italic; padding: 20px; text-align: center; background: #f0fff4; border-radius: 6px; }
+  .lyra-schema-version code { background: #f8f9fa; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .lyra-schema-version pre.json-block code { background: transparent; color: #f8f9fa; padding: 0; }
+  .lyra-schema-version .subsection { margin-top: 20px; padding-top: 15px; border-top: 1px solid #eee; }
+  .lyra-schema-version .subsection-title { font-size: 14px; font-weight: 600; color: #495057; margin-bottom: 10px; }
+</style>
+
+<div class="lyra-schema-version">
+  <%= link_to "&larr; Back to Schema Registry".html_safe, schema_path, class: "back-link" %>
+
+  <h1>
+    <span>Schema Version <%= @version %></span>
+    <span class="nav-buttons">
+      <% if @prev_version %>
+        <%= link_to "&larr; v#{@prev_version}".html_safe, schema_version_path(version: @prev_version), class: "nav-btn" %>
+      <% else %>
+        <span class="nav-btn disabled">&larr; Previous</span>
+      <% end %>
+      <% if @next_version %>
+        <%= link_to "v#{@next_version} &rarr;".html_safe, schema_version_path(version: @next_version), class: "nav-btn" %>
+      <% else %>
+        <span class="nav-btn disabled">Next &rarr;</span>
+      <% end %>
+    </span>
+  </h1>
+
+  <p class="section-desc">
+    Complete schema snapshot including all model definitions, column types, event mappings, and PII classifications.
+  </p>
+
+  <!-- Metadata Section -->
+  <div class="config-card">
+    <div class="config-header">
+      <h4>Version Metadata</h4>
+      <span class="badge badge-info">v<%= @version %></span>
+    </div>
+    <div class="config-body">
+      <table class="config-table">
+        <tr>
+          <th>Version</th>
+          <td><strong><%= @version %></strong></td>
+        </tr>
+        <tr>
+          <th>Fingerprint</th>
+          <td><code style="font-size: 11px;"><%= @fingerprint %></code></td>
+        </tr>
+        <tr>
+          <th>Created At</th>
+          <td><%= @created_at.is_a?(String) ? @created_at : @created_at&.strftime("%Y-%m-%d %H:%M:%S %Z") %></td>
+        </tr>
+        <tr>
+          <th>Lyra Version</th>
+          <td><%= @lyra_version %></td>
+        </tr>
+        <tr>
+          <th>Rails Version</th>
+          <td><%= @rails_version || "unknown" %></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- Summary Statistics -->
+  <h2 style="margin-top: 0;">Summary</h2>
+  <div class="summary-cards">
+    <div class="summary-card">
+      <div class="value"><%= @summary[:models_count] || @models.size %></div>
+      <div class="label">Models</div>
+    </div>
+    <div class="summary-card">
+      <div class="value"><%= @summary[:total_columns] || 0 %></div>
+      <div class="label">Total Columns</div>
+    </div>
+    <div class="summary-card">
+      <div class="value" style="color: #dc3545;"><%= @summary[:pii_fields_count] || 0 %></div>
+      <div class="label">PII Fields</div>
+    </div>
+    <div class="summary-card">
+      <div class="value" style="color: #007bff;"><%= @summary[:events_count] || 0 %></div>
+      <div class="label">Event Types</div>
+    </div>
+  </div>
+
+  <!-- Configuration -->
+  <h2>Configuration</h2>
+  <p class="section-desc">Lyra configuration settings captured in this schema version.</p>
+
+  <div class="config-card">
+    <div class="config-body">
+      <table class="config-table">
+        <tr>
+          <th>Operating Mode</th>
+          <td>
+            <span class="badge badge-<%= @configuration[:mode] == 'event_sourcing' ? 'info' : (@configuration[:mode] == 'hijack' ? 'warning' : 'success') %>">
+              <%= @configuration[:mode]&.to_s&.titleize || "Not set" %>
+            </span>
+          </td>
+        </tr>
+        <tr>
+          <th>Projection Mode</th>
+          <td><%= @configuration[:projection_mode]&.to_s&.titleize || "Not set" %></td>
+        </tr>
+        <tr>
+          <th>Strict Schema</th>
+          <td><%= @configuration[:strict_schema] ? "Enabled" : "Disabled" %></td>
+        </tr>
+        <tr>
+          <th>Retention Policy</th>
+          <td><%= @configuration[:retention_policy] || "Not configured" %></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <% if @diff_from_previous.present? && @diff_from_previous.any? %>
+    <h2>Changes from v<%= @prev_version %></h2>
+    <p class="section-desc">
+      Differences between this version and the previous version (v<%= @prev_version %>).
+    </p>
+
+    <ul class="change-list">
+      <% @diff_from_previous.each do |change| %>
+        <li class="change-item <%= change[:type] || change['type'] %>">
+          <div class="change-type"><%= change[:type] || change['type'] %></div>
+          <div class="change-detail">
+            <% if change[:model] || change['model'] %>
+              <strong>Model:</strong> <%= change[:model] || change['model'] %><br>
+            <% end %>
+            <% if change[:field] || change['field'] %>
+              <strong>Field:</strong> <%= change[:field] || change['field'] %><br>
+            <% end %>
+            <% if change[:description] || change['description'] %>
+              <%= change[:description] || change['description'] %>
+            <% end %>
+            <% if change[:from] || change['from'] || change[:to] || change['to'] %>
+              <strong>From:</strong> <%= change[:from] || change['from'] || "(none)" %> &rarr;
+              <strong>To:</strong> <%= change[:to] || change['to'] || "(none)" %>
+            <% end %>
+          </div>
+        </li>
+      <% end %>
+    </ul>
+  <% elsif @prev_version %>
+    <h2>Changes from v<%= @prev_version %></h2>
+    <p class="no-changes">No structural changes from the previous version.</p>
+  <% end %>
+
+  <!-- Models -->
+  <h2>Model Definitions</h2>
+  <p class="section-desc">
+    Complete schema for each monitored model including columns, types, constraints, and event mappings.
+  </p>
+
+  <% @models.each do |model_name, model_data| %>
+    <div class="model-card">
+      <div class="model-header">
+        <h4><%= model_name %></h4>
+        <div class="model-meta">
+          Table: <code><%= model_data[:table_name] || model_data["table_name"] || "unknown" %></code>
+          &nbsp;|&nbsp;
+          Event Prefix: <code><%= model_data[:event_prefix] || model_data["event_prefix"] || model_name %></code>
+          <% if model_data[:aggregate_class] || model_data["aggregate_class"] %>
+            &nbsp;|&nbsp;
+            Aggregate: <code><%= model_data[:aggregate_class] || model_data["aggregate_class"] %></code>
+          <% end %>
+          <% if model_data[:privacy_policy] || model_data["privacy_policy"] %>
+            &nbsp;|&nbsp;
+            Privacy: <code><%= model_data[:privacy_policy] || model_data["privacy_policy"] %></code>
+          <% end %>
+        </div>
+      </div>
+      <div class="model-body">
+        <!-- Columns -->
+        <div class="subsection-title">Columns</div>
+        <% columns = model_data[:columns] || model_data["columns"] || {} %>
+        <% if columns.any? %>
+          <table class="column-table">
+            <thead>
+              <tr>
+                <th style="width: 200px;">Column</th>
+                <th style="width: 100px;">Type</th>
+                <th style="width: 80px;">Nullable</th>
+                <th style="width: 80px;">Limit</th>
+                <th>Default</th>
+                <th style="width: 80px;">Flags</th>
+              </tr>
+            </thead>
+            <tbody>
+              <% columns.each do |col_name, col_info| %>
+                <tr>
+                  <td><code><%= col_name %></code></td>
+                  <td><%= col_info[:type] || col_info["type"] || "unknown" %></td>
+                  <td><%= (col_info[:nullable] || col_info["nullable"]) ? "Yes" : "No" %></td>
+                  <td><%= col_info[:limit] || col_info["limit"] || "-" %></td>
+                  <td><code><%= col_info[:default] || col_info["default"] || "NULL" %></code></td>
+                  <td>
+                    <% if col_info[:primary_key] || col_info["primary_key"] %>
+                      <span class="pk-badge">PK</span>
+                    <% end %>
+                    <% if col_info[:pii] || col_info["pii"] %>
+                      <span class="pii-badge"><%= col_info[:pii_type] || col_info["pii_type"] || "PII" %></span>
+                    <% end %>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
+        <% else %>
+          <p style="color: #6c757d; font-style: italic;">No columns captured</p>
+        <% end %>
+
+        <!-- Events -->
+        <div class="subsection">
+          <div class="subsection-title">Events</div>
+          <% events = model_data[:events] || model_data["events"] || {} %>
+          <% if events.any? %>
+            <ul class="events-list">
+              <% events.each do |event_name, event_info| %>
+                <li>
+                  <span class="event-name"><%= event_name %></span>
+                  <span class="event-operation">(<%= event_info[:operation] || event_info["operation"] %>)</span>
+                  <div class="event-fields">
+                    <strong>Data:</strong> <%= (event_info[:data_fields] || event_info["data_fields"] || []).join(", ") %>
+                    <% pii = event_info[:pii_fields] || event_info["pii_fields"] || [] %>
+                    <% if pii.any? %>
+                      <br><strong style="color: #dc3545;">PII Fields:</strong> <%= pii.join(", ") %>
+                    <% end %>
+                  </div>
+                </li>
+              <% end %>
+            </ul>
+          <% else %>
+            <p style="color: #6c757d; font-style: italic;">No events defined</p>
+          <% end %>
+        </div>
+
+        <!-- Custom Events -->
+        <% custom_events = model_data[:custom_events] || model_data["custom_events"] || {} %>
+        <% if custom_events.any? %>
+          <div class="subsection">
+            <div class="subsection-title">Custom Event Mappings</div>
+            <table class="column-table">
+              <thead>
+                <tr>
+                  <th>Method</th>
+                  <th>Event Name</th>
+                </tr>
+              </thead>
+              <tbody>
+                <% custom_events.each do |method, event_name| %>
+                  <tr>
+                    <td><code><%= method %></code></td>
+                    <td><code><%= event_name %></code></td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+
+  <% if @models.empty? %>
+    <div class="config-card">
+      <div class="config-body" style="text-align: center; padding: 40px; color: #6c757d;">
+        <p>No models were captured in this schema version.</p>
+      </div>
+    </div>
+  <% end %>
+
+  <!-- Raw JSON -->
+  <h2>Raw Schema (JSON)</h2>
+  <p class="section-desc">
+    The complete schema data in JSON format. Click to expand.
+  </p>
+
+  <details class="config-card">
+    <summary style="padding: 15px 20px; cursor: pointer; background: #f8f9fa; border-bottom: 1px solid #dee2e6;">
+      <strong>View Raw JSON</strong>
+    </summary>
+    <div class="config-body">
+      <pre class="json-block" style="background: #1a1a2e; color: #f8f9fa; padding: 20px; border-radius: 6px; overflow-x: auto; font-size: 12px;"><code><%= JSON.pretty_generate(@schema) %></code></pre>
+    </div>
+  </details>
+</div>

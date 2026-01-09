@@ -1,0 +1,125 @@
+<style>
+  .lyra-crud-mapping { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-crud-mapping h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-crud-mapping h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-crud-mapping .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-crud-mapping .back-link:hover { text-decoration: underline; }
+  .lyra-crud-mapping .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
+  .lyra-crud-mapping .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+  .lyra-crud-mapping .summary-card .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+  .lyra-crud-mapping .summary-card .label { color: #6c757d; font-size: 13px; margin-top: 5px; }
+  .lyra-crud-mapping .model-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 15px; overflow: hidden; }
+  .lyra-crud-mapping .model-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-crud-mapping .model-header h3 { margin: 0; color: #1a1a2e; font-size: 16px; }
+  .lyra-crud-mapping .model-header .total { background: #4a4e69; color: #fff; padding: 4px 12px; border-radius: 12px; font-size: 12px; }
+  .lyra-crud-mapping .operations { padding: 15px 20px; display: flex; flex-wrap: wrap; gap: 15px; }
+  .lyra-crud-mapping .operation-stat { display: flex; flex-direction: column; align-items: center; padding: 15px 25px; border-radius: 6px; min-width: 100px; }
+  .lyra-crud-mapping .operation-stat .count { font-size: 24px; font-weight: 700; }
+  .lyra-crud-mapping .operation-stat .label { font-size: 12px; text-transform: uppercase; margin-top: 5px; }
+  .lyra-crud-mapping .op-created { background: #d4edda; color: #155724; }
+  .lyra-crud-mapping .op-updated { background: #fff3cd; color: #856404; }
+  .lyra-crud-mapping .op-destroyed { background: #f8d7da; color: #721c24; }
+  .lyra-crud-mapping .empty-state { text-align: center; padding: 40px; color: #6c757d; background: #fff; border: 1px solid #dee2e6; border-radius: 8px; }
+  .lyra-crud-mapping .matrix-table { width: 100%; border-collapse: collapse; margin-top: 20px; background: #fff; border-radius: 8px; overflow: hidden; border: 1px solid #dee2e6; }
+  .lyra-crud-mapping .matrix-table th { background: #f8f9fa; padding: 12px 15px; text-align: left; border-bottom: 1px solid #dee2e6; font-weight: 600; }
+  .lyra-crud-mapping .matrix-table td { padding: 12px 15px; border-bottom: 1px solid #eee; }
+  .lyra-crud-mapping .matrix-table tr:last-child td { border-bottom: none; }
+  .lyra-crud-mapping .matrix-table .model-name { font-weight: 500; }
+  .lyra-crud-mapping .matrix-table .count-cell { text-align: center; }
+  .lyra-crud-mapping .matrix-table .count-badge { display: inline-block; min-width: 30px; padding: 4px 8px; border-radius: 4px; font-weight: 600; text-align: center; }
+</style>
+
+<div class="lyra-crud-mapping">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>CRUD Mapping</h1>
+  <p style="color: #6c757d;">Shows how CRUD operations map to events in the event store.</p>
+
+  <h2 style="margin-top: 0;">Overview</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Total event counts by operation type. This helps understand the overall activity pattern in your application.
+  </p>
+  <div class="summary-cards">
+    <div class="summary-card">
+      <div class="value"><%= @total_events %></div>
+      <div class="label">Total Events</div>
+    </div>
+    <% (@operations_summary || {}).each do |op, count| %>
+      <div class="summary-card">
+        <div class="value"><%= count %></div>
+        <div class="label"><%= op.to_s.titleize %></div>
+      </div>
+    <% end %>
+  </div>
+
+  <h2>CRUD Matrix by Model</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Tabular view of all CRUD operations across models. Useful for identifying which models have the most activity
+    and understanding the create/update/delete ratio.
+  </p>
+
+  <% if @models_summary&.any? %>
+    <table class="matrix-table">
+      <thead>
+        <tr>
+          <th>Model</th>
+          <th class="count-cell">Created</th>
+          <th class="count-cell">Updated</th>
+          <th class="count-cell">Destroyed</th>
+          <th class="count-cell">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% @models_summary.each do |model, data| %>
+          <tr>
+            <td class="model-name"><%= model %></td>
+            <td class="count-cell">
+              <span class="count-badge op-created"><%= data[:operations][:created] || 0 %></span>
+            </td>
+            <td class="count-cell">
+              <span class="count-badge op-updated"><%= data[:operations][:updated] || 0 %></span>
+            </td>
+            <td class="count-cell">
+              <span class="count-badge op-destroyed"><%= data[:operations][:destroyed] || 0 %></span>
+            </td>
+            <td class="count-cell">
+              <strong><%= data[:total] %></strong>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% else %>
+    <div class="empty-state">
+      <p>No CRUD events found.</p>
+      <p>Events will appear here as operations are performed on monitored models.</p>
+    </div>
+  <% end %>
+
+  <h2>Events by Model</h2>
+  <p style="color: #6c757d; font-size: 13px; margin-bottom: 15px;">
+    Visual cards showing operation distribution per model. Color-coded badges indicate operation types:
+    <span style="background: #d4edda; padding: 2px 8px; border-radius: 4px; color: #155724;">Created</span>
+    <span style="background: #fff3cd; padding: 2px 8px; border-radius: 4px; color: #856404;">Updated</span>
+    <span style="background: #f8d7da; padding: 2px 8px; border-radius: 4px; color: #721c24;">Destroyed</span>
+  </p>
+
+  <% if @models_summary&.any? %>
+    <% @models_summary.each do |model, data| %>
+      <div class="model-card">
+        <div class="model-header">
+          <h3><%= model %></h3>
+          <span class="total"><%= data[:total] %> event<%= data[:total] != 1 ? 's' : '' %></span>
+        </div>
+        <div class="operations">
+          <% data[:operations].each do |op, count| %>
+            <div class="operation-stat op-<%= op %>">
+              <span class="count"><%= count %></span>
+              <span class="label"><%= op %></span>
+            </div>
+          <% end %>
+        </div>
+      </div>
+    <% end %>
+  <% end %>
+</div>

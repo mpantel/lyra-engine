@@ -1,0 +1,302 @@
+<style>
+  .lyra-projections { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-projections h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-projections h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-projections .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-projections .back-link:hover { text-decoration: underline; }
+  .lyra-projections .config-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 20px; overflow: hidden; }
+  .lyra-projections .config-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; }
+  .lyra-projections .config-header h3 { margin: 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-projections .config-body { padding: 20px; }
+  .lyra-projections .config-table { width: 100%; border-collapse: collapse; }
+  .lyra-projections .config-table th { text-align: left; padding: 10px 15px; background: #f8f9fa; border-bottom: 1px solid #dee2e6; font-weight: 600; color: #495057; width: 200px; }
+  .lyra-projections .config-table td { padding: 10px 15px; border-bottom: 1px solid #eee; }
+  .lyra-projections .config-table tr:last-child td { border-bottom: none; }
+  .lyra-projections .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-projections .badge-mode-monitor { background: #d4edda; color: #155724; }
+  .lyra-projections .badge-mode-hijack { background: #fff3cd; color: #856404; }
+  .lyra-projections .badge-mode-event_sourcing { background: #cce5ff; color: #004085; }
+  .lyra-projections .badge-mode-disabled { background: #f8d7da; color: #721c24; }
+  .lyra-projections .badge-sync { background: #d4edda; color: #155724; }
+  .lyra-projections .badge-async { background: #fff3cd; color: #856404; }
+  .lyra-projections .badge-disabled { background: #f8d7da; color: #721c24; }
+  .lyra-projections .badge-inline { background: #e2e3e5; color: #383d41; }
+  .lyra-projections .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 20px; margin: 20px 0; }
+  .lyra-projections .summary-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; text-align: center; }
+  .lyra-projections .summary-card .value { font-size: 36px; font-weight: 700; color: #1a1a2e; }
+  .lyra-projections .summary-card .label { color: #6c757d; font-size: 14px; margin-top: 5px; }
+  .lyra-projections .projection-type { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 15px; }
+  .lyra-projections .projection-type h4 { margin: 0 0 10px 0; color: #1a1a2e; font-size: 16px; display: flex; align-items: center; gap: 10px; }
+  .lyra-projections .projection-type .description { color: #495057; font-size: 14px; margin-bottom: 10px; }
+  .lyra-projections .projection-type .use-case { color: #6c757d; font-size: 13px; font-style: italic; }
+  .lyra-projections .projection-type .meta { margin-top: 10px; display: flex; gap: 15px; }
+  .lyra-projections .projection-type .meta-item { font-size: 12px; color: #6c757d; }
+  .lyra-projections .projection-type .meta-item strong { color: #495057; }
+  .lyra-projections .model-stat-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; margin-bottom: 15px; overflow: hidden; }
+  .lyra-projections .model-stat-header { background: #f8f9fa; padding: 15px 20px; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; }
+  .lyra-projections .model-stat-header h4 { margin: 0; font-size: 16px; color: #1a1a2e; }
+  .lyra-projections .model-stat-header .last-event { font-size: 12px; color: #6c757d; }
+  .lyra-projections .model-stat-body { padding: 20px; }
+  .lyra-projections .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 15px; margin-bottom: 15px; }
+  .lyra-projections .stat-item { text-align: center; padding: 10px; background: #f8f9fa; border-radius: 6px; }
+  .lyra-projections .stat-item .value { font-size: 24px; font-weight: 700; }
+  .lyra-projections .stat-item .label { font-size: 11px; color: #6c757d; text-transform: uppercase; }
+  .lyra-projections .stat-item.created .value { color: #28a745; }
+  .lyra-projections .stat-item.updated .value { color: #007bff; }
+  .lyra-projections .stat-item.destroyed .value { color: #dc3545; }
+  .lyra-projections .config-list { font-size: 13px; color: #6c757d; }
+  .lyra-projections .config-list dt { font-weight: 600; color: #495057; margin-top: 8px; }
+  .lyra-projections .config-list dd { margin: 0 0 0 15px; }
+  .lyra-projections .mode-desc { color: #6c757d; font-size: 13px; margin-top: 5px; }
+  .lyra-projections .section-desc { color: #6c757d; font-size: 13px; margin-bottom: 15px; }
+  .lyra-projections .icon { width: 20px; height: 20px; display: inline-block; }
+</style>
+
+<div class="lyra-projections">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Projections & Configuration</h1>
+  <p class="section-desc">
+    Projections are the mechanism that rebuilds read models (database state) from events.
+    In event sourcing, the event log is the source of truth, and projections derive the current state.
+  </p>
+
+  <h2 style="margin-top: 0;">Current Configuration</h2>
+  <p class="section-desc">
+    Active Lyra mode and projection settings that control how events are processed and projected.
+  </p>
+
+  <div class="config-card">
+    <div class="config-header">
+      <h3>Lyra Settings</h3>
+    </div>
+    <div class="config-body">
+      <table class="config-table">
+        <tr>
+          <th>Operating Mode</th>
+          <td>
+            <span class="badge badge-mode-<%= @mode %>"><%= @mode.to_s.titleize %></span>
+            <p class="mode-desc">
+              <% case @mode.to_sym
+                 when :monitor %>
+                   Events are recorded after database saves. Database is the source of truth. Projections are not used for writes.
+                 <% when :hijack %>
+                   Events are recorded before database saves. Allows intercepting and modifying operations before persistence.
+                 <% when :event_sourcing %>
+                   Events are the source of truth. Database tables are updated via projections only. No direct ActiveRecord saves.
+                 <% when :disabled %>
+                   Event tracking is disabled. No events are recorded and projections are inactive.
+                 <% end %>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <th>Projection Mode</th>
+          <td>
+            <span class="badge badge-<%= @projection_mode %>"><%= @projection_mode.to_s.titleize %></span>
+            <% if @projection_mode.to_sym == :async && @async_inline %>
+              <span class="badge badge-inline" style="margin-left: 8px;">Inline (Test Mode)</span>
+            <% end %>
+            <p class="mode-desc">
+              <% case @projection_mode.to_sym
+                 when :sync %>
+                   Projections run synchronously after each event. Immediate consistency - reads always see latest writes.
+                   Trade-off: Slower write operations as projections must complete before response.
+                 <% when :async %>
+                   Projections run asynchronously via ActiveJob (<code>lyra_projections</code> queue).
+                   Eventual consistency - reads may be briefly stale. Trade-off: Faster writes, requires job infrastructure.
+                   <% if @async_inline %>
+                   <br><strong>Note:</strong> Currently running inline for testing (async_projections_inline = true).
+                   <% end %>
+                 <% when :disabled %>
+                   Projections are disabled. Events are stored but read models are not updated automatically.
+                   Use <code>StateProjection.rebuild_state</code> for manual replay when needed.
+                 <% end %>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <th>Strict Projections</th>
+          <td>
+            <span class="badge <%= @strict_projections ? 'badge-sync' : 'badge-disabled' %>">
+              <%= @strict_projections ? 'Enabled' : 'Disabled' %>
+            </span>
+            <p class="mode-desc">
+              <% if @strict_projections %>
+                Projection errors raise exceptions and halt processing. Use in development to catch issues early.
+              <% else %>
+                Projection errors are logged but do not halt processing. More resilient in production.
+              <% end %>
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <th>Monitored Models</th>
+          <td><%= @monitored_models.count %> models with <code>monitor_with_lyra</code></td>
+        </tr>
+      </table>
+    </div>
+  </div>
+
+  <% unless user_tracking_configured? %>
+    <h2>User Tracking Setup</h2>
+    <p class="section-desc">
+      Lyra captures user_id for audit trails via Rails' CurrentAttributes. Configure your app to track who made changes.
+    </p>
+    <div class="config-card">
+      <div class="config-header">
+        <h3>Required Setup for User Tracking</h3>
+      </div>
+      <div class="config-body">
+        <p style="margin: 0 0 15px 0; color: #495057;">
+          Lyra reads <code>Current.user</code> to capture who made each change. Add this to your application:
+        </p>
+        <pre style="background: #f8f9fa; padding: 15px; border-radius: 6px; font-size: 13px; overflow-x: auto; margin: 0 0 15px 0;"><code># app/models/current.rb
+class Current < ActiveSupport::CurrentAttributes
+  attribute :user
+  attribute :request_id
+end
+
+# app/controllers/application_controller.rb
+class ApplicationController < ActionController::Base
+  before_action :set_current_user
+
+  private
+
+  def set_current_user
+    Current.user = current_user  # your auth method
+    Current.request_id = request.request_id
+  end
+end</code></pre>
+        <p style="margin: 0; color: #6c757d; font-size: 13px;">
+          Once configured, every event will include the user_id in metadata, shown in audit trails with the user's name (e.g., "by John Doe (Admin)").
+        </p>
+      </div>
+    </div>
+  <% end %>
+
+  <h2>Projection Types</h2>
+  <p class="section-desc">
+    Lyra provides several projection types for different use cases. Each projection transforms
+    events into a different view of the data.
+  </p>
+
+  <% @projection_types.each do |proj| %>
+    <div class="projection-type">
+      <h4>
+        <span class="badge badge-mode-event_sourcing"><%= proj[:name] %></span>
+      </h4>
+      <p class="description"><%= proj[:description] %></p>
+      <p class="use-case">Use case: <%= proj[:use_case] %></p>
+      <% if proj[:queue] || proj[:retry_attempts] %>
+        <div class="meta">
+          <% if proj[:queue] %>
+            <span class="meta-item"><strong>Queue:</strong> <%= proj[:queue] %></span>
+          <% end %>
+          <% if proj[:retry_attempts] %>
+            <span class="meta-item"><strong>Retry attempts:</strong> <%= proj[:retry_attempts] %></span>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <h2>Model Statistics</h2>
+  <p class="section-desc">
+    Event counts, operation breakdown, and projection status for each monitored model.
+    The operation breakdown shows how many create, update, and destroy events have been recorded.
+  </p>
+
+  <%
+    total_events = @model_stats.values.sum { |s| s[:events] }
+    total_records = @model_stats.values.sum { |s| s[:records] }
+    total_created = @model_stats.values.sum { |s| s[:created] }
+    total_updated = @model_stats.values.sum { |s| s[:updated] }
+    total_destroyed = @model_stats.values.sum { |s| s[:destroyed] }
+  %>
+  <div class="summary-cards">
+    <div class="summary-card">
+      <div class="value"><%= @monitored_models.count %></div>
+      <div class="label">Monitored Models</div>
+    </div>
+    <div class="summary-card">
+      <div class="value"><%= total_records %></div>
+      <div class="label">Total Records</div>
+    </div>
+    <div class="summary-card">
+      <div class="value"><%= total_events %></div>
+      <div class="label">Total Events</div>
+    </div>
+    <div class="summary-card">
+      <div class="value" style="color: #28a745;"><%= total_created %></div>
+      <div class="label">Created</div>
+    </div>
+    <div class="summary-card">
+      <div class="value" style="color: #007bff;"><%= total_updated %></div>
+      <div class="label">Updated</div>
+    </div>
+    <div class="summary-card">
+      <div class="value" style="color: #dc3545;"><%= total_destroyed %></div>
+      <div class="label">Destroyed</div>
+    </div>
+  </div>
+
+  <% @model_stats.each do |model_name, stats| %>
+    <div class="model-stat-card">
+      <div class="model-stat-header">
+        <h4><%= model_name %></h4>
+        <% if stats[:last_event_at] %>
+          <span class="last-event">Last event: <%= stats[:last_event_at].is_a?(String) ? stats[:last_event_at] : stats[:last_event_at]&.strftime("%Y-%m-%d %H:%M:%S") %></span>
+        <% end %>
+      </div>
+      <div class="model-stat-body">
+        <div class="stat-grid">
+          <div class="stat-item">
+            <div class="value"><%= stats[:records] %></div>
+            <div class="label">Records</div>
+          </div>
+          <div class="stat-item">
+            <div class="value"><%= stats[:events] %></div>
+            <div class="label">Events</div>
+          </div>
+          <div class="stat-item">
+            <div class="value"><%= stats[:avg_events_per_record] %></div>
+            <div class="label">Avg/Record</div>
+          </div>
+          <div class="stat-item created">
+            <div class="value"><%= stats[:created] %></div>
+            <div class="label">Created</div>
+          </div>
+          <div class="stat-item updated">
+            <div class="value"><%= stats[:updated] %></div>
+            <div class="label">Updated</div>
+          </div>
+          <div class="stat-item destroyed">
+            <div class="value"><%= stats[:destroyed] %></div>
+            <div class="label">Destroyed</div>
+          </div>
+        </div>
+
+        <% config = @model_configs[model_name] %>
+        <% if config %>
+          <dl class="config-list">
+            <dt>Event Prefix</dt>
+            <dd><code><%= config[:event_prefix] %></code></dd>
+            <% if config[:aggregate_class] %>
+              <dt>Aggregate Class</dt>
+              <dd><code><%= config[:aggregate_class] %></code></dd>
+            <% end %>
+            <% if config[:command_handler] %>
+              <dt>Command Handler</dt>
+              <dd><code><%= config[:command_handler] %></code></dd>
+            <% end %>
+            <% if config[:privacy_policy] %>
+              <dt>Privacy Policy</dt>
+              <dd><code><%= config[:privacy_policy] %></code></dd>
+            <% end %>
+          </dl>
+        <% end %>
+      </div>
+    </div>
+  <% end %>
+</div>

@@ -1,0 +1,392 @@
+field_name,expected_pii_type,category,description
+# ============================================================
+# PII Detection Evaluation Dataset
+# ============================================================
+# This dataset evaluates the field-name-based PII detection
+# using regex patterns. The detector matches field names
+# against known PII patterns.
+#
+# Categories:
+# - true_positive: Field should be detected as PII
+# - true_negative: Field should NOT be detected as PII
+# ============================================================
+
+# Email fields - True Positives (all contain 'email')
+email,email,true_positive,Standard email field
+user_email,email,true_positive,Prefixed email field
+contact_email,email,true_positive,Contact email
+primary_email,email,true_positive,Primary email
+work_email,email,true_positive,Work email
+personal_email,email,true_positive,Personal email
+email_address,email,true_positive,Email with address suffix
+customer_email,email,true_positive,Customer email
+business_email,email,true_positive,Business email
+notification_email,email,true_positive,Notification email
+
+# Name fields - True Positives (matches name/first_name/last_name/full_name)
+name,name,true_positive,Generic name
+first_name,name,true_positive,First name with underscore
+last_name,name,true_positive,Last name with underscore
+full_name,name,true_positive,Full name with underscore
+firstname,name,true_positive,First name no underscore
+lastname,name,true_positive,Last name no underscore
+fullname,name,true_positive,Full name no underscore
+display_name,name,true_positive,Display name
+user_name,name,true_positive,User name
+
+# Phone fields - True Positives (matches phone/telephone/mobile/cell)
+phone,phone,true_positive,Standard phone
+telephone,phone,true_positive,Telephone
+mobile,phone,true_positive,Mobile
+cell,phone,true_positive,Cell phone
+home_phone,phone,true_positive,Home phone
+office_phone,phone,true_positive,Office phone
+fax_telephone,phone,true_positive,Fax telephone
+primary_mobile,phone,true_positive,Primary mobile
+work_cell,phone,true_positive,Work cell
+phone_number,phone,true_positive,Phone number
+
+# Address fields - True Positives (matches address/street/city/zip/postal/country)
+address,address,true_positive,Standard address
+street,address,true_positive,Street
+city,address,true_positive,City
+zip,address,true_positive,Zip code
+postal,address,true_positive,Postal
+country,address,true_positive,Country
+home_address,address,true_positive,Home address
+work_address,address,true_positive,Work address
+billing_street,address,true_positive,Billing street
+shipping_city,address,true_positive,Shipping city
+mailing_zip,address,true_positive,Mailing zip
+postal_code,address,true_positive,Postal code
+resident_country,address,true_positive,Resident country
+address_line1,address,true_positive,Address line 1
+
+# SSN fields - True Positives (matches ssn/social_security/national_id)
+ssn,ssn,true_positive,SSN abbreviation
+social_security,ssn,true_positive,Social security
+national_id,ssn,true_positive,National ID
+employee_ssn,ssn,true_positive,Employee SSN
+customer_national_id,ssn,true_positive,Customer national ID
+
+# Date of Birth fields - True Positives (matches birth/dob/birthday)
+birth,date_of_birth,true_positive,Birth
+dob,date_of_birth,true_positive,DOB abbreviation
+birthday,date_of_birth,true_positive,Birthday
+date_birth,date_of_birth,true_positive,Date birth
+user_dob,date_of_birth,true_positive,User DOB
+customer_birthday,date_of_birth,true_positive,Customer birthday
+birth_date,date_of_birth,true_positive,Birth date
+
+# IP Address fields - True Positives (matches ip_address/remote_ip)
+ip_address,ip_address,true_positive,IP address
+remote_ip,ip_address,true_positive,Remote IP
+client_ip_address,ip_address,true_positive,Client IP address
+last_ip_address,ip_address,true_positive,Last IP address
+login_remote_ip,ip_address,true_positive,Login remote IP
+user_ip_address,ip_address,true_positive,User IP address
+
+# Credit Card fields - True Positives (matches credit_card/card_number/ccn)
+credit_card,credit_card,true_positive,Credit card
+card_number,credit_card,true_positive,Card number
+ccn,credit_card,true_positive,CCN abbreviation
+primary_credit_card,credit_card,true_positive,Primary credit card
+stored_card_number,credit_card,true_positive,Stored card number
+payment_ccn,credit_card,true_positive,Payment CCN
+
+# Financial fields - True Positives (matches salary/income/bank_account/iban)
+salary,financial,true_positive,Salary
+income,financial,true_positive,Income
+bank_account,financial,true_positive,Bank account
+iban,financial,true_positive,IBAN
+annual_salary,financial,true_positive,Annual salary
+monthly_income,financial,true_positive,Monthly income
+primary_bank_account,financial,true_positive,Primary bank account
+eu_iban,financial,true_positive,EU IBAN
+
+# Health fields - True Positives (matches medical/health/diagnosis/prescription)
+medical,health,true_positive,Medical
+health,health,true_positive,Health
+diagnosis,health,true_positive,Diagnosis
+prescription,health,true_positive,Prescription
+medical_history,health,true_positive,Medical history
+health_status,health,true_positive,Health status
+primary_diagnosis,health,true_positive,Primary diagnosis
+current_prescription,health,true_positive,Current prescription
+
+# Biometric fields - True Positives (matches fingerprint/face/retina/biometric)
+fingerprint,biometric,true_positive,Fingerprint
+face,biometric,true_positive,Face
+retina,biometric,true_positive,Retina
+biometric,biometric,true_positive,Biometric
+left_fingerprint,biometric,true_positive,Left fingerprint
+profile_face,biometric,true_positive,Profile face
+right_retina,biometric,true_positive,Right retina
+user_biometric,biometric,true_positive,User biometric
+
+# Location fields - True Positives (matches latitude/longitude/location/gps)
+latitude,location,true_positive,Latitude
+longitude,location,true_positive,Longitude
+location,location,true_positive,Location
+gps,location,true_positive,GPS
+home_latitude,location,true_positive,Home latitude
+office_longitude,location,true_positive,Office longitude
+current_location,location,true_positive,Current location
+device_gps,location,true_positive,Device GPS
+
+# Identifier fields - True Positives (matches passport/license/id_number/tax_id)
+passport,identifier,true_positive,Passport
+license,identifier,true_positive,License
+id_number,identifier,true_positive,ID number
+tax_id,identifier,true_positive,Tax ID
+travel_passport,identifier,true_positive,Travel passport
+drivers_license,identifier,true_positive,Drivers license
+national_id_number,identifier,true_positive,National ID number
+federal_tax_id,identifier,true_positive,Federal tax ID
+
+# ============================================================
+# Edge Cases - CamelCase and variant patterns
+# ============================================================
+
+# CamelCase patterns that ARE detected (contain PII keywords)
+firstName,name,true_positive,Camel case first name
+lastName,name,true_positive,Camel case last name
+emailAddress,email,true_positive,Camel case email
+phoneNumber,phone,true_positive,Camel case phone
+streetAddress,address,true_positive,Camel case street address
+dob_date,date_of_birth,true_positive,DOB with suffix
+
+# ============================================================
+# Known Limitations - Non-standard abbreviations
+# Field-name-based detection intentionally does not handle
+# non-standard abbreviations to avoid false positives
+# ============================================================
+
+fname,none,true_negative,Abbreviated first name (non-standard)
+lname,none,true_negative,Abbreviated last name (non-standard)
+tel,none,true_negative,Abbreviated telephone (non-standard)
+addr,none,true_negative,Abbreviated address (non-standard)
+bday,none,true_negative,Abbreviated birthday (non-standard)
+
+# ============================================================
+# Boundary Tests - Fields that could be confused with PII
+# ============================================================
+
+# Fields ending with PII-like terms that are NOT PII
+facetime,none,true_negative,Application name not face recognition
+interface,none,true_negative,Technical term not face data
+birthplace,none,true_negative,Location not date of birth
+nameplate,none,true_negative,Physical object not person name
+addressable,none,true_negative,Boolean attribute not address
+countrycode,none,true_negative,ISO code not country address
+cellcount,none,true_negative,Scientific measurement not cell phone
+facevalue,none,true_negative,Financial term not face biometric
+
+# ============================================================
+# True Negatives - Should NOT be detected as PII
+# ============================================================
+
+# Database fields
+id,none,true_negative,Generic ID (database primary key)
+uuid,none,true_negative,UUID
+created_at,none,true_negative,Timestamp
+updated_at,none,true_negative,Timestamp
+deleted_at,none,true_negative,Soft delete timestamp
+
+# Status and type fields
+status,none,true_negative,Status field
+type,none,true_negative,Type field
+state,none,true_negative,State (status not geographic)
+kind,none,true_negative,Kind
+category,none,true_negative,Category
+classification,none,true_negative,Classification
+
+# Descriptive fields
+description,none,true_negative,Description
+title,none,true_negative,Title
+summary,none,true_negative,Summary
+details,none,true_negative,Details
+notes,none,true_negative,Notes
+comments,none,true_negative,Comments
+
+# Numeric fields
+amount,none,true_negative,Amount (generic)
+price,none,true_negative,Price
+cost,none,true_negative,Cost
+quantity,none,true_negative,Quantity
+total,none,true_negative,Total
+count,none,true_negative,Count
+balance,none,true_negative,Balance
+rate,none,true_negative,Rate
+percentage,none,true_negative,Percentage
+
+# Boolean flags
+is_active,none,true_negative,Boolean flag
+is_verified,none,true_negative,Boolean flag
+is_deleted,none,true_negative,Boolean flag
+enabled,none,true_negative,Boolean flag
+disabled,none,true_negative,Boolean flag
+visible,none,true_negative,Boolean flag
+hidden,none,true_negative,Boolean flag
+public,none,true_negative,Boolean flag
+private,none,true_negative,Boolean flag
+
+# Technical fields
+version,none,true_negative,Version
+revision,none,true_negative,Revision
+sequence,none,true_negative,Sequence
+order,none,true_negative,Order (sequence)
+position,none,true_negative,Position
+rank,none,true_negative,Rank
+priority,none,true_negative,Priority
+level,none,true_negative,Level
+depth,none,true_negative,Depth
+
+# Content fields
+content,none,true_negative,Content
+body,none,true_negative,Body (content)
+text,none,true_negative,Text
+message,none,true_negative,Message
+subject,none,true_negative,Subject (email/topic)
+headline,none,true_negative,Headline
+excerpt,none,true_negative,Excerpt
+
+# Web/URL fields
+url,none,true_negative,URL
+uri,none,true_negative,URI
+href,none,true_negative,Href
+link,none,true_negative,Link
+path,none,true_negative,Path
+slug,none,true_negative,Slug
+permalink,none,true_negative,Permalink
+
+# File fields
+filename,none,true_negative,Filename
+file_path,none,true_negative,File path
+extension,none,true_negative,Extension
+mime_type,none,true_negative,MIME type
+file_size,none,true_negative,File size
+checksum,none,true_negative,Checksum
+
+# Format fields
+format,none,true_negative,Format
+encoding,none,true_negative,Encoding
+charset,none,true_negative,Charset
+locale,none,true_negative,Locale
+timezone,none,true_negative,Timezone
+currency,none,true_negative,Currency
+unit,none,true_negative,Unit
+
+# Reference/Key fields
+code,none,true_negative,Code
+key,none,true_negative,Key
+value,none,true_negative,Value
+reference,none,true_negative,Reference
+external_id,none,true_negative,External ID
+internal_id,none,true_negative,Internal ID
+
+# Foreign key fields
+user_id,none,true_negative,Foreign key
+account_id,none,true_negative,Foreign key
+customer_id,none,true_negative,Foreign key
+order_id,none,true_negative,Foreign key
+product_id,none,true_negative,Foreign key
+organization_id,none,true_negative,Foreign key
+company_id,none,true_negative,Foreign key
+parent_id,none,true_negative,Foreign key
+owner_id,none,true_negative,Foreign key
+
+# Security fields (non-PII)
+token,none,true_negative,Token
+api_key,none,true_negative,API key
+secret_key,none,true_negative,Secret key
+access_token,none,true_negative,Access token
+refresh_token,none,true_negative,Refresh token
+session_id,none,true_negative,Session ID
+nonce,none,true_negative,Nonce
+salt,none,true_negative,Salt
+hash,none,true_negative,Hash
+signature,none,true_negative,Signature
+encrypted,none,true_negative,Encrypted flag
+
+# Metadata fields
+metadata,none,true_negative,Metadata
+data,none,true_negative,Data
+payload,none,true_negative,Payload
+attributes,none,true_negative,Attributes
+properties,none,true_negative,Properties
+settings,none,true_negative,Settings
+config,none,true_negative,Config
+options,none,true_negative,Options
+params,none,true_negative,Params
+args,none,true_negative,Args
+
+# Tag/Label fields
+tags,none,true_negative,Tags
+labels,none,true_negative,Labels
+keywords,none,true_negative,Keywords
+categories,none,true_negative,Categories
+groups,none,true_negative,Groups
+
+# Dimension fields (non-PII)
+width,none,true_negative,Width
+height,none,true_negative,Height (dimension not person)
+length,none,true_negative,Length
+size,none,true_negative,Size
+weight,none,true_negative,Weight
+duration,none,true_negative,Duration
+area,none,true_negative,Area
+volume,none,true_negative,Volume
+
+# Color/Style fields
+color,none,true_negative,Color
+background,none,true_negative,Background
+foreground,none,true_negative,Foreground
+theme,none,true_negative,Theme
+style,none,true_negative,Style
+
+# Score/Rating fields
+score,none,true_negative,Score
+rating,none,true_negative,Rating
+stars,none,true_negative,Stars
+points,none,true_negative,Points
+grade,none,true_negative,Grade
+
+# Event/Action fields
+event,none,true_negative,Event
+action,none,true_negative,Action
+operation,none,true_negative,Operation
+method,none,true_negative,Method
+trigger,none,true_negative,Trigger
+
+# Status workflow fields
+approved,none,true_negative,Approved flag
+rejected,none,true_negative,Rejected flag
+pending,none,true_negative,Pending flag
+completed,none,true_negative,Completed flag
+cancelled,none,true_negative,Cancelled flag
+failed,none,true_negative,Failed flag
+success,none,true_negative,Success flag
+
+# Architecture fields
+controller,none,true_negative,Controller
+model,none,true_negative,Model
+view,none,true_negative,View
+service,none,true_negative,Service
+repository,none,true_negative,Repository
+handler,none,true_negative,Handler
+processor,none,true_negative,Processor
+validator,none,true_negative,Validator
+
+# Misc non-PII fields
+source,none,true_negative,Source
+target,none,true_negative,Target
+origin,none,true_negative,Origin
+destination,none,true_negative,Destination
+from,none,true_negative,From
+to,none,true_negative,To
+start,none,true_negative,Start
+end,none,true_negative,End
+begin,none,true_negative,Begin
+finish,none,true_negative,Finish
+

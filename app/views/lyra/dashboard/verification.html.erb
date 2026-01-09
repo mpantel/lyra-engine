@@ -1,0 +1,370 @@
+<style>
+  .lyra-verification { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-verification h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-verification h2 { color: #4a4e69; margin-top: 30px; }
+  .lyra-verification h3 { color: #495057; margin-top: 20px; }
+  .lyra-verification .breadcrumb { margin-bottom: 20px; font-size: 14px; }
+  .lyra-verification .breadcrumb a { color: #4a4e69; text-decoration: none; }
+  .lyra-verification .breadcrumb a:hover { text-decoration: underline; }
+  .lyra-verification .status-banner { padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+  .lyra-verification .status-pass { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+  .lyra-verification .status-fail { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+  .lyra-verification .status-unavailable { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; }
+  .lyra-verification .stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }
+  .lyra-verification .stat-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; text-align: center; }
+  .lyra-verification .stat-card .value { font-size: 28px; font-weight: 700; }
+  .lyra-verification .stat-card .value.pass { color: #28a745; }
+  .lyra-verification .stat-card .value.fail { color: #dc3545; }
+  .lyra-verification .stat-card .label { font-size: 13px; color: #6c757d; margin-top: 5px; }
+  .lyra-verification .workflow-card { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+  .lyra-verification .workflow-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+  .lyra-verification .workflow-header h3 { margin: 0; }
+  .lyra-verification .workflow-badge { padding: 4px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .lyra-verification .badge-pass { background: #d4edda; color: #155724; }
+  .lyra-verification .badge-fail { background: #f8d7da; color: #721c24; }
+  .lyra-verification .property-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+  .lyra-verification .property { background: #f8f9fa; padding: 12px; border-radius: 6px; }
+  .lyra-verification .property .name { font-size: 12px; color: #6c757d; margin-bottom: 4px; }
+  .lyra-verification .property .value { font-weight: 600; }
+  .lyra-verification .terminal-list { list-style: none; padding: 0; margin: 15px 0 0 0; }
+  .lyra-verification .terminal-list li { padding: 8px 12px; border-radius: 4px; margin-bottom: 5px; display: flex; align-items: center; gap: 10px; }
+  .lyra-verification .terminal-list .reachable { background: #d4edda; color: #155724; }
+  .lyra-verification .terminal-list .unreachable { background: #f8d7da; color: #721c24; }
+  .lyra-verification .mermaid-container { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 20px; overflow-x: auto; margin-top: 15px; }
+  .lyra-verification .mermaid-container pre { margin: 0; font-size: 12px; }
+  .lyra-verification .recommendations { margin-top: 30px; }
+  .lyra-verification .recommendation { background: #fff; border-left: 4px solid #4a4e69; padding: 15px; margin-bottom: 10px; }
+  .lyra-verification .download-link { display: inline-block; margin-top: 20px; padding: 10px 20px; background: #4a4e69; color: #fff; text-decoration: none; border-radius: 4px; }
+  .lyra-verification .download-link:hover { background: #22223b; }
+  .lyra-verification .diagram-legend { background: #fff; border: 1px solid #dee2e6; border-radius: 8px; padding: 15px 20px; margin: 20px 0; }
+  .lyra-verification .diagram-legend h4 { margin: 0 0 12px 0; color: #495057; font-size: 14px; }
+  .lyra-verification .legend-items { display: flex; flex-wrap: wrap; gap: 20px; }
+  .lyra-verification .legend-item { display: flex; align-items: center; gap: 8px; }
+  .lyra-verification .legend-symbol { font-size: 18px; font-weight: bold; color: #4a4e69; background: #f8f9fa; padding: 4px 10px; border-radius: 4px; font-family: monospace; }
+  .lyra-verification .legend-label { font-size: 13px; color: #495057; }
+  .lyra-verification .legend-desc { font-size: 12px; color: #6c757d; margin-left: 4px; }
+</style>
+
+<div class="lyra-verification">
+  <div class="breadcrumb">
+    <%= link_to "Dashboard", lyra.dashboard_path %> &rsaquo; Formal Verification
+  </div>
+
+  <h1>CRUD→Event Mapping Verification</h1>
+  <p style="color: #6c757d; margin-bottom: 20px;">
+    Formal verification of Lyra's CRUD→Event mapping using Petri net analysis.
+    This verifies that the framework's behavioral contract is sound.
+  </p>
+
+  <% if @petri_flow_available %>
+    <% all_valid = @summary[:lifecycle_valid] && @summary[:modes_valid] %>
+    <div class="status-banner <%= all_valid ? 'status-pass' : 'status-fail' %>">
+      <strong><%= all_valid ? "✓ All Verifications Passed" : "✗ Verification Issues Detected" %></strong>
+      <p style="margin: 10px 0 0 0;">
+        <% if all_valid %>
+          The CRUD→Event mapping is formally correct. All terminal states are reachable and no deadlocks detected.
+        <% else %>
+          Some verification checks failed. Review the details below.
+        <% end %>
+      </p>
+    </div>
+
+    <h2 style="margin-top: 20px;">About Formal Verification</h2>
+    <p style="color: #6c757d; font-size: 14px; line-height: 1.6;">
+      This verification uses <strong>Petri net analysis</strong> to formally prove properties of Lyra's CRUD→Event mapping:
+    </p>
+    <ul style="color: #6c757d; font-size: 14px; line-height: 1.8; margin-bottom: 20px;">
+      <li><strong>Reachability</strong> - All terminal states can be reached from the initial state</li>
+      <li><strong>Boundedness</strong> - The system is 1-bounded (safe), meaning no state explosion</li>
+      <li><strong>Liveness</strong> - No deadlocks; operations can always complete</li>
+      <li><strong>Soundness</strong> - The workflow correctly models the behavioral contract</li>
+    </ul>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="value <%= @summary[:lifecycle_valid] ? 'pass' : 'fail' %>">
+          <%= @summary[:lifecycle_valid] ? "✓" : "✗" %>
+        </div>
+        <div class="label">Lifecycle Valid</div>
+      </div>
+      <div class="stat-card">
+        <div class="value <%= @summary[:modes_valid] ? 'pass' : 'fail' %>">
+          <%= @summary[:modes_valid] ? "✓" : "✗" %>
+        </div>
+        <div class="label">Modes Valid</div>
+      </div>
+      <div class="stat-card">
+        <div class="value <%= @summary[:all_terminals_reachable] ? 'pass' : 'fail' %>">
+          <%= @summary[:all_terminals_reachable] ? "✓" : "✗" %>
+        </div>
+        <div class="label">Terminals Reachable</div>
+      </div>
+      <div class="stat-card">
+        <div class="value <%= @summary[:deadlock_free] ? 'pass' : 'fail' %>">
+          <%= @summary[:deadlock_free] ? "✓" : "✗" %>
+        </div>
+        <div class="label">Deadlock Free</div>
+      </div>
+    </div>
+
+    <div class="recommendations" style="margin-top: 20px; margin-bottom: 20px;">
+      <h3 style="margin-top: 0;">Recommendations</h3>
+      <% (@summary[:recommendations] || []).each do |rec| %>
+        <div class="recommendation">
+          <%= rec %>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="diagram-legend">
+      <h4>Diagram Legend — Arc Pattern Labels</h4>
+      <div class="legend-items">
+        <div class="legend-item">
+          <span class="legend-symbol">∥ Target</span>
+          <span class="legend-label"><strong>Fork (AND-split)</strong></span>
+          <span class="legend-desc">— Parallel execution: all paths activate simultaneously, label shows target</span>
+        </div>
+        <div class="legend-item">
+          <span class="legend-symbol">⊕ → Target</span>
+          <span class="legend-label"><strong>Choice (XOR-split)</strong></span>
+          <span class="legend-desc">— Exclusive choice: only one path taken, label shows destination</span>
+        </div>
+      </div>
+    </div>
+
+    <h2>Lifecycle Workflow</h2>
+    <p style="color: #6c757d; font-size: 14px;">
+      Verifies the entity lifecycle: <code>nonexistent → created → persisted → updated → destroyed → deleted</code>
+    </p>
+
+    <% if @lifecycle %>
+      <div class="workflow-card">
+        <div class="workflow-header">
+          <h3><%= @lifecycle[:workflow] %></h3>
+          <% lifecycle_valid = @lifecycle[:terminal_reachability].values.all? %>
+          <span class="workflow-badge <%= lifecycle_valid ? 'badge-pass' : 'badge-fail' %>">
+            <%= lifecycle_valid ? "PASS" : "FAIL" %>
+          </span>
+        </div>
+
+        <div class="property-grid">
+          <div class="property">
+            <div class="name">Reachable States</div>
+            <div class="value"><%= @lifecycle[:verification][:reachability][:total_reachable_states] %></div>
+          </div>
+          <div class="property">
+            <div class="name">Terminal States</div>
+            <div class="value"><%= @lifecycle[:verification][:reachability][:terminal_states] %></div>
+          </div>
+          <div class="property">
+            <div class="name">1-Bounded (Safe)</div>
+            <div class="value"><%= @lifecycle[:verification][:boundedness][:is_safe] ? "Yes" : "No" %></div>
+          </div>
+          <div class="property">
+            <div class="name">Deadlock Free</div>
+            <div class="value"><%= @lifecycle[:verification][:liveness][:deadlock_free] ? "Yes" : "No" %></div>
+          </div>
+        </div>
+
+        <h4 style="margin-top: 20px;">Terminal State Reachability</h4>
+        <ul class="terminal-list">
+          <% @lifecycle[:terminal_reachability].each do |state, reachable| %>
+            <li class="<%= reachable ? 'reachable' : 'unreachable' %>">
+              <span><%= reachable ? "✓" : "✗" %></span>
+              <strong><%= state %></strong>
+              <span>- <%= reachable ? "Reachable" : "UNREACHABLE" %></span>
+            </li>
+          <% end %>
+        </ul>
+
+        <% if @lifecycle[:diagrams] && @lifecycle[:diagrams][:mermaid] %>
+          <% mermaid_code = @lifecycle[:diagrams][:mermaid].to_s.gsub(/```mermaid\n?/, '').gsub(/```\s*$/, '').strip %>
+          <h4 style="margin-top: 20px;">Petri Net Diagram</h4>
+          <div class="mermaid-container">
+            <pre class="mermaid"><%= mermaid_code %></pre>
+          </div>
+          <details style="margin-top: 10px;">
+            <summary style="cursor: pointer; color: #6c757d; font-size: 13px;">View raw Mermaid code</summary>
+            <pre style="background: #f1f1f1; padding: 10px; margin-top: 5px; font-size: 12px; overflow-x: auto;"><code><%= mermaid_code %></code></pre>
+          </details>
+        <% end %>
+      </div>
+    <% end %>
+
+    <h2>CRUD Mode Verification Workflows</h2>
+    <p style="color: #6c757d; font-size: 14px;">
+      Verifies that all operating modes (Monitor, Hijack, Event Sourcing) correctly reach completion for each CRUD operation.
+    </p>
+
+    <% if @modes && @modes.any? %>
+      <% @modes.each do |operation, mode_data| %>
+        <div class="workflow-card">
+          <div class="workflow-header">
+            <h3><%= mode_data[:workflow] %> <span style="font-size: 14px; color: #6c757d;">(<%= operation.to_s.titleize %>)</span></h3>
+            <% mode_valid = mode_data[:terminal_reachability]&.values&.all? %>
+            <span class="workflow-badge <%= mode_valid ? 'badge-pass' : 'badge-fail' %>">
+              <%= mode_valid ? "PASS" : "FAIL" %>
+            </span>
+          </div>
+
+          <div class="property-grid">
+            <div class="property">
+              <div class="name">Reachable States</div>
+              <div class="value"><%= mode_data.dig(:verification, :reachability, :total_reachable_states) || 'N/A' %></div>
+            </div>
+            <div class="property">
+              <div class="name">1-Bounded (Safe)</div>
+              <div class="value"><%= mode_data.dig(:verification, :boundedness, :is_safe) ? "Yes" : "No" %></div>
+            </div>
+          </div>
+
+          <% if mode_data[:terminal_reachability]&.any? %>
+            <h4 style="margin-top: 20px;">Terminal State Reachability</h4>
+            <ul class="terminal-list">
+              <% mode_data[:terminal_reachability].each do |state, reachable| %>
+                <li class="<%= reachable ? 'reachable' : 'unreachable' %>">
+                  <span><%= reachable ? "✓" : "✗" %></span>
+                  <strong><%= state %></strong>
+                  <span>- <%= reachable ? "Reachable" : "UNREACHABLE" %></span>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+
+          <% if mode_data[:diagrams] && mode_data[:diagrams][:mermaid] %>
+            <% modes_mermaid_code = mode_data[:diagrams][:mermaid].to_s.gsub(/```mermaid\n?/, '').gsub(/```\s*$/, '').strip %>
+            <details style="margin-top: 15px;">
+              <summary style="cursor: pointer; color: #4a4e69; font-weight: 600;">Show <%= operation.to_s.titleize %> Mode Petri Net Diagram</summary>
+              <div class="mermaid-container" style="margin-top: 10px;">
+                <pre class="mermaid"><%= modes_mermaid_code %></pre>
+              </div>
+              <details style="margin-top: 10px;">
+                <summary style="cursor: pointer; color: #6c757d; font-size: 13px;">View raw Mermaid code</summary>
+                <pre style="background: #f1f1f1; padding: 10px; margin-top: 5px; font-size: 12px; overflow-x: auto;"><code><%= modes_mermaid_code %></code></pre>
+              </details>
+            </details>
+          <% end %>
+        </div>
+      <% end %>
+    <% end %>
+
+    <% if @generated_workflows.any? %>
+      <h2>Generated Mode Workflows</h2>
+      <p style="color: #6c757d; font-size: 14px;">
+        Individual workflow models for each Lyra operation mode, generated via metaprogramming introspection.
+      </p>
+
+      <% @generated_workflows.each do |key, workflow| %>
+        <% next if workflow[:error] %>
+        <div class="workflow-card">
+          <div class="workflow-header">
+            <h3><%= workflow[:workflow] %></h3>
+            <% wf_valid = workflow[:terminal_reachability]&.values&.all? %>
+            <span class="workflow-badge <%= wf_valid ? 'badge-pass' : 'badge-fail' %>">
+              <%= wf_valid ? "PASS" : "FAIL" %>
+            </span>
+          </div>
+
+          <div class="property-grid">
+            <div class="property">
+              <div class="name">Reachable States</div>
+              <div class="value"><%= workflow.dig(:verification, :reachability, :total_reachable_states) || 'N/A' %></div>
+            </div>
+            <div class="property">
+              <div class="name">Terminal States</div>
+              <div class="value"><%= workflow.dig(:verification, :reachability, :terminal_states) || 'N/A' %></div>
+            </div>
+            <div class="property">
+              <div class="name">1-Bounded (Safe)</div>
+              <div class="value"><%= workflow.dig(:verification, :boundedness, :is_safe) ? "Yes" : "No" %></div>
+            </div>
+            <div class="property">
+              <div class="name">Source File</div>
+              <div class="value" style="font-size: 11px;"><%= File.basename(workflow[:file]) %></div>
+            </div>
+          </div>
+
+          <% if workflow[:terminal_reachability]&.any? %>
+            <h4 style="margin-top: 20px;">Terminal State Reachability</h4>
+            <ul class="terminal-list">
+              <% workflow[:terminal_reachability].each do |state, reachable| %>
+                <li class="<%= reachable ? 'reachable' : 'unreachable' %>">
+                  <span><%= reachable ? "✓" : "✗" %></span>
+                  <strong><%= state %></strong>
+                  <span>- <%= reachable ? "Reachable" : "UNREACHABLE" %></span>
+                </li>
+              <% end %>
+            </ul>
+          <% end %>
+
+          <% if workflow[:diagrams] && workflow[:diagrams][:mermaid] %>
+            <% wf_mermaid = workflow[:diagrams][:mermaid].to_s.gsub(/```mermaid\n?/, '').gsub(/```\s*$/, '').strip %>
+            <details style="margin-top: 15px;">
+              <summary style="cursor: pointer; color: #4a4e69; font-weight: 600;">Show Petri Net Diagram</summary>
+              <div class="mermaid-container" style="margin-top: 10px;">
+                <pre class="mermaid"><%= wf_mermaid %></pre>
+              </div>
+            </details>
+          <% end %>
+        </div>
+      <% end %>
+
+      <% errors = @generated_workflows.select { |k, v| v[:error] } %>
+      <% if errors.any? %>
+        <div class="status-banner status-fail" style="margin-top: 20px;">
+          <strong>Workflow Load Errors</strong>
+          <ul style="margin: 10px 0 0 0;">
+            <% errors.each do |key, workflow| %>
+              <li><strong><%= key %>:</strong> <%= workflow[:error] %></li>
+            <% end %>
+          </ul>
+        </div>
+      <% end %>
+    <% end %>
+
+    <a href="<%= verification_data_path(format: :json) %>" class="download-link">Download Full Report (JSON)</a>
+
+  <% else %>
+    <div class="status-banner status-unavailable">
+      <strong>PetriFlow Not Available</strong>
+      <p style="margin: 10px 0 0 0;">
+        Formal verification requires the PetriFlow gem. Add it to your Gemfile:
+      </p>
+      <pre style="background: #fff; padding: 10px; margin-top: 10px; border-radius: 4px;"><code>gem 'petri_flow', path: 'gems/petri_flow'</code></pre>
+    </div>
+  <% end %>
+</div>
+
+<% if @petri_flow_available %>
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'neutral',
+      flowchart: {
+        useMaxWidth: true,
+        htmlLabels: true,
+        curve: 'basis'
+      }
+    });
+
+    // Render visible diagrams immediately (not inside closed details)
+    const visibleDiagrams = document.querySelectorAll('.mermaid-container:not(details .mermaid-container) .mermaid');
+    if (visibleDiagrams.length > 0) {
+      await mermaid.run({ nodes: Array.from(visibleDiagrams) });
+    }
+
+    // Lazy render diagrams inside <details> when opened
+    document.querySelectorAll('details').forEach(details => {
+      details.addEventListener('toggle', async function() {
+        if (this.open) {
+          const diagrams = this.querySelectorAll('.mermaid:not([data-processed])');
+          if (diagrams.length > 0) {
+            await mermaid.run({ nodes: Array.from(diagrams) });
+          }
+        }
+      });
+    });
+  </script>
+<% end %>

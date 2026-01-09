@@ -1,0 +1,12 @@
+# Solid Cache configuration for Lyra dummy app tests
+# Uses SQLite (same as main database) for simplicity
+
+default: &default
+  database: primary
+  store_options:
+    max_age: <%= 1.hour.to_i %>
+    max_size: <%= 64.megabytes %>
+    namespace: <%= Rails.env %>
+
+test:
+  <<: *default
