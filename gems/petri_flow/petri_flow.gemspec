@@ -1,7 +1,7 @@
 require_relative "lib/petri_flow/version"
 
 Gem::Specification.new do |spec|
-  spec.name        = "petri_flow"
+  spec.name        = "orfeas_petri_flow"
   spec.version     = PetriFlow::VERSION
   spec.authors     = ["Michail Pantelelis"]
   spec.email       = ["mpantel@aegean.gr"]

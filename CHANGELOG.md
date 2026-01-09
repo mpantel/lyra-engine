@@ -154,6 +154,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - PostgreSQL primary database support
 - SQLite alternative for small deployments
 
+#### Example Application
+- Aegean E-Pay Testbed with student registrations
+- Payment processing with multiple channels
+- Complete database schema and seed data
+
 ### Fixed
 
 #### StrictDataAccess Compatibility with Event Sourcing Mode

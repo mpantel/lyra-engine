@@ -1,7 +1,7 @@
 require_relative "lib/pam_dsl/version"
 
 Gem::Specification.new do |spec|
-  spec.name        = "pam_dsl"
+  spec.name        = "orfeas_pam_dsl"
   spec.version     = PamDsl::VERSION
   spec.authors     = ["Michail Pantelelis"]
   spec.email       = ["mpantel@aegean.gr"]
@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/gems/pam_dsl/CHANGELOG.md"
 
   spec.files = Dir.chdir(File.expand_path(__dir__)) do
-    Dir["{lib}/**/*", "MIT-LICENSE", "Rakefile", "README.md"]
+    Dir["{lib}/**/*", "MIT-LICENSE", "Rakefile", "README.md", "CHANGELOG.md"]
   end
 
   spec.require_paths = ["lib"]

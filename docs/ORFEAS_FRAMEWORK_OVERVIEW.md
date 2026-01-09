@@ -132,7 +132,7 @@ ORFEAS provides a **non-intrusive, gradual transformation path** that:
 
 ```ruby
 # 1. Install ORFEAS
-gem 'lyra'
+gem 'orfeas_lyra'
 gem 'pam_dsl'
 
 # 2. Define Privacy Policies
@@ -658,7 +658,7 @@ report = compliance.generate_report(
 
 ```bash
 # Add to Gemfile
-gem 'lyra'
+gem 'orfeas_lyra'
 gem 'pam_dsl'
 gem 'petri_flow'  # Optional, for formal verification
 

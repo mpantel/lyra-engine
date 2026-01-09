@@ -100,10 +100,10 @@ end
 **Solution**:
 ```ruby
 # Gemfile
-gem 'lyra', path: '../path/to/lyra'  # Adjust path
+gem 'orfeas_lyra', path: '../path/to/lyra'  # Adjust path
 
 # Or from git
-gem 'lyra', git: 'https://github.com/mpantel/lyra-engine.git'
+gem 'orfeas_lyra', git: 'https://github.com/mpantel/lyra-engine.git'
 
 # Then
 bundle install

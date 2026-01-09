@@ -14,9 +14,9 @@ This guide will walk you through setting up Lyra in your Rails application.
 
 ```ruby
 # Gemfile
-gem 'lyra', path: 'path/to/lyra'  # For local development
+gem 'orfeas_lyra', path: 'path/to/lyra'  # For local development
 # or
-gem 'lyra', git: 'https://github.com/mpantel/lyra-engine'  # From git
+gem 'orfeas_lyra', git: 'https://github.com/mpantel/lyra-engine'  # From git
 ```
 
 ### Step 2: Install Dependencies

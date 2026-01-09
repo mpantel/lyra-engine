@@ -110,7 +110,7 @@ Define what success looks like:
 
 ```ruby
 # Gemfile
-gem 'lyra', path: 'path/to/lyra'  # or from git/rubygems
+gem 'orfeas_lyra', path: 'path/to/lyra'  # or from git/rubygems
 gem 'rails_event_store', '~> 2.14'
 
 # Install

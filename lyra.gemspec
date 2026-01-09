@@ -1,7 +1,7 @@
 require_relative "lib/lyra/version"
 
 Gem::Specification.new do |spec|
-  spec.name        = "lyra"
+  spec.name        = "orfeas_lyra"
   spec.version     = Lyra::VERSION
   spec.authors     = ["Michail Pantelelis"]
   spec.email       = ["mpantel@aegean.gr"]
@@ -15,7 +15,7 @@ Gem::Specification.new do |spec|
   spec.metadata["changelog_uri"] = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
   spec.files = Dir.chdir(File.expand_path(__dir__)) do
-    Dir["{app,config,db,lib}/**/*", "MIT-LICENSE", "Rakefile", "README.md"]
+    Dir["{app,config,lib}/**/*", "LICENSE", "Rakefile", "README.md", "CHANGELOG.md"]
   end
 
   spec.require_paths = ["lib"]

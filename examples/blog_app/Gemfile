@@ -8,7 +8,7 @@ gem "sqlite3", "~> 1.4"
 gem "puma", "~> 6.0"
 
 # Lyra - Event Sourcing with Privacy
-gem "lyra", path: "../.."
+gem "orfeas_lyra", path: "../.."
 
 # RailsEventStore for event storage
 gem "rails_event_store", "~> 2.14"

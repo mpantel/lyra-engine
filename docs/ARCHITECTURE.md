@@ -498,7 +498,7 @@ end
 ### As Rails Engine
 ```ruby
 # Gemfile
-gem 'lyra', path: 'path/to/lyra'
+gem 'orfeas_lyra', path: 'path/to/lyra'
 
 # config/initializers/lyra.rb
 Lyra.configure do |config|

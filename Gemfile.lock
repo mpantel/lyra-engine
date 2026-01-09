@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    lyra (0.6.0)
+    orfeas_lyra (0.6.0)
       pg (~> 1.0)
       rails (>= 8.0)
       rails_event_store (~> 2.0)
@@ -9,13 +9,13 @@ PATH
 PATH
   remote: gems/pam_dsl
   specs:
-    pam_dsl (0.6.0)
+    orfeas_pam_dsl (0.6.0)
       activesupport (>= 6.0)
 
 PATH
   remote: gems/petri_flow
   specs:
-    petri_flow (0.6.0)
+    orfeas_petri_flow (0.6.0)
       activesupport (>= 6.0)
       matrix (~> 0.4)
 
@@ -363,13 +363,13 @@ PLATFORMS
 DEPENDENCIES
   csv
   factory_bot_rails
-  lyra!
   minitest (~> 5.0)
   minitest-reporters (~> 1.5)
   mocha (~> 3.0)
+  orfeas_lyra!
+  orfeas_pam_dsl!
+  orfeas_petri_flow!
   ostruct
-  pam_dsl!
-  petri_flow!
   rails-controller-testing
   rake
   rexml

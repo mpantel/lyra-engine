@@ -3,9 +3,9 @@ source "https://rubygems.org"
 # Specify your gem's dependencies in lyra.gemspec
 gemspec
 
-# Local gems in monorepo
-gem "pam_dsl", path: "gems/pam_dsl"
-gem "petri_flow", path: "gems/petri_flow"
+# Local gems in monorepo (orfeas_ prefix for RubyGems publication)
+gem "orfeas_pam_dsl", path: "gems/pam_dsl"
+gem "orfeas_petri_flow", path: "gems/petri_flow"
 
 group :development, :test do
   gem "rspec", "~> 3.0"
