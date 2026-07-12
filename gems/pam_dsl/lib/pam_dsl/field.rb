@@ -11,6 +11,15 @@ module PamDsl
       :location, :identifier, :credential, :token, :payment_token, :custom
     ].freeze
 
+    # GDPR Article 9 special-category data is determined by the *kind* of data,
+    # not by a risk label: health, biometric, genetic, racial/ethnic, political,
+    # religious, trade-union, or sex-life/orientation data. Of PAM's PII_TYPES,
+    # :health and :biometric are the Article 9 categories; this set is the single
+    # place to extend should the taxonomy grow (e.g., a future :genetic type).
+    # The :restricted sensitivity *level* is an Article 32 risk tier and is
+    # deliberately independent of this set (Definition 1, Condition 5).
+    SPECIAL_CATEGORY_TYPES = [:health, :biometric].freeze
+
     def initialize(name, type:, sensitivity: :internal)
       @name = name.to_sym
       @type = type.to_sym
@@ -56,9 +65,16 @@ module PamDsl
       [:confidential, :restricted].include?(@sensitivity)
     end
 
-    # Check if field is highly restricted
+    # Check if field is highly restricted (Article 32 risk tier)
     def restricted?
       @sensitivity == :restricted
+    end
+
+    # Check if field holds GDPR Article 9 special-category data (by type, not by
+    # sensitivity level). Triggers the Art. 9(2) basis requirement in Definition 1,
+    # Condition 5.
+    def special_category?
+      SPECIAL_CATEGORY_TYPES.include?(@type)
     end
 
     private

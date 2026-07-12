@@ -185,15 +185,9 @@ module Lyra
 
       def test_validate_access_with_consent
         integration = PolicyIntegration.new(:test_policy)
+        PamDsl.policy(:test_policy).consent_policy.grant_consent(purpose: :marketing, subject: 1)
 
-        # Should not raise
-        result = integration.validate_access!(
-          [:email],
-          :marketing,
-          granted: true,
-          granted_at: Time.now
-        )
-
+        result = integration.validate_access!([:email], :marketing, subject: 1)
         assert result
       end
 
@@ -201,8 +195,7 @@ module Lyra
         integration = PolicyIntegration.new(:nonexistent_policy)
 
         # Should return true (permissive) without policy
-        result = integration.validate_access!([:email], :marketing)
-
+        result = integration.validate_access!([:email], :marketing, subject: 1)
         assert result
       end
 

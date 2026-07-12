@@ -53,46 +53,72 @@ module PamDsl
 
     # Get a purpose by name
     def get_purpose(name)
-      @purposes[name.to_sym] || raise(Error, "Purpose '#{name}' not defined in policy '#{@name}'")
+      @purposes[name.to_sym] || raise(UndeclaredPurposeError, "Purpose '#{name}' not defined in policy '#{@name}'")
     end
 
-    # Check if field is allowed for purpose
+    # Check if field is allowed for purpose.
+    #
+    # The two declaration notations are equivalent (paper §3.2): `allow_for :p` on a field
+    # and listing the field under `requires`/`optionally` on the purpose are alternative
+    # entry points to the same constraint. When the field carries an explicit allow_for
+    # declaration, either side is sufficient. When the field has no allow_for declarations
+    # it imposes no restriction and the purpose-side declaration is authoritative.
     def allowed?(field_name, purpose_name)
       field = @fields[field_name.to_sym]
       purpose = @purposes[purpose_name.to_sym]
 
       return false unless field && purpose
 
-      # Check if field allows this purpose
-      return false unless field.allowed_for?(purpose_name)
+      if field.purposes.empty?
+        purpose.allows_field?(field_name)
+      else
+        field.purposes.include?(purpose_name.to_sym) || purpose.allows_field?(field_name)
+      end
+    end
 
-      # Check if purpose allows this field
-      return false unless purpose.allows_field?(field_name)
+    # Validate data access for a (fields, purpose, subject) triple — Def. 1.
+    def validate_access!(field_names, purpose_name, subject:)
+      purpose = get_purpose(purpose_name)
+
+      # Condition 4 (Def. 1): legal basis satisfied — consent check delegates to CS
+      if purpose.requires_consent?
+        @consent_policy.validate!(purpose_name, subject: subject)
+      end
+
+      # Check each field: existence first (InvalidFieldError), then membership (PurposeFieldMismatchError)
+      field_names.each do |field_name|
+        get_field(field_name)
+        unless allowed?(field_name, purpose_name)
+          raise PurposeFieldMismatchError, "Field '#{field_name}' not allowed for purpose '#{purpose_name}'"
+        end
+      end
+
+      # Condition 5 (Def. 1): special-category fields require an Art. 9(2) basis on
+      # the purpose. Special category is determined by the *type* of data (Art. 9 —
+      # health, biometric, ...), independently of the :restricted sensitivity *level*
+      # (an Art. 32 risk tier). High-risk-but-ordinary data such as tax or bank
+      # identifiers may be :restricted without demanding an Art. 9(2) basis.
+      has_special_category = field_names.any? do |fn|
+        f = @fields[fn.to_sym]
+        f&.special_category?
+      end
+
+      if has_special_category && !purpose.art9_basis?
+        raise SensitivityViolationError,
+          "Purpose '#{purpose_name}' accesses special-category (Article 9) data but declares no Art. 9(2) basis"
+      end
 
       true
     end
 
-    # Validate data access
-    def validate_access!(field_names, purpose_name, consent_granted: false, consent_granted_at: nil)
-      purpose = get_purpose(purpose_name)
-
-      # Check consent if required
-      if purpose.requires_consent?
-        @consent_policy.validate!(
-          purpose_name,
-          granted: consent_granted,
-          granted_at: consent_granted_at
-        )
+    # Returns purposes whose legal basis is :legitimate_interests but whose LIA has not
+    # been recorded via lia_documented!. These represent compliance gaps: Art. 6(1)(f)
+    # requires a balancing test — a human-judgment obligation PAM cannot enforce at runtime
+    # but can verify has been documented (paper §3.2, Def. 2).
+    def lia_compliance_gaps
+      @purposes.values.select do |p|
+        p.legal_basis == :legitimate_interests && !p.lia_documented?
       end
-
-      # Check if all fields are allowed for this purpose
-      field_names.each do |field_name|
-        unless allowed?(field_name, purpose_name)
-          raise Error, "Field '#{field_name}' not allowed for purpose '#{purpose_name}'"
-        end
-      end
-
-      true
     end
 
     # Get all sensitive fields

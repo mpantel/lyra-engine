@@ -30,7 +30,7 @@ module Lyra
         @pam_compliance = PamDsl::GDPRCompliance.new(
           subject_id: subject_id,
           subject_type: subject_type,
-          event_reader: method(:read_subject_events),
+          record_reader: method(:read_subject_events),
           attribute_extractor: method(:extract_attributes),
           timestamp_extractor: method(:extract_timestamp),
           operation_extractor: method(:extract_operation),

@@ -1,7 +1,21 @@
 module PamDsl
   # Represents a processing purpose
   class Purpose
-    attr_reader :name, :description, :legal_basis, :required_fields, :optional_fields, :metadata
+    attr_reader :name, :description, :legal_basis, :art9_bases, :required_fields, :optional_fields, :metadata
+
+    # Art. 9(2) sub-clauses permitting processing of special-category data
+    ART9_BASES = [
+      :explicit_consent,          # 9(2)(a) - explicit consent
+      :employment_law,            # 9(2)(b) - employment / social security law
+      :vital_interests,           # 9(2)(c) - vital interests, subject incapable of consenting
+      :non_profit,                # 9(2)(d) - legitimate non-profit body, members/former members only
+      :made_public,               # 9(2)(e) - data manifestly made public by subject
+      :legal_claims,              # 9(2)(f) - legal claims / judicial acts
+      :substantial_public_interest, # 9(2)(g) - substantial public interest (Union/Member State law)
+      :health_care,               # 9(2)(h) - medical diagnosis, health/social care
+      :public_health,             # 9(2)(i) - public health
+      :research_archiving         # 9(2)(j) - scientific/historical research, statistics
+    ].freeze
 
     LEGAL_BASES = [
       :consent,              # Article 6(1)(a) - Data subject has given consent
@@ -16,6 +30,8 @@ module PamDsl
       @name = name.to_sym
       @description = ""
       @legal_basis = :consent
+      @art9_bases = []
+      @lia_documented = false
       @required_fields = []
       @optional_fields = []
       @metadata = {}
@@ -37,6 +53,32 @@ module PamDsl
       self
     end
 
+    # Record that a Legitimate Interests Assessment (LIA) has been conducted and documented
+    # for this purpose (Art. 6(1)(f)). This is a human-judgment obligation — PAM cannot
+    # automate the balancing test, but it can verify that one has been recorded.
+    def lia_documented!(value = true)
+      @lia_documented = value
+      self
+    end
+
+    # True when a LIA has been recorded for this purpose
+    def lia_documented?
+      @lia_documented
+    end
+
+    # Declare one or more Art. 9(2) bases for processing special-category (restricted) data.
+    # Multiple calls accumulate; passing multiple symbols in one call is also accepted.
+    def art9_basis(*bases)
+      bases.flatten.each do |b|
+        b = b.to_sym
+        unless ART9_BASES.include?(b)
+          raise Error, "Invalid Art. 9(2) basis: #{b}. Must be one of #{ART9_BASES.join(', ')}"
+        end
+        @art9_bases << b unless @art9_bases.include?(b)
+      end
+      self
+    end
+
     # Define required fields
     def requires(*field_names)
       @required_fields.concat(field_names.map(&:to_sym))
@@ -53,6 +95,11 @@ module PamDsl
     def meta(key, value)
       @metadata[key] = value
       self
+    end
+
+    # True when the purpose carries at least one Art. 9(2) basis (Def. 1, Condition 5)
+    def art9_basis?
+      @art9_bases.any?
     end
 
     # Check if purpose requires consent

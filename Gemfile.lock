@@ -9,8 +9,7 @@ PATH
 PATH
   remote: gems/pam_dsl
   specs:
-    orfeas_pam_dsl (0.6.0)
-      activesupport (>= 6.0)
+    orfeas_pam_dsl (0.8.0)
 
 PATH
   remote: gems/petri_flow

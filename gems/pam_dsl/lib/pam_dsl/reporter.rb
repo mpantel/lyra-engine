@@ -665,7 +665,7 @@ module PamDsl
       return "N/A" unless duration
 
       case duration
-      when ActiveSupport::Duration
+      when DURATION_CLASS
         if duration >= 1.year
           "#{(duration / 1.year).to_i} years"
         elsif duration >= 1.month

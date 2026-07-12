@@ -116,7 +116,7 @@ module PamDsl
       billing: {
         description: "Processing payments and generating invoices",
         basis: :contract,
-        requires: [:email, :address]
+        requires: [:email, :address, :identifier, :financial, :credit_card]
       },
       legal_compliance: {
         description: "Compliance with legal and regulatory requirements",
@@ -465,40 +465,31 @@ module PamDsl
     end
 
     def generate_purposes_code(detected_fields)
-      # Determine which purposes make sense based on detected fields
-      field_names = detected_fields.keys
+      return "" if detected_fields.empty?
+
+      detected_types = detected_fields.values.map { |c| c[:type] }.uniq
+      fields_by_type = detected_fields.each_with_object(Hash.new { |h, k| h[k] = [] }) do |(name, config), h|
+        h[config[:type]] << name
+      end
 
       purposes = []
 
-      # Service delivery if we have names/emails
-      if field_names.any? { |f| f.to_s.include?("name") || f.to_s.include?("email") }
-        purposes << <<~RUBY
-            purpose :service_delivery do
-              describe "Core service delivery and functionality"
-              basis :contract
-              requires #{([:email] & field_names).map { |f| ":#{f}" }.join(", ")}
-            end
-        RUBY
-      end
+      DEFAULT_PURPOSES.each do |purpose_name, config|
+        required_types = config[:requires]
+        next unless required_types.empty? || required_types.any? { |t| detected_types.include?(t) }
 
-      # Billing if we have financial fields
-      if field_names.any? { |f| f.to_s.include?("address") || f.to_s.include?("vat") }
-        purposes << <<~RUBY
-            purpose :billing do
-              describe "Processing payments and generating invoices"
-              basis :contract
-              requires #{([:email, :address, :vat_number] & field_names).map { |f| ":#{f}" }.join(", ")}
-            end
-        RUBY
-      end
+        matching_fields = required_types.flat_map { |t| fields_by_type[t] }
+        requires_clause = matching_fields.map { |f| ":#{f}" }.join(", ")
 
-      # Audit trail if we have IP address
-      if field_names.include?(:ip_address)
+        lia_line = config[:basis] == :legitimate_interests \
+          ? "# lia_documented!  # uncomment after conducting the LIA balancing test\n              " \
+          : ""
+
         purposes << <<~RUBY
-            purpose :audit_trail do
-              describe "Maintaining security and audit logs"
-              basis :legal_obligation
-              requires :ip_address
+            purpose :#{purpose_name} do
+              describe "#{config[:description]}"
+              basis :#{config[:basis]}
+              #{lia_line}#{"requires #{requires_clause}" unless requires_clause.empty?}
             end
         RUBY
       end

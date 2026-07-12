@@ -10,7 +10,7 @@ module PamDsl
   #   compliance = PamDsl::GDPRCompliance.new(
   #     subject_id: user.id,
   #     subject_type: 'User',
-  #     event_reader: ->(sid, stype) {
+  #     record_reader: ->(sid, stype) {
   #       Lyra.config.event_store.read.to_a.select { |e| relates_to_subject?(e, sid, stype) }
   #     }
   #   )
@@ -19,7 +19,7 @@ module PamDsl
   # @example With RubyEventStore
   #   compliance = PamDsl::GDPRCompliance.new(
   #     subject_id: user.id,
-  #     event_reader: ->(sid, stype) {
+  #     record_reader: ->(sid, stype) {
   #       event_store.read.stream("User$#{sid}").to_a
   #     },
   #     attribute_extractor: ->(e) { e.data[:attributes] || {} },
@@ -33,7 +33,7 @@ module PamDsl
     #
     # @param subject_id [Object] The data subject's identifier
     # @param subject_type [String] The type/class of the subject (default: 'User')
-    # @param event_reader [Proc] Block that returns events for a subject: ->(subject_id, subject_type) { [...] }
+    # @param record_reader [Proc] Block that returns records for a subject: ->(subject_id, subject_type) { [...] }
     # @param attribute_extractor [Proc] Block to extract attributes from event: ->(event) { hash }
     # @param timestamp_extractor [Proc] Block to extract timestamp from event: ->(event) { time }
     # @param operation_extractor [Proc] Block to extract operation from event: ->(event) { :created/:updated/:destroyed }
@@ -42,11 +42,12 @@ module PamDsl
     # @param changes_extractor [Proc] Block to extract changes from event: ->(event) { hash }
     # @param retention_policy [Hash] Retention periods by model class
     #
-    def initialize(subject_id:, subject_type: 'User', event_reader:, **options)
+    def initialize(subject_id:, subject_type: 'User', record_reader:, **options)
       @subject_id = subject_id
       @subject_type = subject_type
-      @event_reader = event_reader
+      @record_reader = record_reader
       @options = options
+      @pam_policy = options[:policy_name] ? PamDsl.registry.get(options[:policy_name]) : nil
 
       # Set up extractors with sensible defaults
       @attribute_extractor = options[:attribute_extractor] || method(:default_attribute_extractor)
@@ -55,6 +56,7 @@ module PamDsl
       @model_class_extractor = options[:model_class_extractor] || method(:default_model_class_extractor)
       @model_id_extractor = options[:model_id_extractor] || method(:default_model_id_extractor)
       @changes_extractor = options[:changes_extractor] || method(:default_changes_extractor)
+      @source_extractor = options[:source_extractor] || method(:default_source_extractor)
       @retention_policy = options[:retention_policy] || default_retention_policy
     end
 
@@ -64,7 +66,7 @@ module PamDsl
     # @return [Hash] Complete data export including events, PII inventory, and lineage
     #
     def data_export
-      events = collect_all_events
+      events = collect_all_records
 
       {
         subject: { id: subject_id, type: subject_type },
@@ -82,7 +84,7 @@ module PamDsl
     # @return [Hash] Report on affected data and recommended deletion strategy
     #
     def right_to_be_forgotten_report
-      events = collect_all_events
+      events = collect_all_records
 
       {
         subject: { id: subject_id, type: subject_type },
@@ -102,7 +104,7 @@ module PamDsl
     # @return [String, Hash] Exported data in requested format
     #
     def portable_export(format: :json)
-      events = collect_all_events
+      events = collect_all_records
 
       data = {
         version: "1.0",
@@ -129,7 +131,7 @@ module PamDsl
     # @return [Array<Hash>] History of all data corrections
     #
     def rectification_history
-      events = collect_all_events
+      events = collect_all_records
 
       corrections = events.select do |event|
         extract_operation(event) == :updated && has_pii?(event)
@@ -153,17 +155,15 @@ module PamDsl
     # @return [Array<Hash>] Processing activities grouped by source
     #
     def processing_activities
-      events = collect_all_events
+      events = collect_all_records
 
-      activities = events.group_by do |event|
-        event.respond_to?(:metadata) ? (event.metadata[:source] || 'unknown') : 'unknown'
-      end
+      activities = events.group_by { |record| @source_extractor.call(record) }
 
       activities.map do |source, source_events|
         {
           source: source,
           purpose: infer_purpose(source, source_events),
-          legal_basis: determine_legal_basis(source_events),
+          legal_basis: determine_legal_basis(source, source_events),
           data_categories: categorize_data(source_events),
           recipients: identify_recipients(source_events),
           retention_period: determine_retention_period(source_events),
@@ -178,7 +178,7 @@ module PamDsl
     # @return [Array<Hash>] Compliance status per model class
     #
     def retention_compliance_check
-      events = collect_all_events
+      events = collect_all_records
 
       events.group_by { |e| extract_model_class(e) }.map do |model_class, model_events|
         policy = @retention_policy[model_class] || @retention_policy[:default] || { duration: 7.years }
@@ -204,7 +204,7 @@ module PamDsl
     # @return [Hash] Current consents, history, and processing legitimacy
     #
     def consent_audit
-      events = collect_all_events
+      events = collect_all_records
 
       consent_events = events.select do |event|
         data = event.respond_to?(:data) ? event.data : {}
@@ -251,11 +251,21 @@ module PamDsl
     private
 
     # Collect all events for the subject
-    def collect_all_events
-      @event_reader.call(subject_id, subject_type)
+    def collect_all_records
+      @record_reader.call(subject_id, subject_type)
     end
 
-    # Default extractors that work with common event structures
+    # Default extractors that work with common record/event structures
+    def default_source_extractor(record)
+      if record.respond_to?(:metadata)
+        record.metadata[:source] || 'unknown'
+      elsif record.is_a?(Hash)
+        (record[:source] || record["source"] || 'unknown').to_s
+      else
+        'unknown'
+      end
+    end
+
     def default_attribute_extractor(event)
       return event.attributes if event.respond_to?(:attributes) && !event.attributes.is_a?(Method)
       return event.data[:attributes] || event.data["attributes"] || {} if event.respond_to?(:data)
@@ -446,8 +456,24 @@ module PamDsl
       end
     end
 
-    def determine_legal_basis(events)
-      "Consent" # Could be: Consent, Contract, Legal obligation, Vital interests, Public task, Legitimate interests
+    LEGAL_BASIS_LABELS = {
+      consent:              "Consent (Art. 6(1)(a))",
+      contract:             "Contract (Art. 6(1)(b))",
+      legal_obligation:     "Legal obligation (Art. 6(1)(c))",
+      vital_interests:      "Vital interests (Art. 6(1)(d))",
+      public_task:          "Public task (Art. 6(1)(e))",
+      legitimate_interests: "Legitimate interests (Art. 6(1)(f))"
+    }.freeze
+
+    def determine_legal_basis(source, _events)
+      return "Not specified" unless @pam_policy
+
+      purpose = @pam_policy.purposes.values.find { |p| source_matches_purpose?(source, p) }
+      LEGAL_BASIS_LABELS[purpose&.legal_basis] || "Not specified"
+    end
+
+    def source_matches_purpose?(source, purpose)
+      source.to_s.downcase.include?(purpose.name.to_s.downcase.tr('_', ' ').split.first)
     end
 
     def categorize_data(events)

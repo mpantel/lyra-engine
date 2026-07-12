@@ -1,5 +1,20 @@
-require "active_support"
-require "active_support/core_ext"
+# ActiveSupport provides convenience helpers (Numeric durations, Time.current,
+# String#underscore, Object#present?). It is optional: when it is not installed
+# (e.g. pam_dsl used standalone, outside Rails) a minimal standard-library
+# polyfill is loaded instead. See pam_dsl/core_ext.rb.
+#
+# Set PAM_DSL_FORCE_POLYFILL to load the polyfill even when ActiveSupport is
+# available --- used by the test suite to exercise both code paths.
+if ENV["PAM_DSL_FORCE_POLYFILL"]
+  require_relative "pam_dsl/core_ext"
+else
+  begin
+    require "active_support"
+    require "active_support/core_ext"
+  rescue LoadError
+    require_relative "pam_dsl/core_ext"
+  end
+end
 
 require_relative "pam_dsl/version"
 require_relative "pam_dsl/pii_detector"
@@ -22,7 +37,15 @@ module PamDsl
   class Error < StandardError; end
   class PolicyNotFoundError < Error; end
   class InvalidFieldError < Error; end
+  class UndeclaredPurposeError < Error; end
+  class PurposeFieldMismatchError < Error; end
   class ConsentRequiredError < Error; end
+  class SensitivityViolationError < Error; end
+
+  # Class used to recognise duration values in case/when: ActiveSupport::Duration
+  # when ActiveSupport is loaded, otherwise plain Numeric (the polyfill represents
+  # durations as an integer number of seconds).
+  DURATION_CLASS = defined?(ActiveSupport::Duration) ? ActiveSupport::Duration : Numeric
 
   class << self
     # Rails configuration (set by Railtie)

@@ -61,6 +61,7 @@ module Lyra
       # Load rake tasks
       rake_tasks do
         load "tasks/lyra_schema.rake"
+        load "tasks/lyra_projections.rake"
       end
     end
   end

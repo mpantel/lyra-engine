@@ -8,4 +8,23 @@ Rake::TestTask.new(:test) do |t|
   t.verbose = true
 end
 
+# Same suite, forcing the ActiveSupport-free stdlib polyfill (lib/pam_dsl/core_ext.rb).
+desc "Run the test suite forcing the ActiveSupport-free polyfill path"
+task "test:polyfill" do
+  sh({ "PAM_DSL_FORCE_POLYFILL" => "1" },
+     RbConfig.ruby, "-Ilib", "-Itest",
+     "-e", 'Dir.glob("test/**/*_test.rb").sort.each { |f| require File.expand_path(f) }')
+end
+
+# Run the whole suite twice: once with ActiveSupport, once with the polyfill.
+desc "Run the test suite under BOTH ActiveSupport and the polyfill"
+task "test:both" => :test do
+  Rake::Task["test:polyfill"].invoke
+end
+
+desc "Run the validation microbenchmark (QUICK=1 for a fast sweep)"
+task :bench do
+  ruby "-Ilib", "benchmark/validation_benchmark.rb"
+end
+
 task default: :test

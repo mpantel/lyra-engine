@@ -73,7 +73,7 @@ module PamDsl
       @compliance = GDPRCompliance.new(
         subject_id: @subject_id,
         subject_type: @subject_type,
-        event_reader: ->(_sid, _stype) { @events }
+        record_reader: ->(_sid, _stype) { @events }
       )
     end
 
@@ -89,7 +89,7 @@ module PamDsl
     def test_initialization_with_custom_extractors
       custom_compliance = GDPRCompliance.new(
         subject_id: 1,
-        event_reader: ->(_sid, _stype) { [] },
+        record_reader: ->(_sid, _stype) { [] },
         attribute_extractor: ->(e) { e.data[:custom_attrs] || {} }
       )
 
@@ -272,7 +272,7 @@ module PamDsl
     def test_retention_compliance_with_custom_policy
       custom_compliance = GDPRCompliance.new(
         subject_id: @subject_id,
-        event_reader: ->(_sid, _stype) { @events },
+        record_reader: ->(_sid, _stype) { @events },
         retention_policy: {
           default: { duration: 1.day },
           'User' => { duration: 1.day }
@@ -318,7 +318,7 @@ module PamDsl
       events_with_consent = @events + [consent_event]
       compliance = GDPRCompliance.new(
         subject_id: @subject_id,
-        event_reader: ->(_sid, _stype) { events_with_consent }
+        record_reader: ->(_sid, _stype) { events_with_consent }
       )
 
       result = compliance.consent_audit
@@ -347,7 +347,7 @@ module PamDsl
     def test_empty_events
       empty_compliance = GDPRCompliance.new(
         subject_id: 999,
-        event_reader: ->(_sid, _stype) { [] }
+        record_reader: ->(_sid, _stype) { [] }
       )
 
       result = empty_compliance.data_export
@@ -369,7 +369,7 @@ module PamDsl
 
       compliance = GDPRCompliance.new(
         subject_id: @subject_id,
-        event_reader: ->(_sid, _stype) { [non_pii_event] }
+        record_reader: ->(_sid, _stype) { [non_pii_event] }
       )
 
       result = compliance.right_to_be_forgotten_report
@@ -391,7 +391,7 @@ module PamDsl
 
       compliance = GDPRCompliance.new(
         subject_id: @subject_id,
-        event_reader: ->(_sid, _stype) { [event_no_timestamp] }
+        record_reader: ->(_sid, _stype) { [event_no_timestamp] }
       )
 
       # Should not raise error

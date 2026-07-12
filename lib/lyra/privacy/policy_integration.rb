@@ -37,16 +37,12 @@ module Lyra
         !@policy.nil?
       end
 
-      # Validate data access for a purpose
-      def validate_access!(field_names, purpose, consent_status = {})
+      # Validate data access for a (fields, purpose, subject) triple.
+      # subject: is the data subject identifier required by Policy#validate_access!
+      def validate_access!(field_names, purpose, subject:)
         return true unless policy_loaded?
 
-        @policy.validate_access!(
-          field_names,
-          purpose,
-          consent_granted: consent_status[:granted] || false,
-          consent_granted_at: consent_status[:granted_at]
-        )
+        @policy.validate_access!(field_names, purpose, subject: subject)
       end
 
       # Get PII fields from attributes using policy and/or detector

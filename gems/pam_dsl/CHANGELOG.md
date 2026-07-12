@@ -2,7 +2,36 @@
 
 All notable changes to PAM DSL will be documented in this file.
 
-## [Unreleased]
+## [0.8.0] - 2026-06-15
+
+### Changed
+- **ActiveSupport is now optional.** `pam_dsl` previously declared a hard runtime dependency on `activesupport` and unconditionally `require`d it. It now loads ActiveSupport only if present and otherwise falls back to a minimal standard-library polyfill (`lib/pam_dsl/core_ext.rb`), so the gem is self-contained when used standalone (outside Rails). `activesupport` moved from a runtime to a development dependency (still exercised by the test suite). The ActiveSupport surface the gem uses is small: `Numeric` duration helpers (`.years`/`.months`/`.weeks`/`.days`, `.ago`/`.from_now`), `Time.current`, `String#underscore`/`#titleize`, and `Object#present?`.
+- The polyfill durations use a **fixed-length approximation** (30-day month, 365-day year), matching the gem's report tooling. When ActiveSupport is present its calendar-aware durations are used instead, unchanged.
+- `Reporter#format_duration` now matches `PamDsl::DURATION_CLASS` (`ActiveSupport::Duration` when available, else `Numeric`) instead of referencing `ActiveSupport::Duration` directly, so it works under both paths.
+
+### Added
+- `PAM_DSL_FORCE_POLYFILL` environment variable forces the stdlib polyfill even when ActiveSupport is installed, so both code paths can be tested.
+- Rake tasks `test:polyfill` (run the suite forcing the polyfill) and `test:both` (run it under both ActiveSupport and the polyfill). The same 425 tests pass under both paths; `test_duration_formatting` was made tolerant of the 30-day month boundary (the only assertion that differs between the calendar and fixed-length duration models).
+
+## [0.7.0] - 2026-06-02
+
+### Added
+- `ConsentRecord` class: full four-state lifecycle (P0 Pending, P1 Granted, P2 Expired, P3 Withdrawn) matching the formal consent state diagram (paper §4.2). `expires_at` is stored on the record at grant time so `state` derives `:expired` autonomously without external requirement lookup. `grant!` (P0→P1) and `withdraw!` (P1→P3) enforce valid transitions; P2 and P3 are absorbing.
+- `ConsentStore#request` creates a Pending record (P0); replaces absorbing records to support re-consent flow
+- `ConsentPolicy#request_consent` exposes the Pending flow at the policy level
+- `ConsentStore` class: runtime consent state store (the $CS$ component of the formal runtime context); indexed by `[purpose, subject]` pairs; supports `grant`, `withdraw`, `record_for`, `granted?`
+- `ConsentPolicy#grant_consent(purpose:, subject:, granted_at:)` and `#withdraw_consent(purpose:, subject:)` for populating the consent store
+- `ConsentPolicy#validate!(purpose, subject:)` now performs per-subject consent lookup against the store, implementing `consent_active(u, s, C)` from Definition 5
+- `Policy#validate_access!` signature changed to `(field_names, purpose_name, subject:)` — subject identifier is now required, eliminating the caller-supplied boolean anti-pattern
+- `UndeclaredPurposeError` and `PurposeFieldMismatchError` exception classes — completes the five-class violation taxonomy from Definition 4 (`InvalidFieldError`, `UndeclaredPurposeError`, `PurposeFieldMismatchError`, `ConsentRequiredError`, `SensitivityViolationError`)
+- `Policy#validate_access!` now calls `get_field` before `allowed?` so undeclared fields raise `InvalidFieldError` and purpose-field mismatches raise `PurposeFieldMismatchError`, making violation classes unambiguous
+- `Purpose#lia_documented!` DSL method and `lia_documented?` predicate — records that a Legitimate Interests Assessment has been conducted for an Art. 6(1)(f) purpose
+- `Policy#lia_compliance_gaps` — returns all `:legitimate_interests` purposes lacking a documented LIA; surfaces Definition 2's basis_ok condition as a compliance query rather than an enforcement gate (per paper §3.2: LIA is a human-judgment obligation, not automatable)
+- `Purpose#art9_basis(*bases)` DSL method for declaring GDPR Art. 9(2) sub-clauses on a purpose; multiple calls accumulate
+- `Purpose#art9_basis?` predicate returning true when at least one Art. 9(2) basis is declared
+- `SensitivityViolationError` exception class (Definition 4, Sensitivity Violation class)
+- `Field::SPECIAL_CATEGORY_TYPES` constant (`:health`, `:biometric`) and `Field#special_category?` predicate — identify GDPR Article 9 special-category data by **type**, independently of the `:restricted` sensitivity (Article 32 risk) level
+- `Policy#validate_access!` enforces Definition 1 Condition 5 by **data type**: raises `SensitivityViolationError` when any requested field is an Article 9 special-category type (`special_category?`) and the purpose declares no Art. 9(2) basis. This deliberately decouples the Art. 9(2) requirement from the `:restricted` risk tier, so high-risk-but-ordinary data (e.g. financial or national-identifier fields marked `:restricted`) no longer spuriously requires an Art. 9(2) basis, while a special-category type triggers the check at any sensitivity level.
 
 ## [0.6.0] - 2026-01-05
 

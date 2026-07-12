@@ -20,10 +20,13 @@ Gem::Specification.new do |spec|
 
   spec.require_paths = ["lib"]
 
-  # Runtime dependencies
-  spec.add_dependency "activesupport", ">= 6.0"
+  # Runtime dependencies: none. ActiveSupport is used when present (e.g. in Rails
+  # apps) but is optional --- lib/pam_dsl/core_ext.rb provides a stdlib polyfill
+  # when it is absent, so the gem is self-contained. It is kept as a development
+  # dependency so the ActiveSupport code path is exercised by the test suite.
 
   # Development dependencies
+  spec.add_development_dependency "activesupport", ">= 6.0"
   spec.add_development_dependency "minitest", "~> 5.0"
   spec.add_development_dependency "minitest-reporters", "~> 1.5"
   spec.add_development_dependency "rake", "~> 13.0"

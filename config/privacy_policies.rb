@@ -110,9 +110,9 @@ PamDsl.define_policy :university_system do
   purpose :communication do
     describe "Important academic and administrative communications"
     basis :legitimate_interests
+    lia_documented!
     requires :email
     optionally :phone, :name
-    meta :balancing_test_performed, true
   end
 
   purpose :academic_records do
@@ -140,6 +140,7 @@ PamDsl.define_policy :university_system do
   purpose :analytics do
     describe "Improving educational services and user experience"
     basis :legitimate_interests
+    lia_documented!
     requires :student_id
     meta :anonymization_applied, true
   end

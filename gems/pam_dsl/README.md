@@ -144,9 +144,9 @@ PamDsl.define_policy :my_policy do
   purpose :analytics do
     describe "Improving service quality and user experience"
     basis :legitimate_interests  # GDPR Article 6(1)(f)
+    lia_documented!              # balancing test conducted and on record
     requires :user_id
     optionally :session_data, :interaction_events
-    meta :balancing_test_performed, true
     meta :data_minimization, true
   end
 
@@ -165,6 +165,58 @@ end
 - `:vital_interests` - Protection of vital interests
 - `:public_task` - Task in public interest
 - `:legitimate_interests` - Legitimate interests
+
+#### Legitimate Interests Assessment (LIA)
+
+When the basis is `:legitimate_interests`, GDPR Art. 6(1)(f) requires a balancing test — a human-judgment obligation PAM cannot automate. Instead, PAM verifies that one has been recorded. Use `lia_documented!` to mark the assessment as done; `lia_compliance_gaps` surfaces any `:legitimate_interests` purposes where it is missing.
+
+```ruby
+purpose :analytics do
+  basis :legitimate_interests
+  lia_documented!   # records that the LIA balancing test has been conducted
+  requires :user_id
+end
+
+# Check which purposes still need an LIA
+policy.lia_compliance_gaps.each do |p|
+  puts "#{p.name}: LIA not documented"
+end
+```
+
+`lia_compliance_gaps` is a compliance query, not an enforcement gate — access is not blocked when `lia_documented!` is absent, because the balancing test is an organizational process, not a runtime condition.
+
+#### Art. 9(2) Basis for Special-Category Data
+
+When a purpose accesses **special-category fields** — those whose `type` is a GDPR Article 9 category (`:health`, `:biometric`) — you **must** also declare an Art. 9(2) basis. Without it, `validate_access!` raises `SensitivityViolationError`. Multiple bases are accepted. Note that this is driven by the field **type**, not by the `:restricted` sensitivity level: `:restricted` is an Article 32 *risk* tier (used for high-risk-but-ordinary data such as financial or national-identifier fields), so a `:restricted` field of a non-Article-9 type does **not** require an Art. 9(2) basis, while an Article-9-type field requires one even below `:restricted`.
+
+```ruby
+purpose :medical_diagnosis do
+  describe "Processing health data for treatment"
+  basis :contract
+  art9_basis :health_care               # Art. 9(2)(h)
+  art9_basis :explicit_consent          # Art. 9(2)(a) — multiple allowed
+  requires :diagnosis, :prescription
+end
+
+# Or pass multiple in one call
+purpose :health_research do
+  basis :public_task
+  art9_basis :health_care, :research_archiving
+  requires :diagnosis
+end
+```
+
+**Art. 9(2) Bases:**
+- `:explicit_consent` - 9(2)(a): explicit consent from the data subject
+- `:employment_law` - 9(2)(b): employment / social security law obligation
+- `:vital_interests` - 9(2)(c): vital interests, subject incapable of consenting
+- `:non_profit` - 9(2)(d): legitimate non-profit body, members only
+- `:made_public` - 9(2)(e): data manifestly made public by the subject
+- `:legal_claims` - 9(2)(f): legal claims or judicial acts
+- `:substantial_public_interest` - 9(2)(g): substantial public interest (Union/Member State law)
+- `:health_care` - 9(2)(h): medical diagnosis, health or social care
+- `:public_health` - 9(2)(i): public health
+- `:research_archiving` - 9(2)(j): scientific/historical research or statistics
 
 ### Retention Policies
 
@@ -207,7 +259,12 @@ end
 
 ### Consent Management
 
-Define consent requirements for purposes:
+Consent has two distinct layers in PAM:
+
+1. **Policy-time spec** (`consent` DSL block) — declares *what* consent is required per purpose
+2. **Runtime consent store** — records *whether* each data subject has actually granted or withdrawn consent
+
+#### Policy-time spec
 
 ```ruby
 PamDsl.define_policy :my_policy do
@@ -229,6 +286,41 @@ PamDsl.define_policy :my_policy do
 end
 ```
 
+#### Runtime consent store
+
+Before calling `validate_access!` for a consent-based purpose, populate the store with the subject's actual consent decision. The store is the runtime $CS$ component from the formal model — indexed by `(purpose, subject)` pairs.
+
+```ruby
+policy = PamDsl.policy(:my_policy)
+
+# Subject 42 grants marketing consent
+policy.consent_policy.grant_consent(purpose: :marketing, subject: 42)
+
+# Subject 42 grants with a backdated timestamp (e.g. loaded from DB)
+policy.consent_policy.grant_consent(
+  purpose: :marketing,
+  subject: 42,
+  granted_at: 6.months.ago
+)
+
+# Subject 42 withdraws consent
+policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 42)
+```
+
+`validate_access!` then looks up the store automatically — no need to pass a boolean:
+
+```ruby
+# Passes: record exists and is not withdrawn/expired
+policy.validate_access!([:email], :marketing, subject: 42)
+
+# Raises ConsentRequiredError: no record for subject 99
+policy.validate_access!([:email], :marketing, subject: 99)
+
+# Raises ConsentRequiredError: record is withdrawn
+policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 42)
+policy.validate_access!([:email], :marketing, subject: 42)
+```
+
 ### Custom Attributes (Metadata)
 
 PAM DSL supports custom attributes via the `meta(key, value)` method at three levels: **policy**, **field**, and **purpose**. This allows you to extend policies with application-specific data without modifying the DSL core.
@@ -244,8 +336,8 @@ PamDsl.define_policy :my_app do
   meta :dpo_email, "dpo@aegean.gr"
   meta :policy_version, "2.1"
   meta :gdpr_compliant, true
-  meta :last_review_date, "2024-01-15"
-  meta :next_review_date, "2025-01-15"
+  meta :last_review_date, "2026-06-02"
+  meta :next_review_date, "2027-06-02"
 
   # ... fields, purposes, etc.
 end
@@ -300,9 +392,9 @@ purpose :analytics do
   requires :usage_data
   optionally :device_info
 
-  # Legitimate Interest Assessment (LIA) documentation
-  meta :lia_conducted, true
-  meta :lia_date, "2024-01-15"
+  # Legitimate Interest Assessment (LIA) — use lia_documented! to record completion
+  lia_documented!
+  meta :lia_date, "2026-06-02"
   meta :lia_outcome, "Approved - minimal privacy impact"
   meta :balancing_test, "User benefit outweighs minimal data use"
 
@@ -369,16 +461,16 @@ policy = PamDsl.policy(:user_data)
 policy.allowed?(:email, :marketing)  # => true
 policy.allowed?(:ssn, :marketing)    # => false
 
-# Validate data access
+# Record consent for subject before validating (required for consent-based purposes)
+policy.consent_policy.grant_consent(purpose: :marketing, subject: current_user.id)
+
+# Validate data access — subject: is always required
 begin
-  policy.validate_access!(
-    [:email, :name],
-    :marketing,
-    consent_granted: true,
-    consent_granted_at: 6.months.ago
-  )
+  policy.validate_access!([:email, :name], :marketing, subject: current_user.id)
 rescue PamDsl::ConsentRequiredError => e
   puts "Consent error: #{e.message}"
+rescue PamDsl::SensitivityViolationError => e
+  puts "Art. 9 violation: #{e.message}"
 end
 
 # Get field and apply transformation
@@ -874,7 +966,7 @@ The `GDPRCompliance` class provides comprehensive GDPR data subject rights funct
 compliance = PamDsl::GDPRCompliance.new(
   subject_id: user.id,
   subject_type: 'User',
-  event_reader: ->(subject_id, subject_type) {
+  record_reader: ->(subject_id, subject_type) {
     # Return events for this subject from your event store
     EventStore.events_for_user(subject_id)
   }
@@ -906,7 +998,7 @@ For non-standard event formats, provide custom extractors:
 # RubyEventStore example
 compliance = PamDsl::GDPRCompliance.new(
   subject_id: user.id,
-  event_reader: ->(sid, stype) {
+  record_reader: ->(sid, stype) {
     event_store.read.stream("User$#{sid}").to_a
   },
   attribute_extractor: ->(e) { e.data[:attributes] || {} },
@@ -1069,7 +1161,9 @@ end
 - `consent(&block)` - Configure consent
 - `meta(key, value)` - Add custom metadata to policy
 - `allowed?(field, purpose)` - Check if field is allowed for purpose
-- `validate_access!(fields, purpose, consent_granted:, consent_granted_at:)` - Validate access
+- `validate_access!(fields, purpose, subject:)` - Validate access for a data subject; raises `ConsentRequiredError`, `SensitivityViolationError`, or `InvalidFieldError`
+- `consent_policy` - Access the `ConsentPolicy` to populate the runtime consent store
+- `lia_compliance_gaps` - Returns purposes with `:legitimate_interests` basis that have not called `lia_documented!`
 - `sensitive_fields` - Get all fields with confidential/restricted sensitivity
 - `restricted_fields` - Get all fields with restricted sensitivity
 - `metadata` - Access policy metadata hash
@@ -1089,12 +1183,17 @@ end
 ### Purpose
 
 - `describe(text)` - Set description
-- `basis(legal_basis)` - Set legal basis
+- `basis(legal_basis)` - Set legal basis (GDPR Art. 6)
+- `lia_documented!(value = true)` - Record that a Legitimate Interests Assessment has been conducted for this `:legitimate_interests` purpose; pass `false` to unset
+- `lia_documented?` - True when LIA has been recorded
+- `art9_basis(*bases)` - Declare one or more Art. 9(2) bases; required when the purpose accesses Article-9 special-category-**type** fields (e.g. `:health`, `:biometric`), independently of the `:restricted` risk level; multiple calls accumulate
 - `requires(*fields)` - Define required fields
 - `optionally(*fields)` - Define optional fields
 - `meta(key, value)` - Add custom metadata
 - `metadata` - Access purpose metadata hash
 - `requires_consent?` - Check if purpose requires consent (basis is :consent)
+- `art9_basis?` - True when at least one Art. 9(2) basis is declared
+- `art9_bases` - Array of declared Art. 9(2) bases
 - `all_fields` - Get all fields (required + optional)
 - `requires_field?(field)` - Check if field is required
 - `allows_field?(field)` - Check if field is allowed
@@ -1107,13 +1206,37 @@ end
 - `field(name, duration:)` - Set field retention
 - `on_expiry(strategy)` - Set deletion strategy
 
-### Consent
+### ConsentPolicy
 
-- `for_purpose(purpose, &block)` - Define consent requirement
+DSL configuration (policy-time):
+- `for_purpose(purpose, &block)` - Declare a consent requirement for a purpose
 - `required!(value)` - Set if required
 - `granular!(value)` - Enable granular consent
 - `withdrawable!(value)` - Set if withdrawable
-- `expires_in(duration)` - Set expiration
+- `expires_in(duration)` - Set expiration window
+
+Runtime consent store (per-subject, accessed via `policy.consent_policy`):
+- `grant_consent(purpose:, subject:, granted_at: Time.current)` - Record that subject granted consent
+- `withdraw_consent(purpose:, subject:)` - Record that subject withdrew consent
+- `requirement_for(purpose)` - Look up the `ConsentRequirement` for a purpose
+- `required_for?(purpose)` - True if consent is required for the purpose
+- `store` - The underlying `ConsentStore`
+
+### ConsentStore
+
+- `grant(purpose:, subject:, granted_at:)` - Add a consent record to CS
+- `withdraw(purpose:, subject:)` - Mark a record as withdrawn
+- `record_for(purpose, subject)` - Returns the `ConsentRecord` or nil
+- `granted?(purpose, subject)` - True when a non-withdrawn record exists
+
+### ConsentRecord
+
+- `purpose` - Purpose symbol
+- `subject` - Subject identifier
+- `granted_at` - Time consent was granted
+- `withdrawn_at` - Time consent was withdrawn, or nil
+- `withdrawn?` - True if consent has been withdrawn
+- `state` - `:granted` or `:withdrawn`
 
 ### Reporter
 
@@ -1155,7 +1278,7 @@ end
 
 ### GDPRCompliance
 
-- `GDPRCompliance.new(subject_id:, subject_type:, event_reader:, **extractors)` - Create compliance handler
+- `GDPRCompliance.new(subject_id:, subject_type:, record_reader:, **extractors)` - Create compliance handler
 - `data_export` - Right to Access (Art. 15) - Full data export
 - `right_to_be_forgotten_report` - Right to Erasure (Art. 17) - Deletion analysis
 - `portable_export(format:)` - Right to Portability (Art. 20) - Export as JSON/CSV/XML
@@ -1304,12 +1427,16 @@ The following table shows the default sensitivity assignments in PAM DSL:
 
 ### Legal Bases by Sensitivity
 
-| Sensitivity | Typical Legal Bases | GDPR Articles |
+`sensitivity` is an Article 32 **risk** tier; it determines the strength of protection, not the legal basis. The Article 9(2) requirement is driven separately by a field's **type** (see below), not by its sensitivity level.
+
+| Sensitivity (risk tier) | Typical Article 6 Legal Bases | GDPR Articles |
 |-------------|---------------------|---------------|
 | `:public` | Not applicable | N/A |
 | `:internal` | Contract, Legitimate Interest | Art. 6(1)(b), (f) |
 | `:confidential` | Contract, Consent, Legal Obligation | Art. 6(1)(a), (b), (c) |
-| `:restricted` | Explicit Consent + Art. 9(2) exception | Art. 9(2)(a)-(j) |
+| `:restricted` | Contract, Legal Obligation, Consent (highest-risk ordinary data, e.g. financial/national-ID) | Art. 6(1)(a), (b), (c) |
+
+**Article 9 special categories** (independent of the table above): a field whose **type** is `:health` or `:biometric` additionally requires an `art9_basis` on every purpose that accesses it — at any sensitivity level — under Art. 9(2)(a)–(j).
 
 ### Practical Implementation
 
@@ -1329,13 +1456,20 @@ PamDsl.define_policy :gdpr_compliant do
     meta :retention_period, "Account lifetime + 2 years"
   end
 
-  # Restricted - special category data
+  # Special-category TYPE (Art. 9) at the restricted risk tier
   field :health_status, type: :health, sensitivity: :restricted do
     allow_for :medical_services
-    meta :gdpr_basis, "Art. 9(2)(a) - Explicit consent"
     meta :dpia_required, true
     meta :encryption_algorithm, "AES-256"
     meta :access_approval_required, true
+  end
+
+  purpose :medical_services do
+    describe "Health data processing for care provision"
+    basis :contract
+    art9_basis :health_care        # Art. 9(2)(h) — mandatory for Art. 9 type fields (:health/:biometric)
+    art9_basis :explicit_consent   # Art. 9(2)(a) — additional basis
+    requires :health_status
   end
 
   # Restricted - financial identifier

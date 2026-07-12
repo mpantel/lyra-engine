@@ -34,6 +34,7 @@ module PamDsl
       # @return [Hash] New hash with PII fields masked
       #
       def mask(attributes, strategy: :partial)
+        raise ArgumentError, "Unknown strategy #{strategy.inspect}. Must be one of: #{STRATEGIES.join(', ')}" unless STRATEGIES.include?(strategy)
         return attributes if attributes.nil? || attributes.empty?
 
         masked = attributes.dup

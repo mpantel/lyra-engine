@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Projection rebuild from the event log** (`Lyra::Projections::Rebuild`) - Reconstruct
+  read-model tables from the event streams alone, the load-bearing invariant of event
+  sourcing (log is source of truth; tables are a derived projection):
+  - `Lyra::Projections::Rebuild.rebuild(Model)` clears the read model and replays each
+    stream through the same `ModelProjection.project` path used by live sync/async
+    projection, so a rebuilt table matches what live projection would have produced.
+  - `Lyra::Projections::Rebuild.rebuild_all` rebuilds every monitored model (or an
+    explicit list); `truncate: false` reconstructs streamed rows in place.
+  - `rake lyra:projections:rebuild [MODEL=Namespace::Model[,Other]] [TRUNCATE=false]`
+    rake task wrapping the above.
+  - Invalidates ES-NoProj cached reconstructions so reads reflect the rebuild.
+  - Integration tests (`test/projections/rebuild_test.rb`) covering surviving-record
+    reconstruction, destroyed-record omission, dual-view consistency after rebuild, and
+    `rebuild_all` over monitored models.
+- **PAM DSL** aligned with its formal foundations — see `gems/pam_dsl/CHANGELOG.md`.
+
 ## [0.6.0] - 2026-01-05
 
 ### Added
