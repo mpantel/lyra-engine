@@ -45,13 +45,10 @@ puts "\n" + "=" * 80
 puts "Example 4: Validate Data Access"
 puts "=" * 80
 
+subject_id = 42
+
 begin
-  # This should succeed
-  policy.validate_access!(
-    [:email, :name, :student_id],
-    :enrollment,
-    consent_granted: true
-  )
+  policy.validate_access!([:email, :name, :student_id], :enrollment, subject: subject_id)
   puts "\n✓ Access granted for enrollment with email, name, student_id"
 rescue PamDsl::Error => e
   puts "\n✗ Access denied: #{e.message}"
@@ -59,11 +56,7 @@ end
 
 begin
   # This should fail (SSN not allowed for marketing)
-  policy.validate_access!(
-    [:email, :ssn],
-    :marketing,
-    consent_granted: true
-  )
+  policy.validate_access!([:email, :ssn], :marketing, subject: subject_id)
   puts "✓ Access granted for marketing with email, SSN"
 rescue PamDsl::Error => e
   puts "✗ Access denied: #{e.message}"

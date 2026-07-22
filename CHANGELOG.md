@@ -23,6 +23,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reconstruction, destroyed-record omission, dual-view consistency after rebuild, and
     `rebuild_all` over monitored models.
 - **PAM DSL** aligned with its formal foundations — see `gems/pam_dsl/CHANGELOG.md`.
+- **Performance characterization** (`docs/PERFORMANCE.md`) — measured overhead of every
+  Lyra mode against a plain-ORM baseline: throughput and P95 latency across 1–64 threads,
+  the measurement controls used, and a SQL-level account of why Hijack mode outperforms
+  Monitor mode. The benchmark harness itself is published on acceptance of the
+  accompanying papers.
+
+### Fixed
+- **`:disabled` mode emitted events** (`Lyra::Interceptors::CrudInterceptor`) — the monitor
+  callbacks were gated on `lyra_monitored?`, a class attribute carrying no mode check, so a
+  model that had ever called `monitor_with_lyra` kept writing to the event store after Lyra
+  was disabled. A 150-write workload emitted 150 `event_store_events` rows in `:disabled`
+  mode, identical to `:monitor`. `:disabled` is now gated on `lyra_events_enabled?`
+  (monitored **and** not disabled), making it a true plain-ORM baseline. Hijack and
+  event-sourcing modes still pass the guard and are unaffected — their `after_*` callbacks
+  already return early via `@lyra_hijacked`.
+
+  If you have been using `:disabled` as an off switch on models that call
+  `monitor_with_lyra`, those models were still writing events before this fix.
+
+  The existing `test_disabled_mode_captures_no_events` could not catch this: it redefines the
+  model *without* the interceptor, asserting the outcome by construction. The new
+  `test_disabled_mode_writes_no_events_for_a_monitored_model` keeps the model monitored and
+  flips only the mode — what a migrating team actually does — and counts rows directly.
+- **Empty-stream reads raised `NameError`** (`Lyra::Projections::CachedProjection`) —
+  `load_events` rescued `RubyEventStore::StreamNotFound`, which does not exist in
+  `ruby_event_store` 2.18/3.0; the real class is `EventNotFoundInStream`. The bad constant
+  reference raised instead of catching the empty-stream case, surfacing as silent failed
+  operations on the ES (No Projection) read path.
 
 ## [0.6.0] - 2026-01-05
 

@@ -8,10 +8,12 @@ module Lyra
         class_attribute :lyra_monitored, default: false
         class_attribute :lyra_config
 
-        # Callbacks for monitoring CRUD operations (after_* = non-blocking)
-        after_create :lyra_intercept_create, if: :lyra_monitored?
-        after_update :lyra_intercept_update, if: :lyra_monitored?
-        after_destroy :lyra_intercept_destroy, if: :lyra_monitored?
+        # Callbacks for monitoring CRUD operations (after_* = non-blocking).
+        # Gated on the mode as well as the model: in :disabled mode a monitored
+        # model must behave exactly like plain ActiveRecord and emit no events.
+        after_create :lyra_intercept_create, if: :lyra_events_enabled?
+        after_update :lyra_intercept_update, if: :lyra_events_enabled?
+        after_destroy :lyra_intercept_destroy, if: :lyra_events_enabled?
 
         # For hijack mode - run before operation, store event, then let save proceed
         before_create :lyra_hijack_create, if: :lyra_hijack_mode?
@@ -182,6 +184,13 @@ module Lyra
 
       def lyra_monitored?
         self.class.lyra_monitored
+      end
+
+      # Monitoring a model is not enough to emit events: :disabled mode must be a
+      # true ORM baseline. Hijack and event-sourcing modes still pass this guard;
+      # their after_* callbacks return early via @lyra_hijacked.
+      def lyra_events_enabled?
+        lyra_monitored? && !Lyra.disabled_mode?
       end
 
       def lyra_hijack_mode?

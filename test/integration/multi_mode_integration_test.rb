@@ -122,6 +122,40 @@ class MultiModeIntegrationTest < Minitest::Test
     end
   end
 
+  # Regression: a *monitored* model kept emitting events after Lyra was disabled.
+  # The monitor callbacks were gated on lyra_monitored? alone -- a class attribute
+  # with no mode check -- so :disabled was not a true ORM baseline.
+  #
+  # test_disabled_mode_captures_no_events above cannot catch this: with_mode(:disabled)
+  # redefines Article *without* the interceptor, so it asserts the desired behavior by
+  # construction. Here the model stays monitored and only the mode changes -- which is
+  # exactly the situation a team migrating with Lyra is in, and the one the benchmark's
+  # "plain ORM" baseline assumed.
+  def test_disabled_mode_writes_no_events_for_a_monitored_model
+    skip "Requires Rails and database" unless infrastructure_available?
+
+    event_store = Lyra.config.event_store || create_event_store
+    Lyra.reset_config!
+    Lyra.config.event_store = event_store
+
+    define_article_model # includes the interceptor and calls monitor_with_lyra
+    Lyra.config.monitor_model(Article, event_prefix: "Article")
+    Lyra.config.disable!
+
+    assert Article.lyra_monitored, "model must stay monitored for this to test anything"
+    assert Lyra.disabled_mode?
+
+    before = event_store_row_count
+
+    article = Article.create!(title: "Test", body: "Content")
+    article.update!(title: "Updated")
+    article.destroy!
+
+    assert_equal before, event_store_row_count,
+                 "Disabled mode must be a true ORM baseline: a monitored model wrote " \
+                 "events to the store while Lyra was disabled"
+  end
+
   # Monitor and event_sourcing modes capture events with the correct ID
   [:monitor, :event_sourcing].each do |mode|
     define_method("test_#{mode}_mode_captures_create_event") do
@@ -610,6 +644,12 @@ class MultiModeIntegrationTest < Minitest::Test
   ensure
     Lyra.reset_config!
     Lyra.config.event_store = event_store
+  end
+
+  # Raw row count in the event store. Deliberately does not rescue: a failure to
+  # read must fail the test, not silently look like "no events".
+  def event_store_row_count
+    ActiveRecord::Base.connection.select_value("SELECT COUNT(*) FROM event_store_events").to_i
   end
 
   def events_for(model_class, id)

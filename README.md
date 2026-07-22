@@ -49,6 +49,7 @@ rails console
 ### Core Documentation
 - **[Getting Started Guide](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
+- **[Performance](docs/PERFORMANCE.md)** - Measured overhead per mode, and how to pick one
 - **[Monorepo Structure](docs/MONOREPO.md)** - Repository organization
 
 ### Theoretical Foundation

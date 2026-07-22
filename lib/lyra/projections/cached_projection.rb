@@ -249,7 +249,7 @@ module Lyra
         # Load events from stream
         def load_events(stream_name)
           Lyra.config.event_store.read.stream(stream_name).to_a
-        rescue RubyEventStore::StreamNotFound
+        rescue RubyEventStore::EventNotFoundInStream
           []
         end
 
