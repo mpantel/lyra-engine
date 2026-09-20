@@ -49,11 +49,33 @@ module Lyra
         # @param attributes [Hash] The attributes to match
         # @return [Hash, nil] The first matching record attributes or nil
         def find_by(model_class, attributes)
-          # Optimization: if looking up by :id only, use the fast find() path
-          # which uses single-stream lookup instead of scanning all events
-          if attributes.size == 1 && (attributes.key?(:id) || attributes.key?("id"))
-            id = attributes[:id] || attributes["id"]
-            return find(model_class, id)
+          primary_key = model_class.primary_key.to_s
+          id = attributes[primary_key.to_sym] || attributes[primary_key]
+
+          # Any lookup that pins the primary key names exactly one stream, so it
+          # can be answered by replaying that stream alone.
+          #
+          # The previous guard took this path only when the primary key was the
+          # SOLE condition. Adding a second condition -- find_by(id: 5, email: x)
+          # -- fell through to build_find_by_from_events, which asks
+          # find_streams_with_prefix for every stream belonging to the model and
+          # then replays each one in turn, an N+1 over the whole history, to
+          # answer a question about a single record. Cost went from O(one stream)
+          # to O(total events) on the strength of one extra condition.
+          #
+          # The remaining conditions are still checked, against the record the
+          # stream produced. The primary key itself is not re-checked: it is
+          # satisfied by construction, and comparing it again would reintroduce
+          # the type mismatch that makes find_by(id: "5") differ from
+          # find_by(id: 5) -- reconstruct_state casts the id back to an Integer.
+          if id
+            record = find(model_class, id)
+            return nil unless record
+
+            rest = attributes.reject { |key, _| key.to_s == primary_key }
+            return record if rest.empty?
+
+            return matches_attributes?(record, rest) ? record : nil
           end
 
           cache_key = query_cache_key(model_class, :find_by, attributes)
@@ -131,15 +153,24 @@ module Lyra
         #
         # @param model_class [Class] The ActiveRecord model class
         def invalidate_all(model_class)
-          # Use cache key prefix deletion if available
           prefix = "#{cache_namespace}/#{model_class.name}/"
 
-          if cache_store.respond_to?(:delete_matched)
-            cache_store.delete_matched("#{prefix}*")
-          else
-            # Fallback: invalidate known collection keys
-            invalidate_collection_caches(model_class)
-          end
+          # respond_to?(:delete_matched) is not a usable capability check here.
+          # Every ActiveSupport::Cache::Store defines the method; the stores that
+          # cannot implement it (Solid Cache, MemCacheStore) accept the call and
+          # raise NotImplementedError from it. The guard therefore always chose
+          # the "supported" branch, and on Solid Cache -- the Rails 8 default, and
+          # what this engine runs under -- invalidate_all raised instead of
+          # falling back. Rescue the raise rather than predicting it.
+          #
+          # The fallback clears the collection keys only: without prefix deletion
+          # a store cannot be asked which per-record keys exist, so those expire
+          # on their TTL (DEFAULT_EXPIRES_IN) instead of being dropped here.
+          # Callers needing a hard guarantee on such a store must invalidate the
+          # records they know about, or clear the store.
+          cache_store.delete_matched("#{prefix}*")
+        rescue NotImplementedError
+          invalidate_collection_caches(model_class)
         end
 
         # Warm the cache for a record (call after event is stored)
@@ -173,13 +204,18 @@ module Lyra
 
         # Build find_by result from events
         def build_find_by_from_events(model_class, attributes)
-          # Get all records and filter
+          # Reached only when no primary key was supplied: without one there is
+          # no way to know which stream holds the answer, so every stream of the
+          # model has to be replayed. That cost is inherent to querying by a
+          # non-key attribute with projections disabled, not an oversight.
           all_records = build_all_from_events(model_class)
 
-          all_records.find do |record|
-            attributes.all? do |key, value|
-              record[key.to_s] == value || record[key.to_sym] == value
-            end
+          all_records.find { |record| matches_attributes?(record, attributes) }
+        end
+
+        def matches_attributes?(record, attributes)
+          attributes.all? do |key, value|
+            record[key.to_s] == value || record[key.to_sym] == value
           end
         end
 
