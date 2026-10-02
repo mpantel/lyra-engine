@@ -41,16 +41,36 @@ module Lyra
   # When operations are allowed (strict mode off or bypassed), events are created
   # to ensure the event stream captures all state changes.
   module StrictDataAccess
+    # The event is built from the record after the write: the old value is
+    # what was last persisted (attribute_in_database), the new value is what
+    # the record holds once Rails has written it. Taking the old value from
+    # the in-memory attribute instead (as before) missed the common idiom
+    # "assign, then update_columns": the attribute already held the new value,
+    # no change was seen, and no event was published (Solidus's
+    # Shipment#persist_amounts). Building after the write also covers the
+    # timestamps that touch: true sets.
     def update_columns(attributes)
       raise_strict_violation!(:update_columns)
-      publish_bypass_update_event(attributes)
+      with_bypass_event(bypass_column_names(attributes), "update_columns") { super }
+    end
+
+    # Rails implements update_column(name, value, touch:) as update_columns,
+    # which publishes the event; publishing here as well produced it twice.
+    # The touch: keyword is passed through (the old two-argument override
+    # raised ArgumentError for callers that used it).
+    def update_column(name, value, touch: nil)
+      raise_strict_violation!(:update_column)
       super
     end
 
-    def update_column(name, value)
-      raise_strict_violation!(:update_column)
-      publish_bypass_update_event({ name => value })
-      super
+    # touch skips save callbacks too (Solidus records order completion with
+    # touch(:completed_at)). It is not a strict-mode violation: Rails itself
+    # calls it for belongs_to ... touch: true.
+    def touch(*names, time: nil)
+      columns = (timestamp_attributes_for_update_in_model | names.map(&:to_s)).map do |name|
+        self.class.attribute_aliases[name] || name
+      end
+      with_bypass_event(columns, "touch") { super }
     end
 
     def delete
@@ -75,19 +95,32 @@ module Lyra
       true
     end
 
-    # Publish an "updated" event for bypass operations like update_columns
-    def publish_bypass_update_event(attributes)
-      return unless should_publish_bypass_event?
+    # Columns an update_columns call writes, including the timestamps that
+    # its touch: option adds.
+    def bypass_column_names(attributes)
+      touch = attributes[:touch] || attributes["touch"]
+      names = attributes.keys.map(&:to_s).reject { |k| k == "touch" }
+      names = names.map { |k| self.class.attribute_aliases[k] || k }
+      return names unless touch
 
-      # Build changes hash with old and new values
-      changes = {}
-      attributes.each do |key, new_value|
-        key_str = key.to_s
-        old_value = read_attribute(key_str)
-        changes[key_str] = [old_value, new_value] if old_value != new_value
+      names | timestamp_attributes_for_update_in_model | (touch == true ? [] : Array.wrap(touch).map(&:to_s))
+    end
+
+    def with_bypass_event(columns, source)
+      before = columns.to_h { |c| [c, attribute_in_database(c)] }
+      result = yield
+      changes = columns.each_with_object({}) do |c, h|
+        now = read_attribute(c)
+        h[c] = [before[c], now] unless before[c] == now
       end
+      publish_bypass_update_event(changes, source) if result && changes.any?
+      result
+    end
 
-      return if changes.empty?
+    # Publish an "updated" event for a write that bypassed callbacks.
+    # +changes+ maps column => [old, new].
+    def publish_bypass_update_event(changes, source)
+      return unless should_publish_bypass_event?
 
       # Get event class
       config = self.class.lyra_config || Lyra.config.model_config(self.class)
@@ -104,7 +137,7 @@ module Lyra
       metadata = {
         correlation_id: Lyra::Correlation.current_id,
         causation_id: Lyra::Causation.current_id,
-        bypass_source: "update_columns"
+        bypass_source: source
       }.compact
 
       # Build event data
@@ -112,7 +145,7 @@ module Lyra
         model_class: self.class.name,
         model_id: id,
         operation: :updated,
-        attributes: attributes.transform_keys(&:to_s),
+        attributes: changes.transform_values(&:last),
         changes: changes,
         timestamp: Time.current
       }

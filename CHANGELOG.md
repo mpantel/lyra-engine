@@ -51,6 +51,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Writes that bypass callbacks went missing from the event log** (`Lyra::StrictDataAccess`)
+  — three holes, found by the Olist replay through Solidus 4.7, where DualView then
+  disagreed with the table for 17 of 20 orders and every shipment:
+  - *Assign, then `update_columns`* published nothing. The old value was read from the
+    in-memory attribute, which already held the new value, so no change was seen
+    (Solidus's `Shipment#persist_amounts`). The old value now comes from
+    `attribute_in_database` and the new one from the record after the write, which also
+    covers the timestamps `touch: true` sets.
+  - *`touch`* was not intercepted at all (Solidus records completion with
+    `touch(:completed_at)`). It now publishes a bypass event; it is not a strict-mode
+    violation, since Rails itself calls it for `belongs_to ... touch: true`.
+  - *`update_column`* published its event twice (Lyra's override and Rails'
+    `update_columns` underneath both published), and the override dropped Rails 8's
+    `touch:` keyword, so callers passing it raised `ArgumentError`.
 - **Hijack and event-sourcing modes failed on namespaced models** (`Lyra::CommandHandler`) —
   the event class name was built from the model name without stripping `::`, so
   `Spree::Price` produced the invalid constant `Spree::PriceCreated` and every create
