@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **`invalidate_all` raised on Solid Cache, and keyed `find_by` replayed every stream**
+  (`Lyra::Projections::CachedProjection`) — `invalidate_all` guarded prefix deletion with
+  `respond_to?(:delete_matched)`, which every cache store answers true; Solid Cache, the
+  Rails 8 default, then raised `NotImplementedError`. The raise is now rescued and the
+  fallback used. `find_by` took its single-stream path only when the primary key was the
+  sole condition, so `find_by(id: 5, email: x)` replayed every stream of the model; any
+  lookup that pins the primary key now reads that one stream and checks the remaining
+  conditions against the record it yields.
 - **ES-Async projected a record's events out of order** (`Lyra::Projections::AsyncProjectionJob`)
   — each job applied its one event, and a worker pool runs jobs concurrently, so an
   earlier update's job could land after a later one's and roll the row back; a late
