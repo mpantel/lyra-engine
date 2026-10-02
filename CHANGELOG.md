@@ -51,6 +51,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Hijack and event-sourcing modes built events before the model's own callbacks**
+  (`Lyra::Interceptors::CrudInterceptor`, new `WriteHooks`) — the create/update/destroy
+  commands ran in `before_*` callbacks registered on `ActiveRecord::Base`, so ahead of
+  every model's own `before_*` callbacks. Values those set were missing from the event:
+  in Hijack mode the event disagreed with the row; under event sourcing, where the row is
+  projected from the event, they were lost from the table, and DualView could not tell
+  (both sides agreed). Replaying Olist orders through Solidus 4.7 under ES-Sync lost every
+  order's `guest_token` and every payment's `number`. The commands now run in
+  `WriteHooks`, prepended to `ActiveRecord::Persistence`: after all `before_*` callbacks,
+  just before the SQL write. A failed command returns false (save returns false, the
+  transaction rolls back) instead of throwing `:abort`. PaperTrail is still switched off
+  first. SQL statements per write are unchanged in every mode, in order and count.
 - **Hijack creates re-assigned every attribute** (`Lyra::Interceptors::CrudInterceptor`) —
   after the create command, the interceptor called `assign_attributes` with all of the
   record's attributes, although only the reserved ID had changed. That fails on models

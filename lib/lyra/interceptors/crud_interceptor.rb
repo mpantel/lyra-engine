@@ -1,5 +1,54 @@
 module Lyra
   module Interceptors
+    # Where hijack and event-sourcing modes take over a write.
+    #
+    # Prepended to ActiveRecord::Persistence, so these methods sit directly
+    # above the ones that issue the INSERT, UPDATE and DELETE, and run inside
+    # the create/update/destroy callbacks' block: after every before_* callback
+    # of the model, whichever class defined it, and before the row write. The
+    # event therefore sees the record as the application finished preparing it.
+    #
+    # This replaces before_create/before_update/before_destroy callbacks
+    # registered on ActiveRecord::Base, which ran before the model's own. Values
+    # those set (Solidus's Order#guest_token and Payment#number) were missing
+    # from hijack events, and lost from the table under event sourcing, where
+    # the row is projected from the event. A failed command returns false:
+    # Rails then skips the after_* callbacks, save returns false and the
+    # transaction rolls back (throw(:abort) is not caught inside the block).
+    module WriteHooks
+      def _create_record(*args)
+        return super unless lyra_takes_over_write_here?
+        return false unless lyra_hijack_mode? ? lyra_hijack_create : lyra_prepare_event_source_create
+
+        # The columns to insert were chosen above this point (partial inserts),
+        # before the command reserved the ID. Add the primary key, or the row
+        # gets a database-assigned ID different from the one the event carries.
+        pk = self.class.primary_key
+        args[0] = Array(args[0]) | [pk] if args.any? && pk && !id.nil?
+        super(*args)
+      end
+
+      def _update_record(*)
+        return super unless lyra_takes_over_write_here?
+        return false unless lyra_hijack_mode? ? lyra_hijack_update : lyra_prepare_event_source_update
+
+        super
+      end
+
+      def destroy
+        return super unless lyra_takes_over_write_here? && persisted?
+        return false unless lyra_hijack_mode? ? lyra_hijack_destroy : lyra_prepare_event_source_destroy
+
+        super
+      end
+
+      private
+
+      def lyra_takes_over_write_here?
+        respond_to?(:lyra_takes_over_write?, true) && lyra_takes_over_write?
+      end
+    end
+
     module CrudInterceptor
       extend ActiveSupport::Concern
 
@@ -15,15 +64,16 @@ module Lyra
         after_update :lyra_intercept_update, if: :lyra_events_enabled?
         after_destroy :lyra_intercept_destroy, if: :lyra_events_enabled?
 
-        # For hijack mode - run before operation, store event, then let save proceed
-        before_create :lyra_hijack_create, if: :lyra_hijack_mode?
-        before_update :lyra_hijack_update, if: :lyra_hijack_mode?
-        before_destroy :lyra_hijack_destroy, if: :lyra_hijack_mode?
+        # Hijack and event-sourcing modes build their event in WriteHooks, after
+        # every before_* callback and just before the row write (see below).
+        # Only PaperTrail is switched off here, first, so that its own
+        # callbacks (a before_destroy among them) do not record a version that
+        # Lyra's event replaces.
+        before_create :lyra_disable_paper_trail!, if: :lyra_takes_over_write?, prepend: true
+        before_update :lyra_disable_paper_trail!, if: :lyra_takes_over_write?, prepend: true
+        before_destroy :lyra_disable_paper_trail!, if: :lyra_takes_over_write?, prepend: true
 
-        # For event_sourcing mode - prepare for event sourcing (NO throw(:abort)!)
-        before_create :lyra_prepare_event_source_create, if: :lyra_event_sourcing_mode?
-        before_update :lyra_prepare_event_source_update, if: :lyra_event_sourcing_mode?
-        before_destroy :lyra_prepare_event_source_destroy, if: :lyra_event_sourcing_mode?
+        ActiveRecord::Persistence.prepend(WriteHooks) unless ActiveRecord::Persistence.ancestors.include?(WriteHooks)
 
         # After callbacks to finalize event sourcing
         after_create :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
@@ -201,6 +251,10 @@ module Lyra
         lyra_monitored? && Lyra.event_sourcing_mode?
       end
 
+      def lyra_takes_over_write?
+        lyra_hijack_mode? || lyra_event_sourcing_mode?
+      end
+
       # MONITOR MODE: After callbacks that log events
       def lyra_intercept_create
         return if @lyra_hijacked
@@ -223,7 +277,9 @@ module Lyra
         publish_event(:destroyed, event_data)
       end
 
-      # HIJACK MODE: Before callbacks that can override behavior
+      # HIJACK MODE: called from WriteHooks, after every before_* callback and
+      # before the row write. Each command method returns true, or false with
+      # an error on the record, which stops the write.
       def lyra_hijack_create
         @lyra_hijacked = true
         lyra_disable_paper_trail!
@@ -237,9 +293,10 @@ module Lyra
           # used to) is redundant and fails on models that guard a writer
           # (Solidus's StockItem#count_on_hand=).
           self.id = result.attributes[:id] if result.attributes.key?(:id)
+          true
         else
           errors.add(:base, result.error)
-          throw(:abort)
+          false
         end
       end
 
@@ -250,10 +307,10 @@ module Lyra
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         result = Lyra::CommandHandler.handle(command)
 
-        unless result.success?
-          errors.add(:base, result.error)
-          throw(:abort)
-        end
+        return true if result.success?
+
+        errors.add(:base, result.error)
+        false
       end
 
       def lyra_hijack_destroy
@@ -263,13 +320,13 @@ module Lyra
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         result = Lyra::CommandHandler.handle(command)
 
-        unless result.success?
-          errors.add(:base, result.error)
-          throw(:abort)
-        end
+        return true if result.success?
+
+        errors.add(:base, result.error)
+        false
       end
 
-      # EVENT SOURCING MODE: Prepare phase (before callbacks)
+      # EVENT SOURCING MODE: Prepare phase (called from WriteHooks, like hijack)
       # Generate ID, create event, mark to skip SQL.
       # For creates: Thread.current[:lyra_skip_insert] signals _insert_record to skip.
       # For updates/deletes: @lyra_skip_sql causes _update_row/_delete_row to skip.
@@ -292,9 +349,10 @@ module Lyra
 
           # Signal class method _insert_record to skip the SQL INSERT
           Thread.current[:lyra_skip_insert] = true
+          true
         else
           errors.add(:base, result.error)
-          throw(:abort)  # This is OK for actual errors
+          false
         end
       end
 
@@ -309,9 +367,10 @@ module Lyra
           @lyra_event_result = result
           @lyra_event_operation = :update
           @lyra_skip_sql = true
+          true
         else
           errors.add(:base, result.error)
-          throw(:abort)
+          false
         end
       end
 
@@ -326,9 +385,10 @@ module Lyra
           @lyra_event_result = result
           @lyra_event_operation = :destroy
           @lyra_skip_sql = true
+          true
         else
           errors.add(:base, result.error)
-          throw(:abort)
+          false
         end
       end
 
