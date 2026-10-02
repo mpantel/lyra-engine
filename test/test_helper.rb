@@ -70,7 +70,7 @@ if defined?(Rails) && defined?(Lyra)
   Lyra.configure do |config|
     config.mode = :monitor
     config.event_store = RailsEventStore::Client.new(
-      repository: RailsEventStoreActiveRecord::EventRepository.new(
+      repository: RubyEventStore::ActiveRecord::EventRepository.new(
         serializer: RubyEventStore::Serializers::YAML
       )
     )

@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **RailsEventStore 3** — `lyra.gemspec` now requires `rails_event_store ~> 3.0` (3.1.0 in the
+  lockfile), on Ruby 4.0.7 and Rails 8.1.3.1. RES 3 moved the ActiveRecord repository to
+  `RubyEventStore::ActiveRecord::EventRepository` and the event base class and errors to
+  `RubyEventStore`; `Lyra::Event`, `Lyra::Aggregate` and the default client follow. Apps
+  that build their own client must switch from `RailsEventStoreActiveRecord::EventRepository`.
 - **`IdGenerator` caches the PostgreSQL sequence name** — `pg_get_serial_sequence` ran on
   every reserved ID, a round trip whose answer never changes. Since hijack mode now reserves
   its IDs here too, that was one extra SQL statement on every hijack-mode create (two

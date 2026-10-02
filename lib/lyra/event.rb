@@ -1,6 +1,6 @@
 module Lyra
   # Base event class for all Lyra events
-  class Event < RailsEventStore::Event
+  class Event < RubyEventStore::Event
     def self.inherited(subclass)
       super
       # Auto-register event types

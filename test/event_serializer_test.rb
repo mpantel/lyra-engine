@@ -33,7 +33,7 @@ class EventSerializerTest < ActiveSupport::TestCase
 
   test "round-trips through a RailsEventStore repository" do
     client = RailsEventStore::Client.new(
-      repository: RailsEventStoreActiveRecord::EventRepository.new(serializer: Lyra::EventSerializer)
+      repository: RubyEventStore::ActiveRecord::EventRepository.new(serializer: Lyra::EventSerializer)
     )
     at = Time.utc(2016, 1, 1, 9, 51, 15.304r)
     event = RubyEventStore::Event.new(data: { "attributes" => { "status_changed_at" => at } })

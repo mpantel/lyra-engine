@@ -42,8 +42,8 @@ module Lyra
 
     def build_client
       RailsEventStore::Client.new(
-        repository: RailsEventStoreActiveRecord::EventRepository.new(
-          serializer: RailsEventStore::Serializers::YAML
+        repository: RubyEventStore::ActiveRecord::EventRepository.new(
+          serializer: RubyEventStore::Serializers::YAML
         )
       )
     end

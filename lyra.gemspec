@@ -24,7 +24,7 @@ Gem::Specification.new do |spec|
 
   # Rails dependencies
   spec.add_dependency "rails", ">= 8.0"
-  spec.add_dependency "rails_event_store", "~> 2.0"
+  spec.add_dependency "rails_event_store", "~> 3.0"
 
   # Database dependencies
   spec.add_dependency "pg", "~> 1.0"

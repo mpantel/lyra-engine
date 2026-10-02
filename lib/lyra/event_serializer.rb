@@ -16,7 +16,7 @@ module Lyra
   # hashes they saw with serializer: JSON.
   #
   #   RailsEventStore::Client.new(
-  #     repository: RailsEventStoreActiveRecord::EventRepository.new(serializer: Lyra::EventSerializer)
+  #     repository: RubyEventStore::ActiveRecord::EventRepository.new(serializer: Lyra::EventSerializer)
   #   )
   module EventSerializer
     TIME_PRECISION = 6

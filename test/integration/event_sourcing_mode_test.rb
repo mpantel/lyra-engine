@@ -258,7 +258,7 @@ class EventSourcingSqlInterceptionTest < Minitest::Test
 
   def create_event_store
     RailsEventStore::Client.new(
-      repository: RailsEventStoreActiveRecord::EventRepository.new(
+      repository: RubyEventStore::ActiveRecord::EventRepository.new(
         serializer: RubyEventStore::Serializers::YAML
       )
     )

@@ -20,7 +20,7 @@ module Lyra
 
       events.each { |event| aggregate.apply(event, persisted: true) }
       aggregate
-    rescue RailsEventStore::EventNotFound
+    rescue RubyEventStore::EventNotFound
       new(id)
     end
 

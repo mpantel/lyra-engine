@@ -213,6 +213,8 @@ module Lyra
           all_records.find { |record| matches_attributes?(record, attributes) }
         end
 
+        # Shared by the keyed and unkeyed find_by paths so both decide a match
+        # the same way.
         def matches_attributes?(record, attributes)
           attributes.all? do |key, value|
             record[key.to_s] == value || record[key.to_sym] == value

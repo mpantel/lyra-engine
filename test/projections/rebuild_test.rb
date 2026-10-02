@@ -26,7 +26,7 @@ module Lyra
           config.mode = :event_sourcing
           config.projection_mode = :sync
           config.event_store = RailsEventStore::Client.new(
-            repository: RailsEventStoreActiveRecord::EventRepository.new(
+            repository: RubyEventStore::ActiveRecord::EventRepository.new(
               serializer: RubyEventStore::Serializers::YAML
             )
           )
