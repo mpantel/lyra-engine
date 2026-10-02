@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Hijack and event-sourcing modes failed on namespaced models** (`Lyra::CommandHandler`) —
+  the event class name was built from the model name without stripping `::`, so
+  `Spree::Price` produced the invalid constant `Spree::PriceCreated` and every create
+  failed. The failure surfaced only as a parent record left unsaved, with no exception
+  (`Spree::Product.create!` returned an unsaved product). Every other event path already
+  stripped the separator; this one now does too. Found by the Olist replay through
+  Solidus 4.7, where it, not STI or polymorphism, kept Solidus out of these modes.
 - **Optional gems that failed to load were reported as missing** (`lyra.rb`,
   `Lyra::OptionalDependency`) — PAM DSL and PetriFlow were loaded inside a bare
   `rescue LoadError`, so a gem that was installed but could not load (PetriFlow without

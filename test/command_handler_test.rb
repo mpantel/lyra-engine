@@ -86,6 +86,23 @@ module Lyra
       assert_equal 1001, result.attributes[:id]
     end
 
+    def test_handle_create_succeeds_for_a_namespaced_model
+      # Solidus-style model name. The default event prefix is the model name, so
+      # the event class name contains "::", which is not a valid constant name
+      # unless it is stripped (as every other Lyra event path already does).
+      namespaced = Class.new do
+        def self.name = "Shop::Widget"
+        def self.primary_key = "id"
+        def self.columns_hash = { "id" => OpenStruct.new(type: :integer) }
+      end
+      Lyra.config.monitor_model(namespaced)
+
+      result = CommandHandler.handle(Commands::CreateCommand.new(namespaced, { name: "Test" }))
+
+      assert result.success?, result.error
+      assert_equal Lyra::Events::ShopWidgetCreated, result.events.first.class
+    end
+
     def test_handle_create_assigns_uuid_for_uuid_primary_key
       command = Commands::CreateCommand.new(@uuid_model_class, { name: "Test" })
       result = CommandHandler.handle(command)

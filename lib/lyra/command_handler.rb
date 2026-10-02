@@ -133,11 +133,17 @@ module Lyra
       config = Lyra.config.model_config(command.model_class)
       event_name = config.event_name_for(operation)
 
-      # Find or create the event class in Lyra::Events namespace
-      event_class = if Lyra::Events.const_defined?(event_name, false)
-        Lyra::Events.const_get(event_name, false)
+      # Find or create the event class in Lyra::Events namespace. A namespaced
+      # model (Spree::Price) gives a namespaced default name (Spree::PriceCreated),
+      # which is not a valid constant: strip the separators, as every other
+      # event path does. Without this, hijack and event-sourcing creates of a
+      # namespaced model failed, and the failure surfaced only as an unsaved
+      # parent record.
+      sanitized_name = event_name.to_s.gsub("::", "")
+      event_class = if Lyra::Events.const_defined?(sanitized_name, false)
+        Lyra::Events.const_get(sanitized_name, false)
       else
-        Lyra::Events.const_set(event_name, Class.new(Lyra::Event))
+        Lyra::Events.const_set(sanitized_name, Class.new(Lyra::Event))
       end
 
       event_class.new(data: event_data, metadata: event_metadata)
