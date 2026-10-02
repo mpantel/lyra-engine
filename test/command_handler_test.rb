@@ -57,6 +57,11 @@ module Lyra
         end
       end
 
+      # These are unit tests with stub models and no database. ID generation has
+      # its own tests (id_generator_test.rb); here a reserved integer is enough.
+      Lyra::IdGenerator.stubs(:next_id).returns(1001)
+      Lyra::IdGenerator.stubs(:next_id).with(@uuid_model_class).returns(SecureRandom.uuid)
+
       # Configure Lyra to monitor these models
       Lyra.config.monitor_model(@model_class, event_prefix: "TestModel")
       Lyra.config.monitor_model(@uuid_model_class, event_prefix: "UuidModel")
@@ -70,14 +75,15 @@ module Lyra
     # Integer Primary Key Tests
     # =========================================================================
 
-    def test_handle_create_does_not_assign_id_for_integer_primary_key
+    def test_handle_create_assigns_reserved_id_for_integer_primary_key
       command = Commands::CreateCommand.new(@model_class, { name: "Test" })
       result = CommandHandler.handle(command)
 
       assert result.success?
-      # For integer primary keys, id should NOT be in attributes
-      # (let database assign it)
-      refute result.attributes.key?(:id), "ID should not be assigned for integer primary key models"
+      # The row must be inserted under the ID the Created event carries. Leaving
+      # it to the database used to strand the Created event in a placeholder
+      # stream.
+      assert_equal 1001, result.attributes[:id]
     end
 
     def test_handle_create_assigns_uuid_for_uuid_primary_key
@@ -273,18 +279,19 @@ module Lyra
       assert_equal 999, result.attributes[:id]
     end
 
-    def test_hijack_mode_uses_pending_placeholder_for_integer_key
+    def test_hijack_mode_reserves_the_real_id_for_integer_key
       Lyra.config.mode = :hijack
+      Lyra::IdGenerator.stubs(:next_id).returns(42)
 
       command = Commands::CreateCommand.new(@model_class, { name: "Test" })
-      handler = CommandHandler.new(command)
+      result = CommandHandler.handle(command)
 
-      # Access the private method indirectly through handle_create
-      result = handler.call
-
-      # In hijack mode with integer primary key, id should not be in attributes
-      # (database assigns it)
-      refute result.attributes.key?(:id)
+      # The ID the row will be inserted with is the one the event carries,
+      # never a "pending-" placeholder that no later event or reader can find.
+      assert result.success?
+      assert_equal 42, result.attributes[:id]
+      event = result.events.first
+      assert_equal 42, event.data[:model_id] || event.data["model_id"]
     end
 
     # =========================================================================

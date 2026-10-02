@@ -204,8 +204,22 @@ class MultiModeIntegrationTest < Minitest::Test
     end
   end
 
-  # Hijack mode stores events with temporary IDs before DB save (for integer keys)
-  # So we test that events ARE captured, but look them up differently
+  # Hijack mode must file every event, including Created, under the record's
+  # own stream, so the record's history can be rebuilt from it.
+  def test_hijack_mode_files_created_event_under_the_record_stream
+    skip "Requires Rails and database" unless infrastructure_available?
+
+    with_mode(:hijack) do
+      article = Article.create!(title: "Test", body: "Content")
+      article.update!(title: "Updated")
+
+      types = events_for("Article", article.id).map { |e| e.data[:operation] || e.data["operation"] }.map(&:to_s)
+      assert_equal %w[created updated], types
+      pending = Lyra.config.event_store.read.to_a.select { |e| (e.data[:model_id] || e.data["model_id"]).to_s.start_with?("pending-") }
+      assert_empty pending, "no event should carry a pending- placeholder ID"
+    end
+  end
+
   def test_hijack_mode_captures_events
     skip "Requires Rails and database" unless infrastructure_available?
 
@@ -231,8 +245,10 @@ class MultiModeIntegrationTest < Minitest::Test
   # Event Data Correctness Tests
   # ===========================================================================
 
-  # Test event data for modes that capture with correct IDs
-  [:monitor, :event_sourcing].each do |mode|
+  # Test event data for every event-producing mode. Hijack belongs here too:
+  # it used to file the Created event under a "pending-" stream for integer keys,
+  # which is why it was once left out of this list.
+  [:monitor, :hijack, :event_sourcing].each do |mode|
     define_method("test_#{mode}_mode_event_contains_correct_data") do
       skip "Requires Rails and database" unless infrastructure_available?
 

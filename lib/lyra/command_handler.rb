@@ -34,19 +34,18 @@ module Lyra
     def handle_create
       model_class = command.model_class
 
-      # Generate ID for new aggregate
-      # In event_sourcing mode, we MUST pre-generate IDs since we abort the DB save
-      # In hijack mode, only UUID keys need pre-generation (integers come from DB)
-      id = if Lyra.event_sourcing_mode?
-        # Always pre-generate in event_sourcing mode
-        IdGenerator.next_id(model_class)
-      elsif model_class.columns_hash[model_class.primary_key]&.type == :uuid
-        SecureRandom.uuid
-      else
-        # For integer primary keys in hijack mode, use a temporary placeholder
-        # The actual ID will be assigned by the database after save
-        "pending-#{SecureRandom.hex(8)}"
-      end
+      # Generate ID for new aggregate. Both modes store the Created event before
+      # any INSERT, so the record's real ID must be known now: the event's
+      # model_id and its stream ("Model$<id>") are fixed at this point.
+      #
+      # Hijack mode used to give integer keys a "pending-<hex>" placeholder and
+      # let the database assign the ID afterwards. The Created event then lived
+      # in a stream nothing else ever read: every later event went to the real
+      # "Model$<id>" stream, so a record's history began with an update, and
+      # rebuilding it from events (dual view, projections) found no attributes.
+      # Hijack now reserves the ID the same way event-sourcing mode does (a
+      # sequence nextval on PostgreSQL) and the row is inserted with it.
+      id = IdGenerator.next_id(model_class)
 
       # Create aggregate
       aggregate_class = find_aggregate_class
@@ -67,16 +66,13 @@ module Lyra
         aggregate.store(Lyra.config.event_store)
       end
 
-      # Return result with ID
-      # In event_sourcing mode, always include ID (it's pre-generated)
-      # In hijack mode, only include for UUID (integers come from DB)
+      # Return result with the ID, so the caller inserts the row under the same
+      # ID the event already carries.
       attributes = command.attributes.dup
       # Remove string "id" key to prevent conflict with symbol :id
       # (AR attributes have string keys, but we add symbol keys)
       attributes.delete("id")
-      if Lyra.event_sourcing_mode? || model_class.columns_hash[model_class.primary_key]&.type == :uuid
-        attributes[:id] = id
-      end
+      attributes[:id] = id
       CommandResult.success(attributes: attributes, events: [event])
     end
 
