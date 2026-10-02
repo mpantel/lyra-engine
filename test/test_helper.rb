@@ -100,3 +100,48 @@ if defined?(ActiveRecord::Base)
     monitor_with_lyra
   end
 end
+
+# Every test starts from the same Lyra configuration: the one established
+# above, captured once here. Lyra.config is process-global, and tests change it
+# freely (modes, event stores, monitored models, reset_config!). Before this,
+# whatever one test left behind reached the next: a stub model registered by
+# one test broke the dashboard tests in some orders, and a reset in one test's
+# teardown removed the baseline (the event store, the monitored User model) for
+# every test after it. Each test now gets a fresh copy of the baseline before
+# its setup runs, and the copy is replaced again after its teardown.
+module LyraConfigIsolation
+  class << self
+    attr_accessor :baseline
+
+    # A copy whose collections are its own, so registering a model in one test
+    # cannot reach the baseline or another test.
+    def fresh_config
+      return Lyra::Configuration.new unless baseline
+
+      baseline.dup.tap do |config|
+        config.instance_variable_set(:@monitored_models, baseline.monitored_models.dup)
+        config.instance_variable_set(:@model_configs, baseline.instance_variable_get(:@model_configs).dup)
+      end
+    end
+
+    def install_fresh_config
+      Lyra.instance_variable_set(:@config, fresh_config) if baseline
+    end
+  end
+
+  def before_setup
+    LyraConfigIsolation.install_fresh_config
+    super
+  end
+
+  def after_teardown
+    super
+  ensure
+    LyraConfigIsolation.install_fresh_config
+  end
+end
+
+if defined?(Lyra)
+  LyraConfigIsolation.baseline = Lyra.config
+  Minitest::Test.prepend(LyraConfigIsolation)
+end
