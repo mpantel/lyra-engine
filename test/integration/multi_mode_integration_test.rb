@@ -220,6 +220,30 @@ class MultiModeIntegrationTest < Minitest::Test
     end
   end
 
+  # Hijack must assign back only what it changed (the reserved ID). It used to
+  # assign every attribute again, which fails on models that guard a writer:
+  # Solidus makes StockItem#count_on_hand= unusable so that stock moves only
+  # through set_count_on_hand.
+  def test_hijack_mode_does_not_reassign_attributes_it_did_not_change
+    skip "Requires Rails and database" unless infrastructure_available?
+
+    with_mode(:hijack) do
+      Article.class_eval do
+        def body=(_value)
+          raise "body must not be assigned after initialization"
+        end
+      end
+      article = Article.new(title: "Guarded")
+      article.write_attribute(:body, "Set directly")
+
+      article.save!
+
+      assert article.persisted?
+      assert_equal "Set directly", Article.find(article.id).body
+      assert_equal %w[created], events_for("Article", article.id).map { |e| (e.data[:operation] || e.data["operation"]).to_s }
+    end
+  end
+
   def test_hijack_mode_captures_events
     skip "Requires Rails and database" unless infrastructure_available?
 

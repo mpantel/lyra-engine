@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Hijack creates re-assigned every attribute** (`Lyra::Interceptors::CrudInterceptor`) —
+  after the create command, the interceptor called `assign_attributes` with all of the
+  record's attributes, although only the reserved ID had changed. That fails on models
+  that guard a writer: Solidus makes `StockItem#count_on_hand=` unusable so stock moves
+  only through `set_count_on_hand`, and Hijack mode could not create a variant. Only the
+  ID is assigned now.
 - **Writes that bypass callbacks went missing from the event log** (`Lyra::StrictDataAccess`)
   — three holes, found by the Olist replay through Solidus 4.7, where DualView then
   disagreed with the table for 17 of 20 orders and every shipment:

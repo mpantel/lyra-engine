@@ -232,8 +232,11 @@ module Lyra
         result = Lyra::CommandHandler.handle(command)
 
         if result.success?
-          # Update the model with the result from event sourcing
-          assign_attributes(result.attributes)
+          # Take the ID the Created event carries, so the row is inserted under
+          # it. Nothing else changed: assigning every attribute back (as this
+          # used to) is redundant and fails on models that guard a writer
+          # (Solidus's StockItem#count_on_hand=).
+          self.id = result.attributes[:id] if result.attributes.key?(:id)
         else
           errors.add(:base, result.error)
           throw(:abort)
