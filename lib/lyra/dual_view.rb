@@ -1,6 +1,8 @@
 module Lyra
   # Provides dual view comparison between CRUD state and Event-sourced state
   class DualView
+    TIME_PRECISION = 6
+
     attr_reader :model_class, :model_id
 
     def initialize(model_class, model_id)
@@ -147,8 +149,11 @@ module Lyra
 
     def normalize_value(val)
       case val
+      # Times compare at microseconds, the resolution of a PostgreSQL timestamp.
+      # Comparing at whole seconds (iso8601 with no fraction) hid an event log
+      # that had dropped sub-second time: 15:49:11.420 and 15:49:11 compared equal.
       when Time, DateTime, ActiveSupport::TimeWithZone
-        val.utc.iso8601
+        val.utc.iso8601(TIME_PRECISION)
       when Date
         val.iso8601
       when BigDecimal
@@ -161,7 +166,7 @@ module Lyra
         # Try to parse as time if it looks like a timestamp
         if val =~ /^\d{4}-\d{2}-\d{2}(T|\s)/
           begin
-            Time.parse(val).utc.iso8601
+            Time.parse(val).utc.iso8601(TIME_PRECISION)
           rescue
             val
           end

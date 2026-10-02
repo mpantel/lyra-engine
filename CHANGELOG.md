@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Fixed
+- **DualView compared times at whole seconds** (`Lyra::DualView`) — `normalize_value` turned
+  every time into `iso8601` with no fraction, so `15:49:11.420` in the table and
+  `15:49:11 UTC` in a lossy event compared equal. That is how the sub-second loss fixed by
+  `Lyra::EventSerializer` passed dual-view checks under Monitor mode. Times now compare at
+  microseconds, the resolution of a PostgreSQL timestamp.
 - **Hijack mode filed `Created` under a placeholder stream** (`Lyra::CommandHandler`) — for
   integer primary keys, hijack mode stored the Created event under `"pending-<hex>"` and let
   the database assign the ID afterwards. Nothing linked the two: later events went to the

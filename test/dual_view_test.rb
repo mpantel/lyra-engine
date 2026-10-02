@@ -209,6 +209,38 @@ module Lyra
       assert_equal({ no_differences: true }, differences)
     end
 
+def test_sub_second_time_difference_is_a_difference
+  dual_view = DualView.new(@model_class, @model_id)
+
+  # The table keeps milliseconds; an event log written with plain JSON kept
+  # only whole seconds. That is a real discrepancy and must be reported.
+  def dual_view.crud_state
+    { exists: true, attributes: { status_changed_at: Time.utc(2016, 1, 14, 15, 49, 11.42r) } }
+  end
+
+  def dual_view.event_sourced_state
+    { exists: true, state: { status_changed_at: "2016-01-14 15:49:11 UTC" } }
+  end
+
+  differences = dual_view.calculate_differences
+
+  assert differences.key?(:status_changed_at), "a lost .420 s must not compare equal"
+end
+
+def test_same_instant_in_different_encodings_is_equal
+  dual_view = DualView.new(@model_class, @model_id)
+
+  def dual_view.crud_state
+    { exists: true, attributes: { status_changed_at: Time.utc(2016, 1, 14, 15, 49, 11.42r) } }
+  end
+
+  def dual_view.event_sourced_state
+    { exists: true, state: { status_changed_at: "2016-01-14T15:49:11.420000Z" } }
+  end
+
+  assert_equal({ no_differences: true }, dual_view.calculate_differences)
+end
+
     def test_normalize_value_with_big_decimal
       def @dual_view.crud_state
         { exists: true, attributes: { price: BigDecimal("10.5") } }
