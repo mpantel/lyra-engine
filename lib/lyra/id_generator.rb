@@ -18,6 +18,12 @@ module Lyra
     @hilo_mutex = Mutex.new
     @hilo_state = {}
 
+    # Sequence name per "table.pk". It never changes at runtime, and looking it
+    # up costs a round trip per create: since hijack mode reserves IDs here too,
+    # that was one extra SQL statement on every hijack-mode insert.
+    @sequence_mutex = Mutex.new
+    @sequence_names = {}
+
     class << self
       # Generate the next ID for a model class
       #
@@ -61,11 +67,7 @@ module Lyra
         table = model_class.table_name
         pk = model_class.primary_key
 
-        # Get the sequence name for this table's primary key
-        result = model_class.connection.execute(
-          "SELECT pg_get_serial_sequence('#{table}', '#{pk}')"
-        )
-        sequence = result.first&.values&.first
+        sequence = postgresql_sequence_name(model_class, table, pk)
 
         if sequence
           # Reserve the next value from the sequence
@@ -78,6 +80,21 @@ module Lyra
       rescue StandardError => e
         Rails.logger.warn("Lyra::IdGenerator: PostgreSQL sequence failed (#{e.message}), using Hi-Lo")
         next_hilo_id(model_class)
+      end
+
+      # Look up (once) and cache the sequence behind table.pk. A table without a
+      # serial sequence is not cached, so it is re-checked on the next call.
+      def postgresql_sequence_name(model_class, table, pk)
+        key = "#{table}.#{pk}"
+        cached = @sequence_mutex.synchronize { @sequence_names[key] }
+        return cached if cached
+
+        result = model_class.connection.execute(
+          "SELECT pg_get_serial_sequence('#{table}', '#{pk}')"
+        )
+        sequence = result.first&.values&.first
+        @sequence_mutex.synchronize { @sequence_names[key] = sequence } if sequence
+        sequence
       end
 
       # SQLite: Use max(id) + 1 (not ideal for concurrency)

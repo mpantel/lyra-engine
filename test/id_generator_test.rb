@@ -6,6 +6,7 @@ class IdGeneratorTest < Minitest::Test
   def setup
     # Reset Hi-Lo state between tests
     Lyra::IdGenerator.instance_variable_set(:@hilo_state, {})
+    Lyra::IdGenerator.instance_variable_set(:@sequence_names, {})
   end
 
   # ===========================================================================
@@ -93,6 +94,20 @@ class IdGeneratorTest < Minitest::Test
 
     assert_equal [100, 101, 102, 103, 104], ids, "PostgreSQL sequence should increment"
   end
+
+def test_postgresql_looks_up_the_sequence_name_once
+  model_class = create_postgresql_mock_model(:integer, sequence_value: 1)
+  statements = []
+  connection = model_class.connection
+  original = connection.method(:execute)
+  connection.define_singleton_method(:execute) { |sql| statements << sql; original.call(sql) }
+
+  3.times { Lyra::IdGenerator.next_id(model_class) }
+
+  assert_equal 1, statements.count { |sql| sql.include?("pg_get_serial_sequence") },
+    "the sequence name is fixed; only nextval should run per ID"
+  assert_equal 3, statements.count { |sql| sql.include?("nextval") }
+end
 
   def test_postgresql_falls_back_to_hilo_without_sequence
     # When pg_get_serial_sequence returns nil

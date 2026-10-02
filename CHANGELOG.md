@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Monitor mode. The benchmark harness itself is published on acceptance of the
   accompanying papers.
 
+### Changed
+- **`IdGenerator` caches the PostgreSQL sequence name** — `pg_get_serial_sequence` ran on
+  every reserved ID, a round trip whose answer never changes. Since hijack mode now reserves
+  its IDs here too, that was one extra SQL statement on every hijack-mode create (two
+  instead of one). The name is now looked up once per table and cached; only `nextval`
+  runs per ID.
+
 ### Fixed
 - **Optional gems that failed to load were reported as missing** (`lyra.rb`,
   `Lyra::OptionalDependency`) — PAM DSL and PetriFlow were loaded inside a bare
