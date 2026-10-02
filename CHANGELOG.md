@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`Lyra::EventSerializer`** — a JSON serializer for RailsEventStore that keeps time
+  precision. Ruby's `JSON` writes `Time` with `Time#to_s`, dropping fractional seconds, so
+  apps passing `serializer: JSON` stored `09:51:15.304` as `"09:51:15 UTC"`, and an update
+  from `.304` to `.352` as no change at all. `Lyra::EventSerializer` writes times as ISO 8601
+  with microseconds and `BigDecimal` as its exact decimal string; `load` is plain
+  `JSON.parse`. Opt in with
+  `EventRepository.new(serializer: Lyra::EventSerializer)`. Lyra's default client (RES's
+  YAML serializer) was not affected. Found by replaying the BPI Challenge 2017 log
+  (`examples/bpi2017_loan_app`), whose timestamps carry milliseconds.
 - **Projection rebuild from the event log** (`Lyra::Projections::Rebuild`) - Reconstruct
   read-model tables from the event streams alone, the load-bearing invariant of event
   sourcing (log is source of truth; tables are a derived projection):
@@ -30,6 +39,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Fixed
+- **Hijack mode filed `Created` under a placeholder stream** (`Lyra::CommandHandler`) — for
+  integer primary keys, hijack mode stored the Created event under `"pending-<hex>"` and let
+  the database assign the ID afterwards. Nothing linked the two: later events went to the
+  real `Model$<id>` stream, so every record's history began with an update and rebuilding it
+  from events (dual view, projection rebuild) found no attributes. Hijack now reserves the
+  ID up front through `IdGenerator`, as event-sourcing mode does, and the row is inserted
+  under the ID the event carries. Hijack is now covered by the event-correctness
+  integration tests it had been left out of.
+- **ES-Async lost projections silently** (`Lyra::Projections::AsyncProjectionJob`) — the job
+  was enqueued inside the transaction that stores its event, so a worker could run it
+  before the commit, find no event, complete, and never project the row (no error, no
+  retry). Replaying 40 BPI 2017 applications left 37 missing. The job now sets
+  `enqueue_after_transaction_commit`, so it runs only once its event is visible and is
+  never enqueued after a rollback. Eventual consistency itself is unchanged. The test dummy
+  app now loads `active_job/railtie`.
 - **`:disabled` mode emitted events** (`Lyra::Interceptors::CrudInterceptor`) — the monitor
   callbacks were gated on `lyra_monitored?`, a class attribute carrying no mode check, so a
   model that had ever called `monitor_with_lyra` kept writing to the event store after Lyra
