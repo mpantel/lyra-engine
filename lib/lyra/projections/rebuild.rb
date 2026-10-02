@@ -61,6 +61,21 @@ module Lyra
           models.map { |model_class| rebuild(model_class, truncate: truncate) }
         end
 
+        # Bring one record's row to the state its whole stream implies, in
+        # place (no delete first, so rows that others reference by foreign key
+        # stay put). Projection is idempotent per event: create is an insert
+        # that ignores an existing row, each update re-applies its changes,
+        # destroy deletes. Replaying the full stream in order therefore always
+        # ends at the latest event, however stale the row was.
+        #
+        # Used by AsyncProjectionJob, under a per-stream lock, so that jobs
+        # finishing out of order still converge.
+        #
+        # @return [Integer] events replayed
+        def replay_record(model_class, id)
+          replay_stream(model_class, id).first
+        end
+
         private
 
         # Replay a single stream (one record's lifecycle) through the live
@@ -91,9 +106,9 @@ module Lyra
           end
         end
 
-        # Reconstruct the CommandResult-like struct ModelProjection expects,
-        # identical to Lyra::Projections::AsyncProjectionJob so rebuild and live
-        # async projection share one code path.
+        # Reconstruct the CommandResult-like struct ModelProjection expects.
+        # AsyncProjectionJob projects through replay_record, so rebuild and live
+        # async projection share this one code path.
         def build_result_from_event(event)
           Struct.new(:events, :attributes, :success?, keyword_init: true).new(
             events: [event],

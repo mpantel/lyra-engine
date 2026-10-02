@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-Async projected a record's events out of order** (`Lyra::Projections::AsyncProjectionJob`)
+  — each job applied its one event, and a worker pool runs jobs concurrently, so an
+  earlier update's job could land after a later one's and roll the row back; a late
+  create job could even resurrect a destroyed record. The Olist replay through Solidus
+  left 2 of 100 orders at `confirm` whose events ended at `complete`. Each job now
+  brings its record up to date with the whole stream (`Rebuild.replay_record`, in place),
+  under a PostgreSQL advisory lock held per stream, so jobs converge in any order. Cost:
+  each job re-reads its stream, so projections lag more and ES-Async's read-after-write
+  window widens (Olist, 100 orders: 151 -> 183 such failures).
 - **Hijack and event-sourcing modes built events before the model's own callbacks**
   (`Lyra::Interceptors::CrudInterceptor`, new `WriteHooks`) — the create/update/destroy
   commands ran in `before_*` callbacks registered on `ActiveRecord::Base`, so ahead of
