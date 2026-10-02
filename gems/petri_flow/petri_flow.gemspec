@@ -23,6 +23,7 @@ Gem::Specification.new do |spec|
   # Runtime dependencies
   spec.add_dependency "activesupport", ">= 6.0"
   spec.add_dependency "matrix", "~> 0.4"  # For matrix operations
+  spec.add_dependency "rexml", "~> 3.2"  # PNML / CPN Tools export; not a default gem since Ruby 3.4
 
   # Development dependencies
   spec.add_development_dependency "minitest", "~> 5.0"

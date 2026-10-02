@@ -17,6 +17,7 @@ PATH
     orfeas_petri_flow (0.6.0)
       activesupport (>= 6.0)
       matrix (~> 0.4)
+      rexml (~> 3.2)
 
 GEM
   remote: https://rubygems.org/

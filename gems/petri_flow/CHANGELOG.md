@@ -4,6 +4,14 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Undeclared `rexml` dependency** — the PNML and CPN Tools exporters `require "rexml/document"`,
+  but the gemspec did not declare `rexml`, which has not been a default gem since Ruby 3.4.
+  Requiring `petri_flow` then failed with a `LoadError` part-way through, which Lyra rescued
+  as "PetriFlow not installed", leaving `PetriFlow` half-defined (no `PetriFlow::Workflow`);
+  any app that eager-loads Lyra's `app/workflows` then failed to boot. `rexml` is now a
+  runtime dependency.
+
 ## [0.6.0] - 2026-01-05
 
 ### Added

@@ -1,26 +1,17 @@
 require "lyra/version"
 require "rails_event_store"
+require "lyra/optional_dependency"
 
 # PAM DSL is optional - required for privacy features
 # Set LYRA_DISABLE_PAM_DSL=true to test Lyra without PAM DSL
 PAM_DSL_AVAILABLE = if ENV["LYRA_DISABLE_PAM_DSL"] == "true"
   false
 else
-  begin
-    require "pam_dsl"
-    true
-  rescue LoadError
-    false
-  end
+  Lyra::OptionalDependency.load("pam_dsl")
 end
 
 # PetriFlow is optional - required for formal verification
-PETRI_FLOW_AVAILABLE = begin
-  require "petri_flow"
-  true
-rescue LoadError
-  false
-end
+PETRI_FLOW_AVAILABLE = Lyra::OptionalDependency.load("petri_flow")
 
 # Only load engine when Rails is available
 if defined?(Rails)

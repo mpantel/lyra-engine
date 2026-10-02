@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Fixed
+- **Optional gems that failed to load were reported as missing** (`lyra.rb`,
+  `Lyra::OptionalDependency`) — PAM DSL and PetriFlow were loaded inside a bare
+  `rescue LoadError`, so a gem that was installed but could not load (PetriFlow without
+  `rexml`) was treated as absent and left half-defined; eager-loading `app/workflows`
+  then failed with `uninitialized constant PetriFlow::Workflow`. Only a gem that is itself
+  not installed now counts as unavailable; any other load failure raises. PetriFlow now
+  declares `rexml` (see `gems/petri_flow/CHANGELOG.md`).
 - **DualView compared times at whole seconds** (`Lyra::DualView`) — `normalize_value` turned
   every time into `iso8601` with no fraction, so `15:49:11.420` in the table and
   `15:49:11 UTC` in a lossy event compared equal. That is how the sub-second loss fixed by
