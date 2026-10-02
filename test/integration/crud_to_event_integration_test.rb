@@ -49,9 +49,19 @@ module Lyra
           end
         end
 
-        # Configure Lyra for the test model
+        # Configure Lyra for the test model, on a configuration of its own: the
+        # stub is no ActiveRecord model, and left in the global registry it was
+        # picked up by later tests that list monitored models (the dashboard
+        # called .pluck on it, so the suite failed only in some orders).
+        @original_config = Lyra.config
+        Lyra.reset_config!
+        Lyra.config.event_store = @original_config.event_store
         Lyra.config.monitor_model(@user_class, event_prefix: "User")
         Lyra.config.enable_monitor!
+      end
+
+      def teardown
+        Lyra.instance_variable_set(:@config, @original_config)
       end
 
       def test_complete_create_workflow

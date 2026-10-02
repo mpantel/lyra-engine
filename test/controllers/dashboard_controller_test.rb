@@ -7,6 +7,10 @@ module Lyra
     tests DashboardController
 
     def setup
+      # Start from a fresh configuration, not whatever an earlier test left in
+      # the global one: several actions list every monitored model and query
+      # it, which fails if a previous test registered a stub.
+      Lyra.reset_config!
       @event_store = RailsEventStore::Client.new
       Lyra.configure do |config|
         config.event_store = @event_store
