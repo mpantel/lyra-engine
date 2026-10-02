@@ -3,6 +3,7 @@ require_relative 'boot'
 require 'rails'
 require 'active_model/railtie'
 require 'active_record/railtie'
+require 'active_job/railtie' # Lyra's async projections run on ActiveJob
 require 'action_controller/railtie'
 require 'action_view/railtie'
 

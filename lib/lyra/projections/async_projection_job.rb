@@ -22,6 +22,13 @@ module Lyra
     class AsyncProjectionJob < ActiveJob::Base
       queue_as :lyra_projections
 
+      # Enqueue only once the writing transaction commits. The job is enqueued
+      # from the model's callbacks, inside the transaction that stores its
+      # event; a worker that picks it up earlier cannot see the event, finds
+      # nothing, completes, and the projection is lost with no retry. If the
+      # transaction rolls back, the event is gone and the job is never enqueued.
+      self.enqueue_after_transaction_commit = true
+
       # Retry with exponential backoff for transient failures
       retry_on StandardError, wait: :polynomially_longer, attempts: 5
 
