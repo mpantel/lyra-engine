@@ -42,7 +42,7 @@ module Lyra
       event_store ||= Lyra.config.event_store
 
       @changes.each do |event|
-        event_store.publish(event, stream_name: stream_name)
+        Lyra.append_events(event, stream_name: stream_name, store: event_store)
       end
 
       @changes.clear

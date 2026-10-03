@@ -10,6 +10,8 @@ namespace :lyra do
         if ENV["MODEL"]
           ENV["MODEL"].split(",").map { |name| name.strip.constantize }
         else
+          # Monitored models register as their classes load.
+          Rails.application.eager_load! unless Rails.application.config.eager_load
           Lyra.config.monitored_models
         end
 
@@ -40,6 +42,8 @@ namespace :lyra do
       if ENV["MODEL"]
         ENV["MODEL"].split(",").map { |name| name.strip.constantize }
       else
+        # Monitored models register as their classes load.
+        Rails.application.eager_load! unless Rails.application.config.eager_load
         Lyra.config.monitored_models
       end
 

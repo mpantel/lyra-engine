@@ -92,7 +92,7 @@ class AccessLogTest < Minitest::Test
 
   def test_an_access_that_cannot_be_recorded_does_not_go_ahead
     Lyra.config.event_store.stub(:publish, ->(*_a, **_k) { raise "store down" }) do
-      assert_raises(RuntimeError) { @policy.validate_access!([:email], :contact, subject: @user) }
+      assert_raises(Lyra::EventStoreUnavailableError) { @policy.validate_access!([:email], :contact, subject: @user) }
     end
   end
 

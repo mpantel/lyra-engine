@@ -94,12 +94,13 @@ module Lyra
         end
       end
 
-      # Load rake tasks
-      rake_tasks do
-        load "tasks/lyra_schema.rake"
-        load "tasks/lyra_projections.rake"
-        load "tasks/lyra_mode.rake"
-      end
+      # Rails loads every lib/tasks/*.rake under an engine's root into the
+      # host application. In the monorepo that root also holds its own
+      # maintenance tasks (gems:, public:, stats:, ...), and the Lyra task
+      # files loaded here explicitly as well, so each Lyra task ran twice
+      # (lyra:mode:check checked everything twice). Host applications get
+      # Lyra's own tasks, once.
+      paths["lib/tasks"].glob = "lyra_*.rake"
     end
   end
 end

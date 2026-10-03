@@ -25,6 +25,10 @@ module Lyra
       else
         CommandResult.failure(error: "Unknown command type")
       end
+    rescue EventStoreUnavailableError
+      # Fail-closed: a write whose event cannot be stored fails with the
+      # error, as in event sourcing, rather than as a refused save.
+      raise
     rescue => e
       CommandResult.failure(error: e.message)
     end
@@ -156,7 +160,7 @@ module Lyra
     # In Hijack mode the aggregate stores the write's own event; additional
     # domain events go to the same stream, in the same transaction.
     def store_additional_events(events, stream_name)
-      Lyra.config.event_store.publish(events, stream_name: stream_name) if events.any?
+      Lyra.append_events(events, stream_name: stream_name) if events.any?
     end
 
     def create_event(operation, id, data)

@@ -44,7 +44,7 @@ module Lyra
         event_class = access.outcome == :denied ? Lyra::Events::DataAccessDenied : Lyra::Events::DataAccessed
         subject = subject_key(access.subject)
         event = event_class.new(data: data_for(access, subject), metadata: metadata(access))
-        Lyra.config.event_store.publish(event, stream_name: stream_for(subject))
+        Lyra.append_events(event, stream_name: stream_for(subject))
       end
 
       def stream_for(subject)

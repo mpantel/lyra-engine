@@ -207,6 +207,33 @@ class ActiveSupport::TestCase
 end
 ```
 
+### Error: `Lyra::EventStoreUnavailableError` / "Failed to publish event … run bin/rails lyra:repair"
+
+**Symptom:** an event could not be stored. The error's `cause` is the store's own error, and its
+message names the stream.
+
+What happened to the write depends on the mode:
+
+| Mode | Policy | The write |
+|---|---|---|
+| Hijack, event sourcing (any projection mode) | fail-closed | raises `EventStoreUnavailableError` and rolls back: nothing in the table, nothing in the log |
+| Monitor | log-and-continue | stands; the error is logged, and the record's stream falls behind its row |
+
+**Solution:** fix the cause (look at `error.cause`). In Monitor, then bring the lagging streams
+back in line from the tables:
+
+```bash
+bin/rails lyra:repair DRY_RUN=1        # list the records out of line
+bin/rails lyra:repair                  # append the events that bring them back
+bin/rails lyra:repair MODELS=User,Order
+```
+
+Each repaired stream gets one event (`Imported`, `Updated` with the differing columns, or
+`Destroyed`, metadata `source: "lyra_repair"`) that makes it replay to its row; the detail of the
+lost changes is not recoverable. Repair refuses to run in Hijack or event sourcing, where the
+events are authoritative: there, rebuild the tables (`bin/rails lyra:mode:check ... REBUILD=1`).
+Sampled verification (`config.dual_view_sample_rate`) reports such records as they happen.
+
 ---
 
 ## State Consistency Issues

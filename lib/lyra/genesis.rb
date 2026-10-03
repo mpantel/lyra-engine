@@ -149,7 +149,7 @@ module Lyra
         }
         event = event_class(model_class).new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, { genesis: true }))
         # The lock and the NOT EXISTS above make the stream empty here.
-        Lyra.config.event_store.publish(event, stream_name: "#{model_class.name}$#{record.id}")
+        Lyra.append_events(event, stream_name: "#{model_class.name}$#{record.id}")
         record.id
       end
 

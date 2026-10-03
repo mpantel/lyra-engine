@@ -16,6 +16,8 @@ namespace :lyra do
         exit 1
       end
 
+      # Monitored models register as their classes load.
+      Rails.application.eager_load! unless Rails.application.config.eager_load
       if Lyra.config.monitored_models.empty?
         puts "No models are configured for monitoring."
         puts "Configure models with Lyra.config.monitor_model(YourModel) first."
@@ -131,6 +133,8 @@ namespace :lyra do
     task report: :environment do
       require_lyra_schema
 
+      # Monitored models register as their classes load.
+      Rails.application.eager_load! unless Rails.application.config.eager_load
       if Lyra.config.monitored_models.empty?
         puts "No models are configured for monitoring."
         puts "Configure models with Lyra.config.monitor_model(YourModel) first."

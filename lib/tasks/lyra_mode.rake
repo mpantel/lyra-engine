@@ -1,5 +1,15 @@
 # frozen_string_literal: true
 
+# Monitored models register as their classes load, which a rake task in
+# development does not do by itself: without this, a check saw no models,
+# found no discrepancy and certified the switch.
+lyra_monitored_models = lambda do
+  Rails.application.eager_load! unless Rails.application.config.eager_load
+  models = Lyra.config.monitored_models
+  abort "Lyra: no monitored models found; nothing to check." if models.empty?
+  models
+end
+
 namespace :lyra do
   namespace :mode do
     desc "Check that a mode switch is safe and certify it (TO=hijack|event_sourcing|monitor|disabled " \
@@ -13,7 +23,8 @@ namespace :lyra do
         next
       end
 
-      report = Lyra::ModeTransition.check(to: to, from: from, rebuild: ENV["REBUILD"].present?)
+      report = Lyra::ModeTransition.check(to: to, from: from, models: lyra_monitored_models.call,
+                                          rebuild: ENV["REBUILD"].present?)
       puts report.summary
       report.discrepancies.first(20).each { puts "  #{_1}" }
       puts(report.clean? ? "Clean: certified for #{Lyra.config.mode_transition_certificate_ttl}s." : "Not certified.")
@@ -26,5 +37,17 @@ namespace :lyra do
       puts "last applied: #{Lyra::ModeTransition.last_applied || '(none recorded)'}"
       puts "gate:         #{Lyra::ModeTransition.gate_enabled? ? 'on' : 'off'}"
     end
+  end
+
+  desc "Bring the event log back in line with the tables after Monitor lost events " \
+       "(DRY_RUN=1 lists them; MODELS=User,Order limits it)"
+  task repair: :environment do
+    models = ENV["MODELS"] ? ENV["MODELS"].split(",").map { _1.strip.constantize } : lyra_monitored_models.call
+    result = Lyra::Repair.run(models: models, dry_run: ENV["DRY_RUN"].present?)
+    puts result.summary
+    (ENV["DRY_RUN"].present? ? result.found : result.remaining).first(20).each { puts "  #{_1}" }
+    exit 1 if result.remaining.any? && ENV["DRY_RUN"].blank?
+  rescue Lyra::Repair::Refused => e
+    abort e.message
   end
 end

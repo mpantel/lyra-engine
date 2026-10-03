@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Event store failure policies, named** (`Lyra::EventStoreUnavailableError`, `Lyra.append_events`;
+  FEATURE_GAP_PLAN F1) — every event Lyra writes now goes through `Lyra.append_events`, which
+  raises `EventStoreUnavailableError` (the store's error as its `cause`, the stream in its message)
+  when the store fails. The policy is fixed by the mode: **fail-closed** in Hijack and every
+  event-sourcing mode (the write fails with the error and rolls back), **log-and-continue** in
+  Monitor (the write stands; the log line names the stream and points to `lyra:repair`). No
+  in-memory retry queue: the store shares the application's database, a queue dies with its
+  process, and a retried event could land behind a later one in its stream.
+- **Repair after lost events** (`Lyra::Repair`, `bin/rails lyra:repair [DRY_RUN=1] [MODELS=...]`) —
+  brings the event log back in line with the tables after Monitor lost events: an `Imported` event
+  for a row with no events (or one its stream says was destroyed), an `Updated` event with the
+  differing columns for a row that differs from its events, a `Destroyed` event for events with no
+  row. Each record is re-checked and repaired under a lock on its row; repair events carry
+  metadata `source: "lyra_repair"` and the problem repaired. Refused in Hijack and event sourcing,
+  where the events are authoritative (rebuild the tables instead). `ModeTransition.record_ids` and
+  `ModeTransition.discrepancy` expose the check it uses.
 - **Access log** (`config.record_access_events`, default false; `Lyra::AccessLog`,
   `Lyra::Events::DataAccessed`, `Lyra::Events::DataAccessDenied`; FEATURE_GAP_PLAN F6) — when on,
   every access the privacy policy validates (`validate_access!`) is recorded in the subject's
@@ -195,6 +211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **Hijack fails a write whose event cannot be stored with `EventStoreUnavailableError`**, as event
+  sourcing does, instead of a refused save (`save` returning false with the store's message on
+  `errors[:base]`). A store failure is not a validation error; `save` now raises it, as it raises
+  database errors.
 - **ES-Async can run out of line in tests** — `async_projections_inline` now decides: unset
   (the new default, `nil`) projects inline in the test environment only, as before; `true`
   always; `false` never, so a test with an `:async` job adapter exercises the real background
@@ -256,6 +276,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Lyra's rake tasks ran twice, and host apps got the monorepo's maintenance tasks** — Rails
+  loads every `lib/tasks/*.rake` under an engine's root, and the engine also loaded its three
+  task files explicitly, so each `lyra:mode:*`, `lyra:projections:*` and `lyra:schema:*` task
+  ran twice (`lyra:mode:check` ran its full check twice), and `gems:*`, `public:*`, `stats:*` and
+  the other monorepo tasks appeared in every host app. The engine now loads `lyra_*.rake` only,
+  once.
+- **`lyra:mode:check` could certify a switch having checked nothing** — monitored models register
+  as their classes load, which a rake task in development does not do, so the check saw no
+  models, found no discrepancy and certified the switch. The mode, repair, projection and schema
+  tasks now load the application's models first; check and repair refuse when none are monitored.
 - **Renamed events were skipped on replay** — `Rebuild`, the ES-NoProj cache and the aggregate
   decided what an event did from the end of its name (`…Created`, `…Updated`, `…Destroyed`).
   An event renamed with `event_mapping` (or, now, a domain event) was skipped: `Rebuild` left

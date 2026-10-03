@@ -198,6 +198,13 @@ module Lyra
         connection.select_value("SELECT to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
       end
 
+      # Every id of +model+ with a row or a stream (Lyra::Repair).
+      def record_ids(model) = ids_to_check(model)
+
+      # nil if the record's row and events agree, else a Discrepancy
+      # (Lyra::Repair).
+      def discrepancy(model, id) = compare(model, id)
+
       private
 
       def apply(mode, projection_mode)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "stringio"
 
 # What a write does when its event cannot be stored.
 #
@@ -37,7 +38,7 @@ class EventStoreFailureTest < Minitest::Test
   def test_es_sync_a_create_whose_event_cannot_be_stored_fails_and_leaves_nothing
     event_sourcing(:sync)
     store_fails do
-      assert_raises(Unavailable) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
     end
     assert_nothing_written
   end
@@ -45,7 +46,7 @@ class EventStoreFailureTest < Minitest::Test
   def test_es_noproj_a_create_whose_event_cannot_be_stored_fails
     event_sourcing(:disabled)
     store_fails do
-      assert_raises(Unavailable) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
     end
     assert_nothing_written
     assert_equal 0, FailingUser.count
@@ -55,25 +56,36 @@ class EventStoreFailureTest < Minitest::Test
     event_sourcing(:sync)
     user = FailingUser.create!(name: "Ann", email: "ann@example.com")
     store_fails do
-      assert_raises(Unavailable) { user.update!(name: "Bea") }
+      assert_raises(Lyra::EventStoreUnavailableError) { user.update!(name: "Bea") }
     end
     assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}")
   end
 
-  def test_hijack_refuses_the_write
+  # Hijack used to turn the failure into a refused save (false), unlike
+  # event sourcing; both now fail closed with the same error.
+  def test_hijack_fails_the_write_with_the_typed_error
     Lyra.config.enable_hijack!
     store_fails do
-      refute FailingUser.new(name: "Ann", email: "ann@example.com").save
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.new(name: "Ann", email: "ann@example.com").save }
     end
     assert_nothing_written
+  end
+
+  def test_the_error_names_the_stream_and_keeps_the_store_s_error_as_its_cause
+    event_sourcing(:sync)
+    error = store_fails do
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+    end
+    assert_match(/could not store events in FailingUser\$\d+: EventStoreFailureTest::Unavailable/, error.message)
+    assert_kind_of Unavailable, error.cause
   end
 
   def test_a_bulk_write_in_event_sourcing_is_rolled_back_with_its_events
     event_sourcing(:sync)
     user = FailingUser.create!(name: "Ann", email: "ann@example.com")
     store_fails do
-      assert_raises(Unavailable) { FailingUser.where(id: user.id).update_all(name: "Bea") }
-      assert_raises(Unavailable) { user.update_columns(name: "Cy") }
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.where(id: user.id).update_all(name: "Bea") }
+      assert_raises(Lyra::EventStoreUnavailableError) { user.update_columns(name: "Cy") }
     end
     assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}")
   end
@@ -84,7 +96,7 @@ class EventStoreFailureTest < Minitest::Test
   def test_a_failed_write_leaves_nothing_behind_for_the_next_one
     event_sourcing(:sync)
     store_fails do
-      assert_raises(Unavailable) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+      assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
     end
 
     Lyra.config.enable_monitor!
@@ -100,6 +112,15 @@ class EventStoreFailureTest < Minitest::Test
     end
     assert_equal "Bea", raw("SELECT name FROM users")
     assert_equal 0, raw("SELECT count(*) FROM event_store_events").to_i
+  end
+
+  def test_monitor_s_log_line_points_to_the_repair
+    Lyra.config.enable_monitor!
+    log = StringIO.new
+    Rails.logger.stub(:error, ->(message) { log.puts(message) }) do
+      store_fails { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+    end
+    assert_match(/the write stands, run bin\/rails lyra:repair to bring FailingUser\$\d+ back in line/, log.string)
   end
 
   private

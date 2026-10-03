@@ -540,7 +540,7 @@ module Lyra
       def lyra_store_events(events)
         stream_name = lyra_stream_name
         events.each do |event|
-          Lyra.config.event_store.publish(event, stream_name: stream_name)
+          Lyra.append_events(event, stream_name: stream_name)
         end
       rescue => e
         Rails.logger.error("Lyra: Failed to store events, the write is rolled back - #{e.message}")
@@ -614,10 +614,12 @@ module Lyra
           record: self, changes: operation == :destroyed ? {} : previous_changes
         )
 
-        Lyra.config.event_store.publish(events, stream_name: lyra_stream_name)
+        Lyra.append_events(events, stream_name: lyra_stream_name)
       rescue => e
-        Rails.logger.error("Lyra: Failed to publish event - #{e.message}")
-        # Don't fail the CRUD operation if event publishing fails in monitor mode
+        # Monitor's policy, log-and-continue: the table is authoritative, so
+        # the write stands and its stream falls behind until lyra:repair.
+        Rails.logger.error("Lyra: Failed to publish event - #{e.message}; the write stands, " \
+                           "run bin/rails lyra:repair to bring #{lyra_stream_name} back in line")
       end
 
       def lyra_event_class_for(operation)

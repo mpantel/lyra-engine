@@ -63,7 +63,7 @@ module Lyra
           timestamp: Time.current
         }
         event = event_class.new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, metadata))
-        Lyra.config.event_store.publish(event, stream_name: "#{model_class.name}$#{id}")
+        Lyra.append_events(event, stream_name: "#{model_class.name}$#{id}")
 
         # With projections disabled, reads come from the cached event-stream
         # reconstruction, which would otherwise keep serving the old state.
@@ -169,7 +169,9 @@ module Lyra
         source == "dependent_association" ? :nullify_source : :bypass_source
       end
 
-      def event_class_for(model_class, operation)
+      # The event class a write of +operation+ on +model_class+ is recorded
+      # as (also used by Lyra::Repair).
+      public def event_class_for(model_class, operation)
         config = model_class.lyra_config || Lyra.config.model_config(model_class)
         name = config.event_name_for(operation).to_s.gsub("::", "")
 

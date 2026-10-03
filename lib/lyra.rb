@@ -55,6 +55,7 @@ require "lyra/projections/association_conditions"
 require "lyra/projections/event_store_reader"
 require "lyra/projections/lazy_projection"
 require "lyra/genesis"
+require "lyra/repair"
 
 # Event-aware associations
 require "lyra/associations/event_aware"
