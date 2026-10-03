@@ -50,6 +50,7 @@ rails console
 - **[Getting Started Guide](docs/GETTING_STARTED.md)** - Installation and first steps
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
 - **[Performance](docs/PERFORMANCE.md)** - Measured overhead per mode, and how to pick one
+- **[Adopting Lyra](docs/ADOPTION.md)** - What "non-intrusive" means, the costs, and a checklist for a new codebase
 - **[Monorepo Structure](docs/MONOREPO.md)** - Repository organization
 
 ### Theoretical Foundation
