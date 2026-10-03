@@ -125,6 +125,12 @@ module Lyra
 
       class_methods do
         # Enable Lyra monitoring for this model
+        # The model as it was at +time+, rebuilt from its event streams
+        # (Lyra::Temporal::AsOf): Order.as_of(3.days.ago).find(42).
+        def as_of(time)
+          Lyra::Temporal::AsOf.new(self, time)
+        end
+
         def monitor_with_lyra(options = {})
           self.lyra_monitored = true
           self.lyra_config = Lyra::ModelConfiguration.new(self, options)

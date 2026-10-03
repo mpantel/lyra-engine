@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Point-in-time reconstruction** (`Lyra.state_at(model, id, time)`, `Model.as_of(time)`,
+  `Lyra::Temporal`) — a record's attributes at a given time, rebuilt by replaying its stream up
+  to the last event stored at or before then: `nil` if it did not exist yet or had been
+  destroyed. `Model.as_of(time).find(id)` / `.find_by_id(id)` return read-only records and
+  `.all` every record that existed then. For a row imported by Genesis, a time before its
+  import raises `Lyra::Temporal::HistoryNotRecorded` instead of guessing (a time before its own
+  `created_at` is `nil`). Works in every mode that records events, Monitor included
+  (FEATURE_GAP_PLAN F7).
 - **ES-NoProj joins, evaluated in memory** (`Lyra::Projections::CachedJoins`) — `joins`,
   `left_joins`/`left_outer_joins`, `where.missing` and `where.associated` on `belongs_to`,
   `has_many` and `has_one` associations, with hash conditions on the joined table
