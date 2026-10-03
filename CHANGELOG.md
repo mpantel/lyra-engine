@@ -151,6 +151,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-NoProj evaluated association conditions record by record, and some wrongly** —
+  `where(program: x)` loaded each cached record's association (one query per record: about
+  10,000 for one `count` in the mode-comparison benchmark) and compared objects;
+  `find_by(program: x)` compared against a `program` attribute the record does not have and
+  silently found nothing; `where(program_id: record)` matched nothing. Conditions are now
+  rewritten as ActiveRecord does (`Lyra::Projections::AssociationConditions`): a `belongs_to`
+  becomes its foreign key (polymorphic: type and id), and a record given as a column value
+  becomes its id. A `has_many`/`has_one` condition, which ActiveRecord accepts only with a
+  join, raises `UnsupportedQuery`, as does a polymorphic condition over several types.
 - **ES-NoProj could serve out-of-date records from its cache** — a write warmed its record's
   entry inside the write's transaction, so a rollback left a record cached that never existed;
   two processes filling one key could leave a stale entry for up to an hour; and

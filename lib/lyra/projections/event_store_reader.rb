@@ -37,7 +37,7 @@ module Lyra
         # @return [ActiveRecord::Base, nil] The first matching record or nil
         def find_by(model_class, attributes)
           Genesis.first_use(model_class)
-          result = CachedProjection.find_by(model_class, attributes)
+          result = CachedProjection.find_by(model_class, AssociationConditions.rewrite(model_class, attributes))
           return nil unless result
 
           build_instance(model_class, result)
@@ -89,7 +89,7 @@ module Lyra
         # @return [Integer] Count of matching records
         def count(model_class, conditions = {})
           Genesis.first_use(model_class)
-          CachedProjection.count(model_class, conditions)
+          CachedProjection.count(model_class, AssociationConditions.rewrite(model_class, conditions))
         end
 
         # Invalidate cache for a record (call after event stored)

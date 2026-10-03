@@ -189,6 +189,7 @@ module Lyra
         return WhereChain.new(self) if conditions == :chain
 
         check_hash_conditions!(conditions, "where(#{conditions.inspect[0, 60]})")
+        conditions = AssociationConditions.rewrite(model_class, conditions)
         filtered = @records.select do |record|
           conditions.all? { |key, value| matches_value?(record, key, value) }
         end
@@ -198,6 +199,7 @@ module Lyra
 
       def not(conditions)
         check_hash_conditions!(conditions, "where.not(#{conditions.inspect[0, 60]})")
+        conditions = AssociationConditions.rewrite(model_class, conditions)
         filtered = @records.reject do |record|
           conditions.all? { |key, value| matches_value?(record, key, value) }
         end
