@@ -96,6 +96,10 @@ module Lyra
         after_create :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
         after_update :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
         after_destroy :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
+
+        # Sampled DualView verification after commit (Lyra::DualViewSampler);
+        # off unless config.dual_view_sample_rate is above 0.
+        after_commit :lyra_sample_dual_view, if: :lyra_events_enabled?
       end
 
       # Override _update_row to skip SQL UPDATE in event_sourcing mode.
@@ -264,6 +268,10 @@ module Lyra
       # their after_* callbacks return early via @lyra_hijacked.
       def lyra_events_enabled?
         lyra_monitored? && !Lyra.disabled_mode?
+      end
+
+      def lyra_sample_dual_view
+        Lyra::DualViewSampler.after_commit(self)
       end
 
       def lyra_hijack_mode?

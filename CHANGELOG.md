@@ -8,6 +8,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Mode Transition Safety** (`Lyra::ModeTransition`, `rake lyra:mode:check`; FEATURE_GAP_PLAN F3)
+  — a mode switch that changes the authoritative store is allowed only when rows and events
+  agree for every monitored record: escalating from Disabled or Monitor to Hijack or event
+  sourcing (rows that predate Lyra are imported by Genesis first), and leaving ES-NoProj,
+  ES-Lazy or ES-Async for a mode that reads tables (`rebuild: true` rebuilds them first). The
+  check compares every row and every stream in batches, reading the real table, then
+  re-checks what changed while it ran, and stores a clean result as a certificate.
+  `ModeTransition.to!` and the `enable_*!` helpers accept a fresh certificate after
+  re-checking only what changed since, else run the full check, and raise `Refused` with the
+  discrepancies; `force: true` overrides. At boot, a switch from the mode the application last
+  ran in needs a certificate (`LYRA_FORCE_MODE_TRANSITION=1` overrides; rake processes are
+  exempt). `config.mode_transition_gate`: nil (default) gates everywhere but the test
+  environment; `config.mode = ...` stays the raw, ungated setter.
+- **Sampled DualView verification** (`config.dual_view_sample_rate`, default 0.0, off;
+  `config.dual_view_discrepancy_handler`) — after a write commits, a sampled share of writes
+  is compared with its events; a discrepancy is logged and passed to the handler, and the write
+  is never failed. Skipped in ES-NoProj, ES-Lazy and ES-Async, whose tables lag by design.
 - **Domain events** (`monitor_with_lyra domain_events: [...]`, `Lyra::DomainEvents`;
   FEATURE_GAP_PLAN F8) — rules name a write's event after what it means instead of the CRUD
   operation: `{ name: "PaymentCompleted", on: %i[create update], if: ->(payment, changes) { ... } }`.

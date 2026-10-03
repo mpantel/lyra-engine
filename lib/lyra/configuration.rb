@@ -16,6 +16,14 @@ module Lyra
     # Models declared by name (config.models=), instrumented once the
     # application's code has loaded. { "Name" => options }.
     attr_reader :declared_models
+    # Mode Transition Safety (Lyra::ModeTransition): nil (default) gates mode
+    # switches everywhere but the test environment; true always; false never.
+    attr_accessor :mode_transition_gate
+    # How long a clean check (rake lyra:mode:check) certifies a switch.
+    attr_accessor :mode_transition_certificate_ttl
+    # Share of writes checked by DualView after commit (0.0, the default, is
+    # off; the thesis suggests 0.01-0.05), and what to call on a discrepancy.
+    attr_accessor :dual_view_sample_rate, :dual_view_discrepancy_handler
 
     def initialize
       @mode = :monitor
@@ -43,6 +51,10 @@ module Lyra
       # Genesis: :auto (event-sourcing mode only), true (every event-producing
       # mode) or false. See Lyra::Genesis.
       @genesis = :auto
+      @mode_transition_gate = nil
+      @mode_transition_certificate_ttl = 3600
+      @dual_view_sample_rate = 0.0
+      @dual_view_discrepancy_handler = nil
     end
 
     # Declare the models to monitor by name, in the initializer, before they
@@ -83,6 +95,10 @@ module Lyra
       return Lyra.verify_mapping! if Lyra.booted?
 
       @verify_mapping_at_boot = true
+    end
+
+    def gated_switch?
+      defined?(Lyra::ModeTransition) && Lyra.booted? && Lyra::ModeTransition.gate_enabled?
     end
 
     def verify_mapping_at_boot?
@@ -138,19 +154,27 @@ module Lyra
     end
 
     # Enable hijack mode (can override CRUD operations)
+    # After boot, the enable_*! helpers switch through the Mode Transition
+    # Safety gate (Lyra::ModeTransition.to!) when it is enabled.
     def enable_hijack!
+      return Lyra::ModeTransition.to!(:hijack) if gated_switch?
+
       @hijack_enabled = true
       @mode = :hijack
     end
 
     # Enable monitor mode (only log events, don't override)
     def enable_monitor!
+      return Lyra::ModeTransition.to!(:monitor) if gated_switch?
+
       @hijack_enabled = false
       @mode = :monitor
     end
 
     # Enable event sourcing mode (events as source of truth, no direct DB writes)
     def enable_event_sourcing!
+      return Lyra::ModeTransition.to!(:event_sourcing) if gated_switch?
+
       @mode = :event_sourcing
       @hijack_enabled = false
     end

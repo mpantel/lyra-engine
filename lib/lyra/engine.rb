@@ -57,6 +57,10 @@ module Lyra
         config.after_initialize do
           Lyra.booted!
           Lyra.verify_mapping! if Lyra.config.verify_mapping_at_boot?
+          # Mode Transition Safety at boot, for the processes that serve the
+          # application. Rake tasks (migrations, rake lyra:mode:check itself)
+          # boot too, and must not be refused by the switch they prepare.
+          Lyra::ModeTransition.boot_check! unless defined?(Rake.application) && Rake.application.top_level_tasks.any?
         end
       end
 
@@ -85,6 +89,7 @@ module Lyra
       rake_tasks do
         load "tasks/lyra_schema.rake"
         load "tasks/lyra_projections.rake"
+        load "tasks/lyra_mode.rake"
       end
     end
   end
