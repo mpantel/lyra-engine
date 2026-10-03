@@ -106,14 +106,17 @@ module PetriFlow
     #   Use true for full state-space exploration of colored nets.
     #   Guards are treated as non-deterministic choice, which is sound
     #   for structural properties (boundedness, liveness, reachability).
-    def verify(net, initial_marking: nil, pt_abstraction: false)
+    # @param terminal_places [Array<Symbol>] Places whose marking means the
+    #   net has finished; liveness[:terminates_properly] is deadlock-freedom
+    #   except at markings that mark one of them.
+    def verify(net, initial_marking: nil, pt_abstraction: false, terminal_places: [])
       initial_marking ||= net.current_marking
 
       reachability = Verification::ReachabilityAnalyzer.new(net, initial_marking, pt_abstraction: pt_abstraction)
       reachability.analyze
 
       boundedness = Verification::BoundednessChecker.new(net, reachability)
-      liveness = Verification::LivenessChecker.new(net, reachability)
+      liveness = Verification::LivenessChecker.new(net, reachability, terminal_places: terminal_places)
 
       {
         reachability: reachability.report,

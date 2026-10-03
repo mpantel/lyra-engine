@@ -200,6 +200,7 @@ module Lyra
       def verify_all
         verify_lifecycle
         verify_modes
+        verify_bypass
         verify_generated_workflows
         generate_report
         @report
@@ -239,6 +240,21 @@ module Lyra
             }
           }
         end
+      end
+
+      # Verify the callback-bypassing writes, which the CRUD nets don't cover
+      def verify_bypass
+        workflow = BypassWorkflow.new
+        @results[:bypass] = {
+          workflow: workflow.workflow_name,
+          verification: workflow.verify!,
+          terminal_reachability: workflow.terminal_reachability.dup,
+          coverage: BypassWorkflow.coverage(workflow),
+          diagrams: {
+            mermaid: workflow.to_mermaid,
+            dot: workflow.to_dot
+          }
+        }
       end
 
       # Verify generated workflows from app/workflows directories
@@ -381,6 +397,7 @@ module Lyra
           modes_valid: modes_valid?(modes),
           all_terminals_reachable: all_terminals_reachable?,
           deadlock_free: deadlock_free?,
+          bypass_covered: bypass_covered?,
           recommendations: build_recommendations
         }
       end
@@ -414,11 +431,19 @@ module Lyra
         end
       end
 
+      # Deadlock-freedom in the thesis's sense: no reachable marking is dead
+      # unless it marks a designated terminal place. PetriFlow's raw
+      # deadlock_free counts the intended end as a deadlock, so it is false
+      # for every net here.
       def deadlock_free?
         flatten_results.all? do |result|
           next true unless result.dig(:verification, :liveness)
-          result[:verification][:liveness][:deadlock_free]
+          result[:verification][:liveness][:terminates_properly]
         end
+      end
+
+      def bypass_covered?
+        @results.dig(:bypass, :coverage, :covered) || false
       end
 
       # Flatten nested results (modes has 3 sub-results)
@@ -426,6 +451,7 @@ module Lyra
         results = []
         results << @results[:lifecycle] if @results[:lifecycle]
         results += @results[:modes].values if @results[:modes]
+        results << @results[:bypass] if @results[:bypass]
         results += @results[:generated_workflows].values if @results[:generated_workflows]
         results
       end
@@ -437,12 +463,12 @@ module Lyra
           recommendations << "Some terminal states are unreachable - review state machine design"
         end
 
-        # Check for cycles (expected in lifecycle due to update loop)
-        lifecycle_has_cycle = @results[:lifecycle] &&
-                              !@results[:lifecycle][:verification][:liveness][:deadlock_free]
+        unless deadlock_free?
+          recommendations << "Some net can get stuck outside its terminal places - review the transitions"
+        end
 
-        if lifecycle_has_cycle
-          recommendations << "Lifecycle contains update cycle (persisted ↔ updated) - this is expected behavior"
+        unless bypass_covered?
+          recommendations << "A callback-bypassing write can change the store without an event"
         end
 
         if recommendations.empty?

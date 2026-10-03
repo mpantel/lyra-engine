@@ -143,7 +143,7 @@ module PetriFlow
     # @return [Hash] Verification results
     def verify!
       reset_to_initial!
-      @verification_results = PetriFlow.verify(@net)
+      @verification_results = PetriFlow.verify(@net, terminal_places: self.class.defined_terminal_places || [])
       verify_terminal_reachability
       @verification_results
     end

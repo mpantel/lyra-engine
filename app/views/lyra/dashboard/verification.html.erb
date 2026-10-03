@@ -105,6 +105,12 @@
         </div>
         <div class="label">Deadlock Free</div>
       </div>
+      <div class="stat-card">
+        <div class="value <%= @summary[:bypass_covered] ? 'pass' : 'fail' %>">
+          <%= @summary[:bypass_covered] ? "✓" : "✗" %>
+        </div>
+        <div class="label">Bypass Writes Recorded</div>
+      </div>
     </div>
 
     <div class="recommendations" style="margin-top: 20px; margin-bottom: 20px;">
@@ -161,8 +167,8 @@
             <div class="value"><%= @lifecycle[:verification][:boundedness][:is_safe] ? "Yes" : "No" %></div>
           </div>
           <div class="property">
-            <div class="name">Deadlock Free</div>
-            <div class="value"><%= @lifecycle[:verification][:liveness][:deadlock_free] ? "Yes" : "No" %></div>
+            <div class="name">Deadlock Free (except at terminal)</div>
+            <div class="value"><%= @lifecycle[:verification][:liveness][:terminates_properly] ? "Yes" : "No" %></div>
           </div>
         </div>
 

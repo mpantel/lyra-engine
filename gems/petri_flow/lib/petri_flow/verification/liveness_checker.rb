@@ -14,10 +14,13 @@ module PetriFlow
       # L3 (Potentially firable infinitely): Can fire infinitely
       # L4 (Live): Can always eventually fire
 
-      def initialize(net, reachability_analyzer = nil)
+      # terminal_places: places whose marking means the net finished rather
+      # than got stuck. See #terminates_properly?.
+      def initialize(net, reachability_analyzer = nil, terminal_places: [])
         @net = net
         @reachability_analyzer = reachability_analyzer ||
                                  ReachabilityAnalyzer.new(net)
+        @terminal_places = Array(terminal_places).map(&:to_sym)
       end
 
       # Check if transition is dead (L0)
@@ -48,6 +51,23 @@ module PetriFlow
         @reachability_analyzer.reachable_markings.all? do |marking|
           @net.set_marking(marking)
           !@net.deadlocked?
+        end
+      end
+
+      # Deadlock-freedom relative to designated terminal places: a reachable
+      # marking in which no transition is enabled is a deadlock unless it
+      # marks at least one terminal place. deadlock_free? counts every dead
+      # marking, so it is false for any net that is meant to finish; with no
+      # terminal places the two agree.
+      def terminates_properly?
+        improper_dead_markings.empty?
+      end
+
+      # Reachable dead markings that mark no terminal place.
+      def improper_dead_markings
+        @reachability_analyzer.reachable_markings.select do |marking|
+          @net.set_marking(marking)
+          @net.deadlocked? && @terminal_places.none? { |place| marking.tokens_at(place).positive? }
         end
       end
 
@@ -86,6 +106,9 @@ module PetriFlow
 
         {
           deadlock_free: deadlock_free?,
+          terminal_places: @terminal_places,
+          terminates_properly: terminates_properly?,
+          improper_dead_markings: improper_dead_markings.size,
           dead_transitions: classification.select { |_, v| v == :dead }.keys,
           live_transitions: classification.select { |_, v| v == :live }.keys,
           potentially_firable: classification.select { |_, v| v == :potentially_firable }.keys,

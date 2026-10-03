@@ -62,11 +62,16 @@ module Lyra
         workflow = CrudLifecycleWorkflow.new
         results = workflow.verify!
 
-        # The lifecycle has intentional terminal states, so deadlock_free
-        # means we can always reach a terminal state
+        # The lifecycle has an intentional terminal state (:deleted), so the
+        # property is deadlock-freedom except there; PetriFlow's raw
+        # deadlock_free counts the terminal marking itself as a deadlock.
         reachability = results[:reachability]
         assert reachability[:total_reachable_states] > 0,
                "Should have reachable states"
+        assert results[:liveness][:terminates_properly],
+               "No reachable marking should be stuck outside :deleted"
+        refute results[:liveness][:deadlock_free],
+               "The raw check still counts the :deleted marking as dead"
       end
 
       def test_mode_verification_workflows_build

@@ -243,7 +243,8 @@ namespace :lyra do
           puts "  Is safe (1-bounded): #{boundedness[:is_safe]}"
           puts "  Is bounded: #{boundedness[:is_bounded]}"
           puts "  Max tokens: #{boundedness[:max_tokens]}"
-          puts "  Deadlock-free: #{liveness[:deadlock_free]}"
+          puts "  Terminates properly (deadlock-free except at terminal places): #{liveness[:terminates_properly]}"
+          puts "  Deadlock-free (raw, counts the terminal marking): #{liveness[:deadlock_free]}"
           puts "  Liveness score: #{liveness[:liveness_score]}"
           puts ""
         end

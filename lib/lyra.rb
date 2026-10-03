@@ -79,6 +79,7 @@ require "lyra/visualization/activity_heatmap"
 if PETRI_FLOW_AVAILABLE
   require "lyra/verification/crud_lifecycle_workflow"
   require "lyra/verification/workflow_generator"
+  require "lyra/verification/bypass_workflow"
 end
 
 module Lyra
