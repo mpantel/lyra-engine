@@ -113,6 +113,18 @@ class GenesisTest < Minitest::Test
     assert_equal 3, imported_events.size
   end
 
+  # A lookup made before the import -- in an earlier process, or before the
+  # event store was reset -- caches "not found". Solid Cache cannot delete by
+  # prefix, so invalidate_all left that entry, and the imported record stayed
+  # missing until it expired (found by the Aegean benchmark harness).
+  def test_an_import_drops_a_cached_not_found
+    es_noproj!
+    key = Lyra::Projections::CachedProjection.send(:record_cache_key, GenesisItem, @ids.first)
+    Rails.cache.write(key, nil)
+
+    assert_equal "a", GenesisItem.find(@ids.first).label
+  end
+
   def test_es_noproj_finds_and_updates_a_row_that_predates_lyra
     es_noproj!
 

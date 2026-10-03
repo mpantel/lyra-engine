@@ -96,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Genesis left a cached "not found" in place on Solid Cache** — an ES-NoProj lookup
+  made before a record was imported (in an earlier process, or before the event store
+  was reset) caches `nil` for it. Genesis cleared the cache with
+  `CachedProjection.invalidate_all`, which cannot delete per-record entries on a store
+  without prefix deletion (Solid Cache, the Rails 8 default), so the imported record stayed
+  "not found" until the entry expired, up to an hour. Genesis now drops each imported
+  record's entry by id. Found by the Aegean benchmark harness, which empties the event
+  store between modes.
 - **`CachedRelation#delete_all`/`destroy_all`/`update_all` wiped the whole table**
   (`Lyra::Projections::CachedRelation`, from `stack/latest-ruby-rails-res`) — the
   `method_missing` scope fallback rebuilt them from `model_class.unscoped` and ran them

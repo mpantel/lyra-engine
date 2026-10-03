@@ -75,7 +75,7 @@ module Lyra
       def import_all(model_class)
         Thread.current[:lyra_genesis_running] = true
         connection = model_class.connection
-        imported = 0
+        imported = []
 
         model_class.transaction do
           lock!(connection, model_class)
@@ -84,13 +84,13 @@ module Lyra
             rows = rows_without_stream(connection, model_class, after)
             break if rows.empty?
 
-            rows.each { |row| imported += 1 if import_row(model_class, row) }
+            rows.each { |row| (id = import_row(model_class, row)) && imported << id }
             after = rows.last[model_class.primary_key]
           end
         end
 
-        Projections::CachedProjection.invalidate_all(model_class) if imported.positive?
-        imported
+        forget_cached(model_class, imported)
+        imported.size
       ensure
         Thread.current[:lyra_genesis_running] = nil
       end
@@ -137,7 +137,7 @@ module Lyra
 
       def import_row(model_class, row)
         record = model_class.instantiate(row)
-        return false if record.id.nil?
+        return nil if record.id.nil?
 
         event = event_class(model_class).new(
           data: {
@@ -152,7 +152,18 @@ module Lyra
         )
         # The lock and the NOT EXISTS above make the stream empty here.
         Lyra.config.event_store.publish(event, stream_name: "#{model_class.name}$#{record.id}")
-        true
+        record.id
+      end
+
+      # An ES-NoProj lookup made before the import (in an earlier process, or
+      # before the event store was reset) may have cached "not found" for these
+      # records. invalidate_all cannot drop per-record entries on every store
+      # (Solid Cache cannot delete by prefix), so such a record stayed missing
+      # until the entry expired, up to an hour. Drop each one by id.
+      def forget_cached(model_class, ids)
+        return if ids.empty?
+
+        ids.each { |id| Projections::CachedProjection.invalidate(model_class, id) }
       end
 
       def event_class(model_class)
