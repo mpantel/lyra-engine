@@ -1,0 +1,131 @@
+# frozen_string_literal: true
+
+require "test_helper"
+
+# Lyra::Erasure: one record's personal data erased from its row and from
+# every event in its stream, the stream still replaying to the row, and the
+# erasure itself recorded.
+class ErasureTest < Minitest::Test
+  MT = Lyra::ModeTransition
+
+  def setup
+    skip "Requires Rails and database" unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connection.table_exists?(:users)
+    skip "Requires pam_dsl" unless Lyra.pam_dsl_available?
+
+    PamDsl.reset!
+    PamDsl.define_policy(:erase_policy) do
+      field :email, type: :email, sensitivity: :confidential
+      field :name, type: :name
+      purpose :contact do
+        basis :contract
+        requires :email
+      end
+    end
+    Object.send(:remove_const, :EraseUser) if defined?(EraseUser)
+    Object.const_set(:EraseUser, Class.new(ActiveRecord::Base) { self.table_name = "users" })
+    EraseUser.include(Lyra::Interceptors::CrudInterceptor)
+    monitor(privacy_policy: :erase_policy)
+    clean
+    Lyra.config.enable_monitor!
+  end
+
+  def teardown
+    return unless defined?(EraseUser)
+
+    Lyra.config.projection_mode = :sync
+    Lyra.config.strict_data_access = false
+    Lyra.config.enable_monitor!
+    clean
+    PamDsl.reset!
+  end
+
+  def test_the_row_and_every_event_lose_the_personal_values
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    user.update!(email: "ann@new.example")
+    ids_before = stream(user).map(&:event_id)
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "Art. 17 request #12")
+
+    assert_equal %w[email name], result.fields.sort
+    assert_equal 2, result.events_rewritten
+    assert_equal ["erased:#{user.id}"] * 2, raw("SELECT email, name FROM users WHERE id = #{user.id}", :rows).first
+    refute_match(/ann@|Ann/, raw("SELECT string_agg(data, ' ') FROM event_store_events"), "no value left in the log")
+    assert_equal ids_before, stream(user).first(2).map(&:event_id), "overwritten in place"
+    assert_nil MT.discrepancy(EraseUser, user.id.to_s), "the stream still replays to the row"
+  end
+
+  def test_the_erasure_is_recorded_without_values
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "Art. 17 request #12", erased_by: "dpo")
+
+    event = stream(user).last
+    assert_kind_of Lyra::Events::ErasureApplied, event
+    assert_equal "Art. 17 request #12", event.data[:reason]
+    assert_equal %w[email name], event.data[:fields].sort
+    assert_equal ["lyra_erasure", "dpo"], event.metadata.to_h.values_at(:source, :erased_by)
+    assert_nil Lyra::Event.operation_of(event), "not replayed"
+  end
+
+  def test_only_the_fields_named
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email])
+
+    assert_equal ["Ann", "erased:#{user.id}"], raw("SELECT name, email FROM users WHERE id = #{user.id}", :rows).first
+  end
+
+  def test_a_domain_event_payload_under_the_attribute_s_name_is_erased_too
+    monitor(privacy_policy: :erase_policy,
+            domain_events: [{ name: "MemberJoined", on: :create, payload: ->(u, _c) { { email: u.email } } }])
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+    assert_equal "erased:#{user.id}", stream(user).first.data[:payload][:email]
+  end
+
+  def test_es_noproj_the_events_are_the_record
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :disabled
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    EraseUser.find(user.id) # cached
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+    refute result.row_erased, "no row in ES-NoProj"
+    assert_equal "erased:#{user.id}", EraseUser.find(user.id).email, "read after erasure, not from the cache"
+  end
+
+  def test_strict_data_access_and_a_purpose_in_scope_do_not_stop_it
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    Lyra.config.strict_data_access = true
+
+    Lyra.with_purpose(:contact) { Lyra::Erasure.erase!(EraseUser, user.id, reason: "r") }
+    assert_equal "erased:#{user.id}", raw("SELECT email FROM users WHERE id = #{user.id}")
+  end
+
+  def test_nothing_to_erase_without_a_policy_or_fields
+    monitor
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+
+    assert_raises(Lyra::Erasure::Unsupported) { Lyra::Erasure.erase!(EraseUser, user.id, reason: "r") }
+  end
+
+  private
+
+  def monitor(**options)
+    EraseUser.monitor_with_lyra(**options)
+    Lyra.config.monitor_model(EraseUser, options)
+  end
+
+  def stream(user) = Lyra.config.event_store.read.stream("EraseUser$#{user.id}").to_a
+
+  def raw(sql, kind = :value)
+    conn = ActiveRecord::Base.connection
+    kind == :rows ? conn.select_rows(sql) : conn.select_value(sql)
+  end
+
+  def clean
+    conn = ActiveRecord::Base.connection
+    conn.execute("DELETE FROM users")
+    conn.execute("DELETE FROM event_store_events_in_streams")
+    conn.execute("DELETE FROM event_store_events")
+  end
+end

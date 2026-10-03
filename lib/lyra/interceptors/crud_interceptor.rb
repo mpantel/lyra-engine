@@ -100,6 +100,10 @@ module Lyra
         # Sampled DualView verification after commit (Lyra::DualViewSampler);
         # off unless config.dual_view_sample_rate is above 0.
         after_commit :lyra_sample_dual_view, if: :lyra_events_enabled?
+
+        # Purpose-bound reads (Lyra::PurposeBoundReads): a loaded record is
+        # checked against its policy for the purpose in scope.
+        after_find :lyra_check_read_purpose, if: :lyra_monitored?
       end
 
       # Override _update_row to skip SQL UPDATE in event_sourcing mode.
@@ -269,6 +273,10 @@ module Lyra
       # their after_* callbacks return early via @lyra_hijacked.
       def lyra_events_enabled?
         lyra_monitored? && !Lyra.disabled_mode?
+      end
+
+      def lyra_check_read_purpose
+        Lyra::PurposeBoundReads.check(self)
       end
 
       def lyra_sample_dual_view

@@ -65,7 +65,7 @@ module Lyra
       # record was (or had come) back in line.
       def repair(model, id)
         model.transaction do
-          row = model.unscoped.lock.find_by(model.primary_key => id)
+          row = Lyra::PurposeBoundReads.internal { model.unscoped.lock.find_by(model.primary_key => id) }
           problem = ModeTransition.discrepancy(model, id)
           next nil unless problem
 

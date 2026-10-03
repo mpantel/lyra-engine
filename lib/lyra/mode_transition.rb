@@ -353,7 +353,7 @@ module Lyra
       def bypass
         previous = Thread.current[:lyra_bypass_read_override]
         Thread.current[:lyra_bypass_read_override] = true
-        yield
+        Lyra::PurposeBoundReads.internal { yield }
       ensure
         Thread.current[:lyra_bypass_read_override] = previous
       end

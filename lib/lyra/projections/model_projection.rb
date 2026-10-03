@@ -31,15 +31,17 @@ module Lyra
           # both project through here, whatever the projection mode.
           previous = Thread.current[:lyra_bypass_read_override]
           Thread.current[:lyra_bypass_read_override] = true
-          case operation
-          when :create
-            project_create(model_class, result)
-          when :update
-            project_update(model_class, result)
-          when :destroy
-            project_destroy(model_class, result)
-          else
-            raise ArgumentError, "Unknown operation: #{operation}"
+          Lyra::PurposeBoundReads.internal do
+            case operation
+            when :create
+              project_create(model_class, result)
+            when :update
+              project_update(model_class, result)
+            when :destroy
+              project_destroy(model_class, result)
+            else
+              raise ArgumentError, "Unknown operation: #{operation}"
+            end
           end
         ensure
           Thread.current[:lyra_bypass_read_override] = previous

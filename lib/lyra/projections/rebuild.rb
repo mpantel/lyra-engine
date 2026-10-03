@@ -36,6 +36,10 @@ module Lyra
           }
           rebuilt_ids = []
 
+          Lyra::PurposeBoundReads.internal { rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids) }
+        end
+
+        def rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids)
           model_class.transaction do
             clear_read_model(model_class) if truncate
 

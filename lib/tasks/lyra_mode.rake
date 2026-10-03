@@ -50,4 +50,17 @@ namespace :lyra do
   rescue Lyra::Repair::Refused => e
     abort e.message
   end
+  desc "Erase one record's personal data from its row and its events (Art. 17) " \
+       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone])"
+  task erase: :environment do
+    model = ENV.fetch("MODEL").constantize
+    result = Lyra::Erasure.erase!(model, ENV.fetch("ID"), reason: ENV.fetch("REASON"),
+                                  fields: ENV["FIELDS"]&.split(",")&.map(&:strip))
+    puts "Erased #{result.fields.join(', ')} of #{result.model} #{result.id}: " \
+         "#{result.events_rewritten} events rewritten, row #{result.row_erased ? 'erased' : 'absent'}."
+  rescue KeyError => e
+    abort "#{e.message}: MODEL, ID and REASON are required"
+  rescue Lyra::Erasure::Unsupported => e
+    abort e.message
+  end
 end

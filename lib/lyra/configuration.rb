@@ -39,6 +39,9 @@ module Lyra
     # Extra metadata for each recorded access, from a proc given the
     # PamDsl::Enforcement::Access: who accessed, where Current does not say.
     attr_accessor :access_metadata_proc
+    # What a read of a model with a privacy policy does when no purpose is
+    # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
+    attr_reader :reads_without_purpose
 
     def initialize
       @mode = :monitor
@@ -75,6 +78,11 @@ module Lyra
       @annotate_privacy = false
       @record_access_events = false
       @access_metadata_proc = nil
+      @reads_without_purpose = :allow
+    end
+
+    def reads_without_purpose=(mode)
+      @reads_without_purpose = Lyra::PurposeBoundReads.validate_mode!(mode)
     end
 
     # Declare the models to monitor by name, in the initializer, before they

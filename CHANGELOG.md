@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Purpose-bound reads** (`Lyra::PurposeBoundReads`, `Lyra.with_purpose`, `lyra_purpose` for
+  controllers and jobs, `config.reads_without_purpose`) — a read of a monitored model with a
+  privacy policy, made within a declared purpose, is checked through the policy's
+  `validate_access!` with the record as subject: every declared attribute the query loaded must be
+  allowed for the purpose, so loading more than the purpose needs is refused (data minimisation).
+  No setting turns it on: the purpose does. Reads with no purpose follow
+  `config.reads_without_purpose`: `:allow` (default), `:audit` (logged, and recorded as an audited
+  access with purpose `none` when the access log is on) or `:deny` (`PurposeRequiredError`).
+  Lyra's own reads (projections, bypass snapshots, Genesis, DualView, mode checks, repair,
+  erasure) are exempt; reads that load no model are not checked. Every monitored model gains an
+  `after_find`, which returns at once when no purpose is in scope and reads without one are
+  allowed.
+- **Erasure executor** (`Lyra::Erasure.erase!`, `bin/rails lyra:erase MODEL= ID= REASON=
+  [FIELDS=]`, `Lyra::Events::ErasureApplied`) — erases one record's personal attributes (declared
+  by its policy or listed by its events' privacy stamps, or exactly `fields:`) from the row and
+  from every event in its stream, overwriting each event in place (same id, position, time):
+  attributes, both sides of each change, and payload keys with the attribute's name. Appends
+  `ErasureApplied` (fields, reason, who; never a value), which replay skips; the stream still
+  replays to the anonymized row. Replacement is nil where allowed, `"erased:<id>"` for a NOT NULL
+  string, else the column default. Works in every mode, with strict data access on and inside a
+  purpose. On request only; not policy-driven, and crypto-shredding remains future work.
 - **Event store failure policies, named** (`Lyra::EventStoreUnavailableError`, `Lyra.append_events`;
   FEATURE_GAP_PLAN F1) — every event Lyra writes now goes through `Lyra.append_events`, which
   raises `EventStoreUnavailableError` (the store's error as its `cause`, the stream in its message)

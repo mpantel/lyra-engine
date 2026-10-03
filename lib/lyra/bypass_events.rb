@@ -76,7 +76,8 @@ module Lyra
       # Taken before a bulk write so the events can carry old values.
       def snapshot(model_class, relation)
         pk = model_class.primary_key
-        relation.to_a.to_h { |record| [record.public_send(pk), record.attributes] }
+        rows = Lyra::PurposeBoundReads.internal { relation.to_a }
+        rows.to_h { |record| [record.public_send(pk), record.attributes] }
       end
 
       # After update_all: compare each snapshotted row with its new state and
@@ -85,8 +86,8 @@ module Lyra
         return if before.empty?
 
         pk = model_class.primary_key
-        after = model_class.unscoped.where(pk => before.keys).to_a
-                           .to_h { |record| [record.public_send(pk), record.attributes] }
+        after = Lyra::PurposeBoundReads.internal { model_class.unscoped.where(pk => before.keys).to_a }
+                .to_h { |record| [record.public_send(pk), record.attributes] }
 
         before.each do |id, old_attrs|
           new_attrs = after[id] or next
@@ -122,7 +123,8 @@ module Lyra
 
         wanted = tuples.to_set
         pk = model_class.primary_key
-        model_class.unscoped.where(keys.first => tuples.map(&:first).uniq).each_with_object({}) do |record, acc|
+        found = Lyra::PurposeBoundReads.internal { model_class.unscoped.where(keys.first => tuples.map(&:first).uniq).to_a }
+        found.each_with_object({}) do |record, acc|
           next unless wanted.include?(keys.map { |key| record.read_attribute(key) })
 
           acc[record.public_send(pk)] = record.attributes

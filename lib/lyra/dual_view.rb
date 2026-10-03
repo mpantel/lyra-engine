@@ -27,7 +27,7 @@ module Lyra
 
     # CRUD view - current database state
     def crud_state
-      record = model_class.find_by(id: model_id)
+      record = Lyra::PurposeBoundReads.internal { model_class.find_by(id: model_id) }
 
       return { exists: false } unless record
 

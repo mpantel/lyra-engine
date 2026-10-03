@@ -87,6 +87,29 @@ report = compliance.right_to_be_forgotten_report
 GET /lyra/privacy/gdpr_report/User/123
 ```
 
+Then erase, one record at a time:
+
+```ruby
+Lyra::Erasure.erase!(Registration, 5, reason: "Art. 17 request #12")
+# => #<Result fields: ["email", "firstname", ...], events_rewritten: 4, row_erased: true>
+```
+```bash
+bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELDS=email,phone]
+```
+
+- Erases the personal attributes (declared by the policy, or listed by the events' privacy
+  stamps, or exactly `fields:`) from the row and from every event in the record's stream,
+  overwriting each event in place (same id, position and time): attributes, both sides of each
+  change, and domain-event payload keys with the attribute's name.
+- Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). It is not
+  replayed; the stream still replays to the anonymized row.
+- Replacement: `nil` where the column allows it, `"erased:<id>"` for a NOT NULL string column,
+  the column default otherwise.
+- The log is append-only except for this; the erasure itself is recorded. Crypto-shredding,
+  which would leave the log untouched, is not implemented.
+- Not found: a payload that copies a value under another name (pass it in `fields:`), and other
+  records holding the same person's data (erase each; the report above lists them).
+
 #### Right to Data Portability (Article 20)
 
 Export data in machine-readable formats:
@@ -172,6 +195,35 @@ Lyra::AccessLog.for(user)
 - The log is personal data about the users who read records: cover it in your retention rules.
 - Off by default because reads can outnumber writes by orders of magnitude; the Aegean
   testbed measures it separately with `LYRA_RECORD_ACCESS=1` (see `BENCHMARKING.md`).
+
+### 3a. Purpose-bound reads
+
+A model with a privacy policy is checked on every read made for a declared purpose: each declared
+attribute the query loaded must be allowed for that purpose (the policy's `validate_access!`, the
+record as subject). No setting turns it on; the purpose does:
+
+```ruby
+class PaymentsController < ApplicationController
+  lyra_purpose :payment_processing             # around every action
+  lyra_purpose :invoicing, only: :invoice
+end
+
+class ExportJob < ApplicationJob
+  lyra_purpose :audit_trail
+end
+
+Lyra.with_purpose(:invoicing) { Registration.select(:id, :vat_number, :address).find(id) }
+```
+
+- **Data minimisation:** loading a declared attribute the purpose does not need is refused, so a
+  `SELECT *` under a narrow purpose fails; select what the purpose uses.
+- **On a violation** the policy's enforcement mode decides: strict raises from the read, audit
+  logs and lets it through. With the access log on, every checked read is recorded.
+- **Reads with no purpose:** `config.reads_without_purpose = :allow` (default; nothing breaks when
+  a policy is added), `:audit` (logged, recorded as audited), or `:deny`
+  (`Lyra::PurposeBoundReads::PurposeRequiredError`).
+- **Not checked:** Lyra's own reads (projections, bypass snapshots, Genesis, DualView, mode
+  checks, repair, erasure), and reads that load no model (`pluck`, `select_value`, raw SQL).
 
 ### 4. Data Lineage Tracking
 
