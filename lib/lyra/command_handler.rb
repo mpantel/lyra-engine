@@ -68,7 +68,8 @@ module Lyra
       # Create event with pre-generated ID
       # Use symbolize_keys for consistent key types in event data
       event_attrs = command.attributes.symbolize_keys.merge(id: id)
-      event = create_event(:created, id, event_attrs)
+      events = create_events(:created, id, event_attrs)
+      event = events.first
 
       # Apply event to aggregate
       aggregate.apply(event)
@@ -78,6 +79,7 @@ module Lyra
       # (storing inside the callback would be rolled back with the transaction)
       unless Lyra.event_sourcing_mode?
         aggregate.store(Lyra.config.event_store)
+        store_additional_events(events.drop(1), aggregate.stream_name)
       end
 
       # Return result with the ID, so the caller inserts the row under the same
@@ -87,7 +89,7 @@ module Lyra
       # (AR attributes have string keys, but we add symbol keys)
       attributes.delete("id")
       attributes[:id] = id unless id.to_s.start_with?("pending-")
-      CommandResult.success(attributes: attributes, events: [event])
+      CommandResult.success(attributes: attributes, events: events)
     end
 
     def handle_update
@@ -96,7 +98,8 @@ module Lyra
       aggregate = aggregate_class.load(command.id, Lyra.config.event_store) rescue aggregate_class.new(command.id, command.model_class)
 
       # Create event
-      event = create_event(:updated, command.id, { changes: command.changes })
+      events = create_events(:updated, command.id, { changes: command.changes })
+      event = events.first
 
       # Apply event to aggregate
       aggregate.apply(event)
@@ -104,9 +107,10 @@ module Lyra
       # Store events (defer in event_sourcing mode)
       unless Lyra.event_sourcing_mode?
         aggregate.store(Lyra.config.event_store)
+        store_additional_events(events.drop(1), aggregate.stream_name)
       end
 
-      CommandResult.success(events: [event])
+      CommandResult.success(events: events)
     end
 
     def handle_destroy
@@ -115,7 +119,8 @@ module Lyra
       aggregate = aggregate_class.load(command.id, Lyra.config.event_store) rescue aggregate_class.new(command.id, command.model_class)
 
       # Create event
-      event = create_event(:destroyed, command.id, {})
+      events = create_events(:destroyed, command.id, {})
+      event = events.first
 
       # Apply event to aggregate
       aggregate.apply(event)
@@ -123,9 +128,35 @@ module Lyra
       # Store events (defer in event_sourcing mode)
       unless Lyra.event_sourcing_mode?
         aggregate.store(Lyra.config.event_store)
+        store_additional_events(events.drop(1), aggregate.stream_name)
       end
 
-      CommandResult.success(events: [event])
+      CommandResult.success(events: events)
+    end
+
+    # The events for one write: its own event first (a domain event if one of
+    # the model's rules matches, else the CRUD event), then any additional
+    # domain events (Lyra::DomainEvents).
+    def create_events(operation, id, data)
+      own = create_event(operation, id, data)
+      Lyra::DomainEvents.build(
+        command.model_class, operation, data: own.data, metadata: own.metadata.to_h,
+        default_class: own.class, record: command.record, changes: changes_for(operation, data)
+      )
+    end
+
+    def changes_for(operation, data)
+      case operation
+      when :created then command.record&.changes || {}
+      when :updated then data[:changes] || {}
+      else {}
+      end
+    end
+
+    # In Hijack mode the aggregate stores the write's own event; additional
+    # domain events go to the same stream, in the same transaction.
+    def store_additional_events(events, stream_name)
+      Lyra.config.event_store.publish(events, stream_name: stream_name) if events.any?
     end
 
     def create_event(operation, id, data)

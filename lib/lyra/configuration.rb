@@ -164,7 +164,9 @@ module Lyra
 
   class ModelConfiguration
     attr_accessor :event_prefix, :aggregate_class, :command_handler, :privacy_policy
-    attr_reader :model_class
+    # The model's domain event rules (Lyra::DomainEvents), from its
+    # domain_events option.
+    attr_reader :model_class, :domain_events
 
     def initialize(model_class, options = {})
       @model_class = model_class
@@ -173,6 +175,7 @@ module Lyra
       @command_handler = options[:command_handler]
       @custom_event_mapping = options[:event_mapping] || {}
       @privacy_policy = options[:privacy_policy]
+      @domain_events = Lyra::DomainEvents.rules(options[:domain_events])
     end
 
     def event_name_for(operation)

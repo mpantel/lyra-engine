@@ -2,6 +2,9 @@ module Lyra
   # Base command class
   class Command
     attr_reader :model_class, :data
+    # The record being written, when the command comes from a model's
+    # callbacks: domain event rules are evaluated against it.
+    attr_accessor :record
 
     def initialize(model_class, data = {})
       @model_class = model_class

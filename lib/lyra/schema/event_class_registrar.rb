@@ -30,6 +30,7 @@ module Lyra
               event_name = config.event_name_for(operation)
               ensure_event_class_exists(event_name)
             end
+            Lyra::DomainEvents.generated_names(model_class).each { ensure_event_class_exists(_1) }
           end
         end
 

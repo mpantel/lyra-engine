@@ -308,6 +308,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::CreateCommand.new(self.class, attributes)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         if result.success?
@@ -328,6 +329,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         return true if result.success?
@@ -341,6 +343,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         return true if result.success?
@@ -359,6 +362,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::CreateCommand.new(self.class, attributes)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         if result.success?
@@ -384,6 +388,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         if result.success?
@@ -402,6 +407,7 @@ module Lyra
         lyra_disable_paper_trail!
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
+        command.record = self
         result = Lyra::CommandHandler.handle(command)
 
         if result.success?
@@ -589,13 +595,17 @@ module Lyra
       end
 
       def publish_event(operation, data)
-        event_class = lyra_event_class_for(operation)
-
         # Extract metadata from data and pass separately to RailsEventStore
         metadata = data.delete(:metadata) || {}
-        event = event_class.new(data: data, metadata: metadata)
+        # The CRUD event, or the domain events the model's rules choose
+        # (Lyra::DomainEvents): its own event first, then any additional ones.
+        events = Lyra::DomainEvents.build(
+          self.class, operation, data: data, metadata: metadata,
+          default_class: lyra_event_class_for(operation),
+          record: self, changes: operation == :destroyed ? {} : previous_changes
+        )
 
-        Lyra.config.event_store.publish(event, stream_name: lyra_stream_name)
+        Lyra.config.event_store.publish(events, stream_name: lyra_stream_name)
       rescue => e
         Rails.logger.error("Lyra: Failed to publish event - #{e.message}")
         # Don't fail the CRUD operation if event publishing fails in monitor mode
