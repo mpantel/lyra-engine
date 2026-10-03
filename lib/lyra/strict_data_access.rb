@@ -28,25 +28,31 @@ module Lyra
     private
 
     def build_message
-      msg = "#{method_name} bypasses ActiveRecord callbacks and won't be captured by Lyra."
+      msg = "#{method_name} bypasses ActiveRecord callbacks: validations and the Lyra " \
+            "interceptor don't run, and Lyra can only record it as a bypass event."
       msg += " Use #{alternative} instead." if alternative
       msg += " Disable strict_data_access mode if this is intentional."
       msg
     end
   end
 
-  # Module that overrides callback-bypassing instance methods to raise errors
-  # when strict_data_access mode is enabled.
-  # Uses prepend to properly intercept method calls.
-  # When operations are allowed (strict mode off or bypassed), events are created
-  # to ensure the event stream captures all state changes.
+  # Guards callback-bypassing writes on monitored models.
+  #
+  # With strict_data_access on, each one raises unless it runs inside
+  # Lyra.without_strict_access. Whenever one is allowed to run, it publishes
+  # a bypass event per affected record (see BypassEvents), so the event
+  # stream records the change whatever the strict setting. Lyra's own
+  # read-model writes run inside Lyra.projection_write and publish nothing.
+  #
+  # Instance methods, prepended onto each monitored model. The bulk methods
+  # are on StrictDataAccessRelation below.
   module StrictDataAccess
     # The event is built from the record after the write: the old value is
     # what was last persisted (attribute_in_database), the new value is what
     # the record holds once Rails has written it. Taking the old value from
-    # the in-memory attribute instead (as before) missed the common idiom
-    # "assign, then update_columns": the attribute already held the new value,
-    # no change was seen, and no event was published (Solidus's
+    # the in-memory attribute instead missed the common idiom "assign, then
+    # update_columns": the attribute already held the new value, no change
+    # was seen, and no event was published (Solidus's
     # Shipment#persist_amounts). Building after the write also covers the
     # timestamps that touch: true sets.
     def update_columns(attributes)
@@ -56,8 +62,7 @@ module Lyra
 
     # Rails implements update_column(name, value, touch:) as update_columns,
     # which publishes the event; publishing here as well produced it twice.
-    # The touch: keyword is passed through (the old two-argument override
-    # raised ArgumentError for callers that used it).
+    # The touch: keyword is passed through.
     def update_column(name, value, touch: nil)
       raise_strict_violation!(:update_column)
       super
@@ -75,7 +80,13 @@ module Lyra
 
     def delete
       raise_strict_violation!(:delete)
-      publish_bypass_destroy_event
+      if Lyra::BypassEvents.enabled_for?(self.class)
+        safely_publish("delete") do
+          Lyra::BypassEvents.publish(self.class, id, :destroyed,
+                                     attributes: attributes.except(*Lyra::BypassEvents::TIMESTAMP_COLUMNS),
+                                     source: "delete")
+        end
+      end
       super
     end
 
@@ -86,13 +97,6 @@ module Lyra
       return if Thread.current[:lyra_bypass_strict_access]
 
       raise StrictDataAccessViolation.new(method_name, self.class)
-    end
-
-    # Check if this model should have bypass events published
-    def should_publish_bypass_event?
-      return false unless self.class.respond_to?(:lyra_monitored) && self.class.lyra_monitored
-      return false if Lyra.config.mode == :disabled
-      true
     end
 
     # Columns an update_columns call writes, including the timestamps that
@@ -120,149 +124,164 @@ module Lyra
     # Publish an "updated" event for a write that bypassed callbacks.
     # +changes+ maps column => [old, new].
     def publish_bypass_update_event(changes, source)
-      return unless should_publish_bypass_event?
+      return unless Lyra::BypassEvents.enabled_for?(self.class)
 
-      # Get event class
-      config = self.class.lyra_config || Lyra.config.model_config(self.class)
-      event_name = config.event_name_for(:updated)
-      sanitized_name = event_name.to_s.gsub("::", "")
-
-      event_class = if Lyra::Events.const_defined?(sanitized_name, false)
-        Lyra::Events.const_get(sanitized_name, false)
-      else
-        Lyra::Events.const_set(sanitized_name, Class.new(Lyra::Event))
+      safely_publish(source) do
+        Lyra::BypassEvents.publish(self.class, id, :updated,
+                                   attributes: changes.transform_values(&:last), changes: changes,
+                                   source: source)
       end
-
-      # Build metadata
-      metadata = {
-        correlation_id: Lyra::Correlation.current_id,
-        causation_id: Lyra::Causation.current_id,
-        bypass_source: source
-      }.compact
-
-      # Build event data
-      event_data = {
-        model_class: self.class.name,
-        model_id: id,
-        operation: :updated,
-        attributes: changes.transform_values(&:last),
-        changes: changes,
-        timestamp: Time.current
-      }
-
-      event = event_class.new(data: event_data, metadata: metadata)
-      stream_name = "#{self.class.name}$#{id}"
-
-      Lyra.config.event_store.publish(event, stream_name: stream_name)
-    rescue => e
-      Rails.logger.error("Lyra: Failed to publish bypass update event - #{e.message}")
     end
 
-    # Publish a "destroyed" event for bypass operations like delete
-    def publish_bypass_destroy_event
-      return unless should_publish_bypass_event?
-
-      # Get event class
-      config = self.class.lyra_config || Lyra.config.model_config(self.class)
-      event_name = config.event_name_for(:destroyed)
-      sanitized_name = event_name.to_s.gsub("::", "")
-
-      event_class = if Lyra::Events.const_defined?(sanitized_name, false)
-        Lyra::Events.const_get(sanitized_name, false)
-      else
-        Lyra::Events.const_set(sanitized_name, Class.new(Lyra::Event))
-      end
-
-      # Build metadata
-      metadata = {
-        correlation_id: Lyra::Correlation.current_id,
-        causation_id: Lyra::Causation.current_id,
-        bypass_source: "delete"
-      }.compact
-
-      # Build event data
-      event_data = {
-        model_class: self.class.name,
-        model_id: id,
-        operation: :destroyed,
-        attributes: attributes.except("created_at", "updated_at"),
-        changes: {},
-        timestamp: Time.current
-      }
-
-      event = event_class.new(data: event_data, metadata: metadata)
-      stream_name = "#{self.class.name}$#{id}"
-
-      Lyra.config.event_store.publish(event, stream_name: stream_name)
+    def safely_publish(source)
+      yield
     rescue => e
-      Rails.logger.error("Lyra: Failed to publish bypass destroy event - #{e.message}")
+      Rails.logger.error("Lyra: Failed to publish bypass event (#{source}) - #{e.message}")
     end
   end
 
-  # Class methods for bulk operations that bypass callbacks.
-  # These are called directly on the model class (not on relations).
-  module StrictDataAccessClassMethods
-    def insert_all(attributes, **options)
-      raise_strict_class_violation!(:insert_all)
-      super
-    end
-
-    def insert_all!(attributes, **options)
-      raise_strict_class_violation!(:insert_all!)
-      super
-    end
-
-    def upsert_all(attributes, **options)
-      raise_strict_class_violation!(:upsert_all)
-      super
-    end
-
-    # Note: update_all and delete_all are handled via relation extension
-    # because they're typically called on scopes (Model.where(...).update_all)
-
-    private
-
-    def raise_strict_class_violation!(method_name)
-      return unless Lyra.config.strict_data_access
-      return if Thread.current[:lyra_bypass_strict_access]
-
-      raise StrictDataAccessViolation.new(method_name, self)
-    end
-  end
-
-  # Extension for ActiveRecord::Relation to intercept update_all/delete_all
-  # on scoped queries. This is needed because Model.where(...).update_all
-  # is called on a Relation, not the model class.
+  # Relation extension for the bulk methods. Model.insert_all, Model.upsert,
+  # author.articles.insert_all and Model.where(...).update_all all end up
+  # here: ActiveRecord delegates the class-level forms to the relation.
   module StrictDataAccessRelation
     def update_all(updates)
-      check_strict_mode!(:update_all, updates)
-      super
+      return super unless lyra_guarded?
+
+      # dependent: :nullify is Rails' own bookkeeping when a parent is
+      # destroyed through callbacks. It is always allowed, but the children
+      # it rewrites still get events.
+      if association_nullify_update?(updates)
+        publish_nullify_events(updates) if Lyra::BypassEvents.enabled_for?(klass)
+        return super
+      end
+
+      check_strict_mode!(:update_all)
+      return super unless Lyra::BypassEvents.enabled_for?(klass)
+
+      before = Lyra::BypassEvents.snapshot(klass, self)
+      result = super
+      safely_publish_bulk("update_all") { Lyra::BypassEvents.publish_updates(klass, before, source: "update_all") }
+      result
     end
 
     def delete_all
+      return super unless lyra_guarded?
+
       check_strict_mode!(:delete_all)
-      super
+      return super unless Lyra::BypassEvents.enabled_for?(klass)
+
+      before = Lyra::BypassEvents.snapshot(klass, self)
+      result = super
+      safely_publish_bulk("delete_all") { Lyra::BypassEvents.publish_destroys(klass, before, source: "delete_all") }
+      result
+    end
+
+    def insert_all(attributes, returning: nil, **options)
+      return super unless lyra_guarded?
+
+      check_strict_mode!(:insert_all)
+      return super unless Lyra::BypassEvents.enabled_for?(klass)
+
+      result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
+      safely_publish_bulk("insert_all") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all") }
+      result
+    end
+
+    def insert_all!(attributes, returning: nil, **options)
+      return super unless lyra_guarded?
+
+      check_strict_mode!(:insert_all!)
+      return super unless Lyra::BypassEvents.enabled_for?(klass)
+
+      result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
+      safely_publish_bulk("insert_all!") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all!") }
+      result
+    end
+
+    # One statement inserts some rows and updates others. The rows that
+    # already existed are found by the conflict key before the write; after
+    # it, those are "updated" (with their changes) and the rest "created".
+    def upsert_all(attributes, returning: nil, unique_by: nil, **options)
+      return super unless lyra_guarded?
+
+      check_strict_mode!(:upsert_all)
+      return super unless Lyra::BypassEvents.enabled_for?(klass)
+
+      if Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
+        raise ArgumentError, "upsert_all can't be used in event sourcing mode with projections disabled: " \
+                             "its ON CONFLICT check runs against the table, not the event stream. " \
+                             "Use find_or_initialize_by(...).update!(...) per record."
+      end
+
+      rows = Array(attributes).map { |row| row.to_h.transform_keys(&:to_s) }
+      keys = conflict_columns(unique_by)
+      before = Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys)
+      result, ids = with_primary_keys(returning) do |ret|
+        super(attributes, returning: ret, unique_by: unique_by, **options)
+      end
+      ids ||= Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys).keys
+      safely_publish_bulk("upsert_all") { Lyra::BypassEvents.publish_upserts(klass, before, ids, source: "upsert_all") }
+      result
     end
 
     private
 
-    def check_strict_mode!(method_name, updates = nil)
+    def lyra_guarded?
+      klass.respond_to?(:lyra_monitored) && klass.lyra_monitored
+    end
+
+    # Run the write with the primary key in RETURNING, so the inserted and
+    # updated rows can be identified, and hand the caller the result they
+    # asked for. Returns [caller_result, ids]; ids is nil only when the
+    # caller passed raw SQL for returning without the primary key.
+    def with_primary_keys(returning)
+      pk = klass.primary_key
+      request, strip = case returning
+                       when nil then [nil, nil]
+                       when false then [[pk], :all]
+                       when Arel::Nodes::SqlLiteral then [returning, nil]
+                       else
+                         columns = Array(returning).map(&:to_s)
+                         columns.include?(pk) ? [returning, nil] : [columns + [pk], :pk]
+                       end
+
+      result = yield(request)
+      index = result.columns.index(pk)
+      ids = index && result.rows.map { |row| row[index] }
+
+      caller_result = case strip
+                      when :all then ActiveRecord::Result.empty
+                      when :pk
+                        ActiveRecord::Result.new(result.columns.reject.with_index { |_, i| i == index },
+                                                 result.rows.map { |row| row.reject.with_index { |_, i| i == index } })
+                      else result
+                      end
+      [caller_result, ids]
+    end
+
+    # The columns upsert_all's ON CONFLICT uses: unique_by as columns, or as
+    # an index name, or the primary key by default.
+    def conflict_columns(unique_by)
+      return [klass.primary_key] if unique_by.nil?
+
+      columns = Array(unique_by).map(&:to_s)
+      return columns unless columns.size == 1 && !klass.column_names.include?(columns.first)
+
+      index = klass.connection.indexes(klass.table_name).find { |i| i.name == columns.first }
+      Array(index&.columns).map(&:to_s)
+    end
+
+    def check_strict_mode!(method_name)
       return unless Lyra.config.strict_data_access
-      return unless klass.respond_to?(:lyra_monitored) && klass.lyra_monitored
-
-      # Allow update_all when called from Rails association handling (dependent: :nullify)
-      # These updates only set a foreign key to NULL and are internal Rails operations
-      if method_name == :update_all && association_nullify_update?(updates)
-        # Create events for affected records before the bulk update
-        # This ensures the event stream captures the state change
-        publish_nullify_events(updates) if Lyra.config.mode != :disabled
-        return
-      end
-
-      # Allow operations when bypassed via Lyra.without_strict_access block
       return if Thread.current[:lyra_bypass_strict_access]
 
       raise StrictDataAccessViolation.new(method_name, klass)
+    end
+
+    def safely_publish_bulk(source)
+      yield
+    rescue => e
+      Rails.logger.error("Lyra: Failed to publish bypass events (#{source}) - #{e.message}")
     end
 
     # Detect if this is an association nullify operation (dependent: :nullify)
@@ -285,41 +304,12 @@ module Lyra
       # In ES Disabled mode, records don't exist in DB, so we need to query
       # the event store via the model's read path (which uses CachedRelation)
       records_data = fetch_affected_records_for_nullify(column)
-      return if records_data.empty?
 
-      # Get the event class for updates
-      config = klass.lyra_config || Lyra.config.model_config(klass)
-      event_name = config.event_name_for(:updated)
-      sanitized_name = event_name.to_s.gsub("::", "")
-
-      event_class = if Lyra::Events.const_defined?(sanitized_name, false)
-        Lyra::Events.const_get(sanitized_name, false)
-      else
-        Lyra::Events.const_set(sanitized_name, Class.new(Lyra::Event))
-      end
-
-      # Build metadata (only include non-nil values, use strings for RES compatibility)
-      metadata = {
-        correlation_id: Lyra::Correlation.current_id,
-        causation_id: Lyra::Causation.current_id,
-        nullify_source: "dependent_association"
-      }.compact
-
-      # Publish an event for each affected record
       records_data.each do |id, old_value|
-        event_data = {
-          model_class: klass.name,
-          model_id: id,
-          operation: :updated,
-          attributes: { column => nil },
-          changes: { column => [old_value, nil] },
-          timestamp: Time.current
-        }
-
-        event = event_class.new(data: event_data, metadata: metadata)
-        stream_name = "#{klass.name}$#{id}"
-
-        Lyra.config.event_store.publish(event, stream_name: stream_name)
+        Lyra::BypassEvents.publish(klass, id, :updated,
+                                   attributes: { column => nil },
+                                   changes: { column => [old_value, nil] },
+                                   source: "dependent_association")
       end
     rescue => e
       # Don't fail the nullify operation if event publishing fails
@@ -384,8 +374,9 @@ module Lyra
     end
   end
 
-  # Temporarily bypass strict data access checks
-  # Use this for legitimate bulk operations in migrations, seeds, etc.
+  # Temporarily bypass strict data access checks, for legitimate bulk
+  # operations in migrations, seeds, etc. The writes still publish bypass
+  # events; Lyra's own read-model writes use Lyra.projection_write instead.
   def self.without_strict_access
     previous = Thread.current[:lyra_bypass_strict_access]
     Thread.current[:lyra_bypass_strict_access] = true

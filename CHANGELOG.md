@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Bypass events for bulk writes** (`Lyra::BypassEvents`) — `update_all`, `delete_all`,
+  `insert`/`insert_all(!)`, `upsert`/`upsert_all` and `dependent: :nullify` on a monitored model
+  now publish one event per affected row, whatever the `strict_data_access` setting
+  (`update_column(s)`, `touch` and `delete` already did). `update_all` publishes "updated" per
+  row that changed; `delete_all` "destroyed" per row; inserts "created" per row; `upsert_all`
+  finds existing rows by its conflict key (primary key, `unique_by:` columns or index name) and
+  publishes "updated" for those, "created" for the rest. The caller's `returning:` result is
+  unchanged. Brought over from the `thesis-restructure` branch (3ba39bb, 975dc6e), keeping
+  master's instance methods (events built after the write).
+- **`Lyra.projection_write { ... }`** — Lyra's own read-model writes: skips strict data access
+  and publishes no bypass events. `ModelProjection` and `Rebuild` use it; use it for writes that
+  must not reach the event stream, such as seeding or wiping a table.
 - **Genesis: event streams for rows that predate Lyra** (`Lyra::Genesis`,
   `config.genesis`, `rake lyra:genesis`) — a row written before Lyra was enabled had no
   stream, so its first `Updated` event started a stream with no head, and DualView,
@@ -73,6 +85,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **Bulk writes on monitored models publish events** (see Added). Code that relied on
+  `update_all`/`delete_all`/`insert_all` leaving the event stream untouched should wrap them in
+  `Lyra.projection_write`. Bulk-write guards are on `ActiveRecord::Relation`
+  (`Lyra::StrictDataAccessRelation`); `Lyra::StrictDataAccessClassMethods` is removed.
+- **ES-NoProj bulk writes are events.** With projections disabled the records exist only in
+  the stream, so `CachedRelation#delete_all`/`update_all` publish the events that are the write
+  (a `delete_all`d record used to reappear on the next read). `upsert_all` raises
+  `ArgumentError` there: its `ON CONFLICT` would check the table, not the stream. Cost: a
+  `dependent: :nullify` delete must find the children, which in ES-NoProj rebuilds every stream
+  of the child model.
+- Instance bypass events (`update_column(s)`, `touch`, `delete`) go through
+  `BypassEvents.publish`, which also invalidates the ES-NoProj read cache.
 - **ES-NoProj answers exactly or raises** (`Lyra::Projections::CachedRelation`, new
   `Lyra::Projections::UnsupportedQuery`) — reading from the event store, `CachedRelation`
   used to answer queries it could not evaluate anyway, with the wrong records: a
@@ -96,6 +120,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-NoProj `insert_all` ran, then raised** — through `CachedRelation`'s scope branch the
+  insert executed and the caller then got `UnsupportedQuery` ("not a scope"). Inserts and
+  upserts now go to the table relation and return its result.
 - **Genesis left a cached "not found" in place on Solid Cache** — an ES-NoProj lookup
   made before a record was imported (in an earlier process, or before the event store
   was reset) caches `nil` for it. Genesis cleared the cache with

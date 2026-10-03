@@ -64,14 +64,8 @@ module Lyra
           insert_attrs = sanitize_attributes(model_class, attributes)
 
           # Use insert to bypass callbacks
-          # Bypass strict data access - projections are legitimate bulk operations
-          previous = Thread.current[:lyra_bypass_strict_access]
-          Thread.current[:lyra_bypass_strict_access] = true
-          begin
-            model_class.insert(insert_attrs)
-          ensure
-            Thread.current[:lyra_bypass_strict_access] = previous
-          end
+          # Lyra.projection_write: skips strict access and publishes no bypass events
+          Lyra.projection_write { model_class.insert(insert_attrs) }
         end
 
         # Update an existing record in the model table
@@ -98,14 +92,8 @@ module Lyra
           updates[:updated_at] ||= Time.current
 
           # Use update_all to bypass callbacks
-          # Bypass strict data access - projections are legitimate bulk operations
-          previous = Thread.current[:lyra_bypass_strict_access]
-          Thread.current[:lyra_bypass_strict_access] = true
-          begin
-            model_class.where(id: model_id).update_all(updates)
-          ensure
-            Thread.current[:lyra_bypass_strict_access] = previous
-          end
+          # Lyra.projection_write: skips strict access and publishes no bypass events
+          Lyra.projection_write { model_class.where(id: model_id).update_all(updates) }
         end
 
         # Delete a record from the model table
@@ -118,14 +106,8 @@ module Lyra
           model_id = event.data[:model_id] || event.data["model_id"]
 
           # Use delete_all to bypass callbacks
-          # Bypass strict data access - projections are legitimate bulk operations
-          previous = Thread.current[:lyra_bypass_strict_access]
-          Thread.current[:lyra_bypass_strict_access] = true
-          begin
-            model_class.where(id: model_id).delete_all
-          ensure
-            Thread.current[:lyra_bypass_strict_access] = previous
-          end
+          # Lyra.projection_write: skips strict access and publishes no bypass events
+          Lyra.projection_write { model_class.where(id: model_id).delete_all }
         end
 
         private

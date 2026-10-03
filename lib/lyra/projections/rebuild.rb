@@ -129,13 +129,7 @@ module Lyra
         # Clear the read-model table, bypassing callbacks/strict-access guards
         # (this is a legitimate bulk projection operation, like ModelProjection).
         def clear_read_model(model_class)
-          previous = Thread.current[:lyra_bypass_strict_access]
-          Thread.current[:lyra_bypass_strict_access] = true
-          begin
-            model_class.unscoped.delete_all
-          ensure
-            Thread.current[:lyra_bypass_strict_access] = previous
-          end
+          Lyra.projection_write { model_class.unscoped.delete_all }
         end
 
         # Drop any cached (ES-NoProj) reconstructions so reads reflect the rebuild.

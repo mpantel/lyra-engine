@@ -35,7 +35,7 @@ module Lyra
         @user_class = create_test_model_class
         Lyra.config.monitor_model(@user_class, event_prefix: "RebuildUser")
 
-        @user_class.delete_all
+        Lyra.projection_write { @user_class.delete_all }
         clear_event_store
 
         @full_integration_available = check_full_integration_available
@@ -44,7 +44,7 @@ module Lyra
       def teardown
         return unless defined?(ActiveRecord::Base)
 
-        @user_class&.delete_all rescue nil
+        Lyra.projection_write { @user_class&.delete_all } rescue nil
         clear_event_store
         Lyra.reset_config!
       end
@@ -65,7 +65,7 @@ module Lyra
         bob.save
 
         # Simulate projection loss: wipe the read model, keep the event log.
-        @user_class.delete_all
+        Lyra.projection_write { @user_class.delete_all }
         assert_equal 0, @user_class.count, "precondition: read model wiped"
 
         stats = Lyra::Projections::Rebuild.rebuild(@user_class)
@@ -100,7 +100,7 @@ module Lyra
         gone_id = gone.id
         gone.destroy
 
-        @user_class.delete_all
+        Lyra.projection_write { @user_class.delete_all }
 
         stats = Lyra::Projections::Rebuild.rebuild(@user_class)
 
@@ -156,7 +156,7 @@ module Lyra
         user.name = "Dana Scully"
         user.save
 
-        @user_class.delete_all
+        Lyra.projection_write { @user_class.delete_all }
         Lyra::Projections::Rebuild.rebuild(@user_class)
 
         comparison = Lyra::DualView.new(@user_class, user.id).compare
@@ -173,7 +173,7 @@ module Lyra
 
         user = @user_class.new(name: "Mona", email: "mona@example.com")
         user.save
-        @user_class.delete_all
+        Lyra.projection_write { @user_class.delete_all }
 
         results = Lyra::Projections::Rebuild.rebuild_all
 
@@ -201,7 +201,7 @@ module Lyra
         test_user = @user_class.new(name: "probe", email: "probe@test.com")
         test_user.save
         has_id = test_user.id.present?
-        @user_class.delete_all rescue nil
+        Lyra.projection_write { @user_class.delete_all } rescue nil
         clear_event_store
         has_id
       rescue StandardError

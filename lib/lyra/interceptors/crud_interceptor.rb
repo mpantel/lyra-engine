@@ -125,10 +125,10 @@ module Lyra
           self.lyra_config = Lyra::ModelConfiguration.new(self, options)
           Lyra.config.monitor_model(self, options)
 
-          # Prepend strict data access modules to guard callback-bypassing methods
-          # Using prepend ensures our methods run first and can call super
+          # Prepend the strict data access guard for callback-bypassing instance
+          # methods; prepend ensures ours run first and can call super. The bulk
+          # methods are guarded on ActiveRecord::Relation (see Lyra::Engine).
           prepend Lyra::StrictDataAccess
-          singleton_class.prepend Lyra::StrictDataAccessClassMethods
         end
 
         # Override _insert_record to skip SQL INSERT when Lyra signals to skip.

@@ -625,8 +625,15 @@ module Lyra
       # caller never selected.
       BULK_MUTATION_METHODS = %i[delete_all destroy_all update_all].freeze
 
+      # Inserts and upserts aren't scopes either: they run at once and return
+      # an ActiveRecord::Result. Through the scope branch below, the write ran
+      # and the caller then got UnsupportedQuery ("not a scope") for a write
+      # that had already happened.
+      INSERT_METHODS = %i[insert insert! insert_all insert_all! upsert upsert_all].freeze
+
       def method_missing(method_name, *args, **kwargs, &block)
         return bulk_mutate(method_name, *args, **kwargs) if BULK_MUTATION_METHODS.include?(method_name)
+        return insert_through_table(method_name, *args, **kwargs) if INSERT_METHODS.include?(method_name)
 
         # Try to delegate to model class scopes
         if model_class.respond_to?(method_name)
@@ -786,12 +793,81 @@ module Lyra
       # method exists to avoid.
       def bulk_mutate(method_name, *args, **kwargs)
         return 0 if @records.empty?
+        return event_sourced_bulk_mutate(method_name, *args, **kwargs) if events_only?
 
         ids = @records.map { |r| r.public_send(model_class.primary_key) }
         Thread.current[:lyra_bypass_read_override] = true
         model_class.unscoped.where(model_class.primary_key => ids).public_send(method_name, *args, **kwargs)
       ensure
         Thread.current[:lyra_bypass_read_override] = nil
+      end
+
+      # Send an insert or upsert to the table relation, where
+      # StrictDataAccessRelation records it (or rejects upsert_all in the
+      # events-only store), and hand back its real result or error.
+      def insert_through_table(method_name, *args, **kwargs)
+        Thread.current[:lyra_bypass_read_override] = true
+        model_class.unscoped.public_send(method_name, *args, **kwargs)
+      ensure
+        Thread.current[:lyra_bypass_read_override] = nil
+      end
+
+      # Event sourcing with projections disabled: the records exist only in
+      # the event stream, so a SQL bulk write would match no rows and the
+      # records would reappear on the next read. Here the events are the
+      # write.
+      def events_only?
+        return false if Thread.current[:lyra_projection_write]
+
+        Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
+      end
+
+      def event_sourced_bulk_mutate(method_name, *args, **kwargs)
+        return @records.each(&:destroy) if method_name == :destroy_all
+
+        if Lyra.config.strict_data_access && !Thread.current[:lyra_bypass_strict_access]
+          raise Lyra::StrictDataAccessViolation.new(method_name, model_class)
+        end
+
+        pk = model_class.primary_key
+        case method_name
+        when :delete_all
+          @records.each do |record|
+            Lyra::BypassEvents.publish(model_class, record.public_send(pk), :destroyed,
+                                       attributes: record.attributes.except(*Lyra::BypassEvents::TIMESTAMP_COLUMNS),
+                                       source: "delete_all")
+          end
+        when :update_all
+          updates = args.first || kwargs
+          unless updates.is_a?(Hash)
+            raise ArgumentError, "update_all needs a Hash of column values in event sourcing mode " \
+                                 "with projections disabled; a SQL fragment can't be applied to event-stream records"
+          end
+
+          updates = updates.transform_keys(&:to_s)
+          @records.each do |record|
+            changes = updates.each_with_object({}) do |(column, new_value), acc|
+              old_value = record.read_attribute(column)
+              acc[column] = [old_value, new_value] unless old_value == new_value
+            end
+            next if changes.empty?
+
+            Lyra::BypassEvents.publish(model_class, record.public_send(pk), :updated,
+                                       attributes: changes.transform_values(&:last), changes: changes,
+                                       source: "update_all")
+          end
+        end
+
+        # Rows left in the table from an earlier mode must not disagree with
+        # the stream, so apply the same write to them without re-publishing.
+        ids = @records.map { |r| r.public_send(pk) }
+        Lyra.projection_write do
+          Thread.current[:lyra_bypass_read_override] = true
+          model_class.unscoped.where(pk => ids).public_send(method_name, *args, **kwargs)
+        ensure
+          Thread.current[:lyra_bypass_read_override] = nil
+        end
+        @records.size
       end
 
       def matches_value?(record, key, value)
