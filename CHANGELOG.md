@@ -96,6 +96,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **ES-NoProj cache: entries stamped with their stream's last event** (`CachedProjection`) — each
+  record's cached rebuild carries the id of the last event it was built from and is used only
+  while that is still the stream's last event, so it is exactly right or detectably out of date.
+  Collection reads (`all`, `where`, `find_by` on non-key attributes, `count`) are assembled from
+  those entries: one query for every stream's last event, one bulk cache read, and a replay of
+  only the streams that changed. They used to be cached as whole collections that every write
+  threw away, so after any write the next collection read replayed every stream of the model.
+  A `dependent: :nullify` delete, which must find the children by attribute, cost 1.7-3.5 s in
+  the Aegean smoke runs; it now costs 0.1-0.4 s (that cell: 10-16 → 49-101 ops/s). ES-NoProj
+  SQL statements per write: 12 → 11 per create, 9 → 8 per update (a write no longer deletes
+  collection keys; it reads its stream's last event). Cache entries are versioned `v2`; old
+  ones are ignored.
 - **`Lyra.privacy_features_available?`** asks the installed privacy provider instead of
   checking for `pam_dsl` directly. `PIIDetector` and `PolicyIntegration` load always and work
   through the interface; `PIIMasker` and `GDPRCompliance` stay PAM-only.
@@ -139,6 +151,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-NoProj could serve out-of-date records from its cache** — a write warmed its record's
+  entry inside the write's transaction, so a rollback left a record cached that never existed;
+  two processes filling one key could leave a stale entry for up to an hour; and
+  `where`/`find_by` results were cached for five minutes and never invalidated, so they could
+  return records a write had already changed. Stamped entries (see Changed) make all three
+  impossible: a stale entry is never used.
 - **An explicit id was replaced** — `CommandHandler#handle_create` generated an id even when the
   application set one; it now keeps it, in the event and in the row. From `thesis-restructure`
   (526908e), applied to master's own Hijack fix (cd3ea89).

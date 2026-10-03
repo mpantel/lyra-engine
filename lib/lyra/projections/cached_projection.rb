@@ -4,13 +4,31 @@ module Lyra
   module Projections
     # Cached projection layer using Solid Cache (or any Rails.cache backend).
     #
-    # In disabled projection mode, this caches reconstructed model state from events.
-    # Provides fast reads while keeping events as the source of truth.
+    # In disabled projection mode (ES-NoProj) the event streams are the only
+    # source of truth, and a record is rebuilt by replaying its stream. This
+    # class caches those rebuilds, one entry per record.
     #
-    # Cache Strategy:
-    # - Individual records: cached by model class + id
-    # - Collections: cached by query fingerprint
-    # - Invalidation: on event publish for affected streams
+    # Each entry is stamped with the id of the last event it was built from,
+    # and is used only while that is still its stream's last event. Streams
+    # are append-only and event ids are never reused, so a stamped entry is
+    # either exactly right or detectably out of date, whatever happens around
+    # it: a write in another process, a transaction that rolls back after
+    # warming the cache, two readers racing to fill the same key. Nothing has
+    # to be invalidated for reads to be correct; invalidation only saves a
+    # rebuild.
+    #
+    # Collections (all, where, find_by on non-key attributes, count) are
+    # assembled from those entries: one query for the last event of every
+    # stream of the model, one bulk cache read, and a replay of only the
+    # streams whose entry is missing or out of date.
+    #
+    # This replaced collection caches that every write threw away. After any
+    # write the next collection read replayed every stream of the model, so a
+    # dependent: :nullify delete, which must find the children by attribute,
+    # rebuilt every Registration stream (1.7-3.5 s per delete in the Aegean
+    # smoke runs). The where/find_by results were also cached for five minutes
+    # and never invalidated, so they could answer with records a write had
+    # already changed.
     #
     # Usage:
     #   CachedProjection.find(User, 123)
@@ -18,32 +36,31 @@ module Lyra
     #   CachedProjection.invalidate(User, 123)
     #
     class CachedProjection
-      # Cache configuration
-      CACHE_VERSION = 1
+      # 2: entries are { "v" => last event id, "a" => attributes or nil }.
+      CACHE_VERSION = 2
       DEFAULT_EXPIRES_IN = 1.hour
 
       class << self
-        # Find a single record by ID (cached)
+        # Find a single record by ID
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
-        # @param force [Boolean] Bypass cache and rebuild
+        # @param force [Boolean] Ignore a cached entry and rebuild
         # @return [Hash, nil] The record attributes or nil
         def find(model_class, id, force: false)
-          cache_key = record_cache_key(model_class, id)
+          version = stream_version(model_class, id)
+          return nil unless version
 
-          if force
-            result = build_from_events(model_class, id)
-            cache_write(cache_key, result) if result
-            result
-          else
-            cache_fetch(cache_key) do
-              build_from_events(model_class, id)
-            end
-          end
+          key = record_cache_key(model_class, id)
+          entry = cache_read(key) unless force
+          return entry["a"] if fresh?(entry, version)
+
+          attributes, built_version = build_record(model_class, id)
+          cache_write(key, entry_for(attributes, built_version)) if built_version
+          attributes
         end
 
-        # Find a record by attributes (cached)
+        # Find a record by attributes
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param attributes [Hash] The attributes to match
@@ -52,22 +69,12 @@ module Lyra
           primary_key = model_class.primary_key.to_s
           id = attributes[primary_key.to_sym] || attributes[primary_key]
 
-          # Any lookup that pins the primary key names exactly one stream, so it
-          # can be answered by replaying that stream alone.
-          #
-          # The previous guard took this path only when the primary key was the
-          # SOLE condition. Adding a second condition -- find_by(id: 5, email: x)
-          # -- fell through to build_find_by_from_events, which asks
-          # find_streams_with_prefix for every stream belonging to the model and
-          # then replays each one in turn, an N+1 over the whole history, to
-          # answer a question about a single record. Cost went from O(one stream)
-          # to O(total events) on the strength of one extra condition.
-          #
-          # The remaining conditions are still checked, against the record the
-          # stream produced. The primary key itself is not re-checked: it is
-          # satisfied by construction, and comparing it again would reintroduce
-          # the type mismatch that makes find_by(id: "5") differ from
-          # find_by(id: 5) -- reconstruct_state casts the id back to an Integer.
+          # A lookup that pins the primary key names exactly one stream, so it
+          # is answered by that stream alone. The remaining conditions are
+          # checked against the record it produced. The primary key itself is
+          # not re-checked: it is satisfied by construction, and comparing it
+          # again would reintroduce the type mismatch that makes
+          # find_by(id: "5") differ from find_by(id: 5).
           if id
             record = find(model_class, id)
             return nil unless record
@@ -78,186 +85,160 @@ module Lyra
             return matches_attributes?(record, rest) ? record : nil
           end
 
-          cache_key = query_cache_key(model_class, :find_by, attributes)
-
-          cache_fetch(cache_key, expires_in: 5.minutes) do
-            build_find_by_from_events(model_class, attributes)
-          end
+          # Without a primary key there is no way to know which stream holds
+          # the answer, so every record of the model is considered. That cost
+          # is inherent to querying by a non-key attribute with projections
+          # disabled; the entries keep it to one bulk read once warm.
+          all(model_class).find { |record| matches_attributes?(record, attributes) }
         end
 
-        # Get all records (cached, use with caution on large datasets)
+        # Every live record of the model, in primary-key order
         #
         # @param model_class [Class] The ActiveRecord model class
         # @return [Array<Hash>] All record attributes
         def all(model_class)
-          cache_key = collection_cache_key(model_class, :all)
+          versions = stream_versions(model_class)
+          return [] if versions.empty?
 
-          cache_fetch(cache_key, expires_in: 5.minutes) do
-            build_all_from_events(model_class)
+          keys = versions.keys.to_h { |id| [record_cache_key(model_class, id), id] }
+          cached = cache_store.read_multi(*keys.keys)
+          rebuilt = {}
+
+          records = keys.filter_map do |key, id|
+            entry = cached[key]
+            next entry["a"] if fresh?(entry, versions[id])
+
+            attributes, built_version = build_record(model_class, id)
+            rebuilt[key] = entry_for(attributes, built_version) if built_version
+            attributes
           end
+
+          cache_store.write_multi(rebuilt, expires_in: DEFAULT_EXPIRES_IN) if rebuilt.any?
+          records
         end
 
-        # Query records with conditions (cached)
+        # Query records with conditions
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param conditions [Hash] Query conditions
         # @return [Array<Hash>] Matching record attributes
         def where(model_class, conditions)
-          cache_key = query_cache_key(model_class, :where, conditions)
-
-          cache_fetch(cache_key, expires_in: 5.minutes) do
-            build_where_from_events(model_class, conditions)
-          end
+          all(model_class).select { |record| matches_conditions?(record, conditions) }
         end
 
-        # Count records (cached)
+        # Count records
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param conditions [Hash] Optional conditions
         # @return [Integer] Count of matching records
         def count(model_class, conditions = {})
-          if conditions.empty?
-            cache_key = collection_cache_key(model_class, :count)
-          else
-            cache_key = query_cache_key(model_class, :count, conditions)
-          end
-
-          cache_fetch(cache_key, expires_in: 1.minute) do
-            build_count_from_events(model_class, conditions)
-          end
+          conditions.empty? ? all(model_class).size : where(model_class, conditions).size
         end
 
-        # Check if a record exists (cached)
+        # Check if a record exists
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
         # @return [Boolean] True if record exists and not destroyed
         def exists?(model_class, id)
-          # Use find - if it returns data, it exists
           find(model_class, id).present?
         end
 
-        # Invalidate cache for a specific record
+        # Drop a record's entry. Not needed for correctness (a stale entry is
+        # never used); it only spares the next read a comparison.
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
         def invalidate(model_class, id)
-          # Invalidate individual record cache
           cache_delete(record_cache_key(model_class, id))
-
-          # Invalidate collection caches (they may contain this record)
-          invalidate_collection_caches(model_class)
         end
 
-        # Invalidate all caches for a model class
+        # Drop every entry of a model where the store can delete by prefix.
+        #
+        # Stores that cannot (Solid Cache, MemCacheStore) raise
+        # NotImplementedError from delete_matched; their entries are left to
+        # expire, which is safe because an out-of-date entry is never used.
         #
         # @param model_class [Class] The ActiveRecord model class
         def invalidate_all(model_class)
-          prefix = "#{cache_namespace}/#{model_class.name}/"
-
-          # respond_to?(:delete_matched) is not a usable capability check here.
-          # Every ActiveSupport::Cache::Store defines the method; the stores that
-          # cannot implement it (Solid Cache, MemCacheStore) accept the call and
-          # raise NotImplementedError from it. The guard therefore always chose
-          # the "supported" branch, and on Solid Cache -- the Rails 8 default, and
-          # what this engine runs under -- invalidate_all raised instead of
-          # falling back. Rescue the raise rather than predicting it.
-          #
-          # The fallback clears the collection keys only: without prefix deletion
-          # a store cannot be asked which per-record keys exist, so those expire
-          # on their TTL (DEFAULT_EXPIRES_IN) instead of being dropped here.
-          # Callers needing a hard guarantee on such a store must invalidate the
-          # records they know about, or clear the store.
-          cache_store.delete_matched("#{prefix}*")
+          cache_store.delete_matched("#{cache_namespace}/#{model_class.name}/*")
         rescue NotImplementedError
-          invalidate_collection_caches(model_class)
+          nil
         end
 
-        # Warm the cache for a record (call after event is stored)
-        #
-        # Also invalidates collection caches (all, count) to ensure
-        # accurate counts after creates/updates.
+        # Rebuild a record's entry after a write, so the next read is a hit.
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
         def warm(model_class, id)
-          # Rebuild the individual record cache
           find(model_class, id, force: true)
-
-          # Invalidate collection caches so count/all queries are rebuilt
-          # This ensures assert_difference "Model.count" works correctly
-          invalidate_collection_caches(model_class)
         end
 
         private
 
-        # Build record state from events
-        def build_from_events(model_class, id)
-          stream_name = "#{model_class.name}$#{id}"
-          events = load_events(stream_name)
-
-          return nil if events.empty?
-          return nil if events.last.event_type.end_with?("Destroyed")
-
-          reconstruct_state(model_class, id, events)
+        def fresh?(entry, version)
+          entry.is_a?(Hash) && entry.key?("v") && entry["v"] == version
         end
 
-        # Build find_by result from events
-        def build_find_by_from_events(model_class, attributes)
-          # Reached only when no primary key was supplied: without one there is
-          # no way to know which stream holds the answer, so every stream of the
-          # model has to be replayed. That cost is inherent to querying by a
-          # non-key attribute with projections disabled, not an oversight.
-          all_records = build_all_from_events(model_class)
-
-          all_records.find { |record| matches_attributes?(record, attributes) }
+        def entry_for(attributes, version)
+          { "v" => version, "a" => attributes }
         end
 
-        # Shared by the keyed and unkeyed find_by paths so both decide a match
-        # the same way.
+        # [attributes or nil (destroyed), id of the last event replayed or
+        # nil (no stream)]
+        def build_record(model_class, id)
+          events = load_events("#{model_class.name}$#{id}")
+          return [nil, nil] if events.empty?
+
+          version = events.last.event_id
+          return [nil, version] if events.last.event_type.end_with?("Destroyed")
+
+          [reconstruct_state(model_class, id, events), version]
+        end
+
+        # The id of the last event in a record's stream, or nil if it has none.
+        def stream_version(model_class, id)
+          connection = ActiveRecord::Base.connection
+          connection.select_value(
+            "SELECT event_id FROM event_store_events_in_streams " \
+            "WHERE stream = #{connection.quote("#{model_class.name}$#{id}")} ORDER BY id DESC LIMIT 1"
+          )
+        end
+
+        # { record id (String) => id of its stream's last event }, in
+        # primary-key order. One query for the whole model.
+        def stream_versions(model_class)
+          connection = ActiveRecord::Base.connection
+          prefix = "#{model_class.name}$"
+          pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
+          rows = connection.select_rows(<<~SQL.squish)
+            SELECT stream, event_id FROM event_store_events_in_streams
+            WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream LIKE #{pattern} GROUP BY stream)
+          SQL
+          versions = rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
+          ordered = versions.keys.all? { _1.match?(/\A\d+\z/) } ? versions.keys.sort_by(&:to_i) : versions.keys.sort
+          ordered.to_h { |id| [id, versions[id]] }
+        end
+
+        # Shared by find_by and where so both decide a match the same way.
         def matches_attributes?(record, attributes)
           attributes.all? do |key, value|
             record[key.to_s] == value || record[key.to_sym] == value
           end
         end
 
-        # Build all records from events
-        def build_all_from_events(model_class)
-          stream_prefix = "#{model_class.name}$"
-          streams = find_streams_with_prefix(stream_prefix)
+        def matches_conditions?(record, conditions)
+          conditions.all? do |key, value|
+            record_value = record[key.to_s] || record[key.to_sym]
 
-          streams.filter_map do |stream_name|
-            id = stream_name.sub(stream_prefix, "")
-            build_from_events(model_class, id)
-          end
-        end
-
-        # Build where result from events
-        def build_where_from_events(model_class, conditions)
-          all_records = build_all_from_events(model_class)
-
-          all_records.select do |record|
-            conditions.all? do |key, value|
-              record_value = record[key.to_s] || record[key.to_sym]
-
-              case value
-              when Array
-                value.include?(record_value)
-              when Range
-                value.cover?(record_value)
-              else
-                record_value == value
-              end
+            case value
+            when Array
+              value.include?(record_value)
+            when Range
+              value.cover?(record_value)
+            else
+              record_value == value
             end
-          end
-        end
-
-        # Build count from events
-        def build_count_from_events(model_class, conditions)
-          if conditions.empty?
-            build_all_from_events(model_class).size
-          else
-            build_where_from_events(model_class, conditions).size
           end
         end
 
@@ -291,29 +272,8 @@ module Lyra
           []
         end
 
-        # Find all streams matching prefix
-        def find_streams_with_prefix(prefix)
-          # Query event store for streams
-          ActiveRecord::Base.connection.select_values(
-            "SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE '#{prefix}%'"
-          )
-        rescue StandardError => e
-          Rails.logger.warn("Lyra::CachedProjection: Stream enumeration failed - #{e.message}")
-          []
-        end
-
-        # Cache key helpers
         def record_cache_key(model_class, id)
           "#{cache_namespace}/#{model_class.name}/records/#{id}/v#{CACHE_VERSION}"
-        end
-
-        def collection_cache_key(model_class, operation)
-          "#{cache_namespace}/#{model_class.name}/collections/#{operation}/v#{CACHE_VERSION}"
-        end
-
-        def query_cache_key(model_class, operation, params)
-          fingerprint = Digest::SHA256.hexdigest(params.to_json)[0..15]
-          "#{cache_namespace}/#{model_class.name}/queries/#{operation}/#{fingerprint}/v#{CACHE_VERSION}"
         end
 
         def cache_namespace
@@ -323,10 +283,6 @@ module Lyra
         # Cache operations (uses Rails.cache which can be Solid Cache)
         def cache_store
           Rails.cache
-        end
-
-        def cache_fetch(key, expires_in: DEFAULT_EXPIRES_IN, &block)
-          cache_store.fetch(key, expires_in: expires_in, &block)
         end
 
         def cache_write(key, value, expires_in: DEFAULT_EXPIRES_IN)
@@ -339,16 +295,6 @@ module Lyra
 
         def cache_delete(key)
           cache_store.delete(key)
-        end
-
-        def invalidate_collection_caches(model_class)
-          # Invalidate known collection operations
-          [:all, :count].each do |op|
-            cache_delete(collection_cache_key(model_class, op))
-          end
-
-          # Note: Query caches (where, find_by) expire quickly (5 min)
-          # so we don't need to explicitly invalidate them
         end
 
         def stringify_keys(hash)

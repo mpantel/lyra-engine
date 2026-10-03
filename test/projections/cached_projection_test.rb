@@ -4,146 +4,152 @@ require "test_helper"
 
 module Lyra
   module Projections
-    # Tests for CachedProjection - the caching layer for disabled projection mode
-    #
-    # Key behavior tested: warm() must invalidate collection caches to ensure
-    # accurate counts after record creation/updates.
+    # CachedProjection serves ES-NoProj reads from per-record cache entries,
+    # each stamped with the id of the last event it was built from. These
+    # tests check the rule that makes that safe: an entry is used only while
+    # its stamp is still its stream's last event, so no write, rollback or
+    # race can make a read return an out-of-date record.
     class CachedProjectionTest < Minitest::Test
       def setup
-        Lyra.reset_config!
-        @cache_store = ActiveSupport::Cache::MemoryStore.new
+        skip "Requires Rails and database" unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connection.table_exists?(:users)
+
+        Object.send(:remove_const, :CacheUser) if defined?(CacheUser)
+        Object.const_set(:CacheUser, Class.new(ActiveRecord::Base) do
+          self.table_name = "users"
+          include Lyra::Interceptors::CrudInterceptor
+          monitor_with_lyra
+        end)
+        clean
+        Rails.cache.clear
+        Lyra.config.enable_event_sourcing!
+        Lyra.config.projection_mode = :disabled
+        Lyra.config.monitor_model(CacheUser)
       end
 
       def teardown
-        Lyra.reset_config!
-        @cache_store.clear
+        return unless defined?(CacheUser)
+
+        Lyra.config.projection_mode = :sync
+        clean
+        Rails.cache.clear
       end
 
-      # =========================================================================
-      # warm() Tests - ensures collection caches are invalidated
-      # This is the critical fix for ES disabled mode tests
-      # =========================================================================
+      def test_a_write_made_elsewhere_is_seen_without_any_invalidation
+        user = CacheUser.create!(name: "Ann", email: "ann@example.com")
+        assert_equal "Ann", CachedProjection.find(CacheUser, user.id)["name"]
 
-      def test_warm_invalidates_collection_caches
-        model_class = create_mock_model_class("User")
+        # Another process appends an event; nothing here is invalidated.
+        publish_update(user.id, "name" => ["Ann", "Anna"])
 
-        Rails.stub(:cache, @cache_store) do
-          # Pre-populate collection cache with stale count
-          count_key = "lyra_projections/User/collections/count/v1"
-          all_key = "lyra_projections/User/collections/all/v1"
-          @cache_store.write(count_key, 5)
-          @cache_store.write(all_key, [{ "id" => 1 }])
-
-          assert_equal 5, @cache_store.read(count_key), "Count cache should be pre-populated"
-          assert_equal [{ "id" => 1 }], @cache_store.read(all_key), "All cache should be pre-populated"
-
-          # Stub event loading to return empty (simulating new record with no events yet cached)
-          CachedProjection.stub(:load_events, []) do
-            CachedProjection.warm(model_class, 999)
-          end
-
-          # Collection caches should be invalidated
-          assert_nil @cache_store.read(count_key), "Count cache should be invalidated after warm()"
-          assert_nil @cache_store.read(all_key), "All cache should be invalidated after warm()"
-        end
+        assert_equal "Anna", CachedProjection.find(CacheUser, user.id)["name"]
+        assert_equal ["Anna"], CachedProjection.all(CacheUser).map { _1["name"] }
       end
 
-      def test_warm_is_called_with_new_record_invalidates_count
-        model_class = create_mock_model_class("Registration")
+      def test_a_rolled_back_write_leaves_nothing_visible
+        user = CacheUser.create!(name: "Ann", email: "ann@example.com")
 
-        Rails.stub(:cache, @cache_store) do
-          count_key = "lyra_projections/Registration/collections/count/v1"
-
-          # Simulate stale count in cache
-          @cache_store.write(count_key, 10)
-
-          # Warm the cache for a "new" record (stubbing load_events)
-          CachedProjection.stub(:load_events, []) do
-            CachedProjection.warm(model_class, 42)
-          end
-
-          # Count should be invalidated so next count() call rebuilds from events
-          assert_nil @cache_store.read(count_key),
-            "Count cache must be invalidated when warm() is called for a new record"
+        ActiveRecord::Base.transaction do
+          user.update!(name: "Ghost") # warms the cache inside the transaction
+          assert_equal "Ghost", CachedProjection.find(CacheUser, user.id)["name"]
+          raise ActiveRecord::Rollback
         end
+
+        assert_equal "Ann", CachedProjection.find(CacheUser, user.id)["name"]
+        assert_equal ["Ann"], CachedProjection.all(CacheUser).map { _1["name"] }
       end
 
-      # =========================================================================
-      # invalidate() Tests
-      # =========================================================================
+      def test_an_out_of_date_entry_is_never_used
+        user = CacheUser.create!(name: "Ann", email: "ann@example.com")
+        key = CachedProjection.send(:record_cache_key, CacheUser, user.id)
+        Rails.cache.write(key, { "v" => "not-the-last-event", "a" => { "id" => user.id, "name" => "Stale" } })
 
-      def test_invalidate_clears_record_and_collection_caches
-        model_class = create_mock_model_class("User")
-
-        Rails.stub(:cache, @cache_store) do
-          record_key = "lyra_projections/User/records/42/v1"
-          count_key = "lyra_projections/User/collections/count/v1"
-          all_key = "lyra_projections/User/collections/all/v1"
-
-          @cache_store.write(record_key, { "id" => 42 })
-          @cache_store.write(count_key, 10)
-          @cache_store.write(all_key, [])
-
-          CachedProjection.invalidate(model_class, 42)
-
-          assert_nil @cache_store.read(record_key), "Record cache should be invalidated"
-          assert_nil @cache_store.read(count_key), "Count cache should be invalidated"
-          assert_nil @cache_store.read(all_key), "All cache should be invalidated"
-        end
+        assert_equal "Ann", CachedProjection.find(CacheUser, user.id)["name"]
+        assert_equal ["Ann"], CachedProjection.all(CacheUser).map { _1["name"] }
       end
 
-      # =========================================================================
-      # count() Tests
-      # =========================================================================
+      def test_after_one_write_a_collection_read_replays_one_stream
+        users = 3.times.map { |i| CacheUser.create!(name: "U#{i}", email: "u#{i}@example.com") }
+        CachedProjection.all(CacheUser) # warm
 
-      def test_count_is_cached
-        model_class = create_mock_model_class("User")
+        publish_update(users[1].id, "name" => ["U1", "U1b"])
+        replayed = count_replays { CachedProjection.all(CacheUser) }
 
-        Rails.stub(:cache, @cache_store) do
-          call_count = 0
-
-          CachedProjection.stub(:build_count_from_events, ->(_mc, _cond) { call_count += 1; 5 }) do
-            # First call should build from events
-            result1 = CachedProjection.count(model_class)
-            assert_equal 5, result1
-            assert_equal 1, call_count
-
-            # Second call should use cache
-            result2 = CachedProjection.count(model_class)
-            assert_equal 5, result2
-            assert_equal 1, call_count, "Should use cached count, not rebuild"
-          end
-        end
+        assert_equal 1, replayed
+        assert_equal %w[U0 U1b U2], CachedProjection.all(CacheUser).map { _1["name"] }
+        assert_equal 0, count_replays { CachedProjection.all(CacheUser) }, "warm again"
       end
 
-      def test_count_after_warm_rebuilds_from_events
-        model_class = create_mock_model_class("User")
+      def test_destroyed_records_are_absent
+        kept = CacheUser.create!(name: "Kept", email: "k@example.com")
+        gone = CacheUser.create!(name: "Gone", email: "g@example.com")
+        gone.destroy!
 
-        Rails.stub(:cache, @cache_store) do
-          # Pre-populate with stale count
-          count_key = "lyra_projections/User/collections/count/v1"
-          @cache_store.write(count_key, 5)
+        assert_nil CachedProjection.find(CacheUser, gone.id)
+        refute CachedProjection.exists?(CacheUser, gone.id)
+        assert_equal [kept.id], CachedProjection.all(CacheUser).map { _1["id"] }
+        assert_equal 1, CachedProjection.count(CacheUser)
+      end
 
-          # Warm should invalidate the count cache
-          CachedProjection.stub(:load_events, []) do
-            CachedProjection.warm(model_class, 999)
-          end
+      def test_lookups_by_attribute_see_an_update_at_once
+        user = CacheUser.create!(name: "Ann", email: "ann@example.com")
+        assert CachedProjection.find_by(CacheUser, { name: "Ann" })
+        assert_equal 1, CachedProjection.count(CacheUser, { name: "Ann" })
 
-          # Now count should rebuild from events
-          CachedProjection.stub(:build_count_from_events, ->(_mc, _cond) { 6 }) do
-            result = CachedProjection.count(model_class)
-            assert_equal 6, result, "Count should be rebuilt after warm() invalidates cache"
-          end
-        end
+        user.update!(name: "Bea")
+
+        assert_nil CachedProjection.find_by(CacheUser, { name: "Ann" }), "no five-minute stale answer"
+        assert_equal 1, CachedProjection.where(CacheUser, { name: "Bea" }).size
+        assert_equal 0, CachedProjection.count(CacheUser, { name: "Ann" })
+      end
+
+      def test_a_model_name_with_like_wildcards_matches_only_its_own_streams
+        user = CacheUser.create!(name: "Ann", email: "ann@example.com")
+        other = Lyra::Events.const_defined?(:CacheXUserUpdated) ? Lyra::Events::CacheXUserUpdated : Lyra::Events.const_set(:CacheXUserUpdated, Class.new(Lyra::Event))
+        # "CacheUser$" must not match a stream such as "CacheXUser$...":
+        # the prefix is escaped before it is used in LIKE.
+        Lyra.config.event_store.publish(other.new(data: { model_class: "CacheXUser", model_id: 1, operation: :updated, changes: {} }),
+                                        stream_name: "CacheXUser$#{user.id}")
+
+        assert_equal [user.id], CachedProjection.all(CacheUser).map { _1["id"] }
       end
 
       private
 
-      def create_mock_model_class(name)
-        Class.new do
-          define_singleton_method(:name) { name }
-          define_singleton_method(:column_names) { %w[id name email created_at updated_at] }
+      def publish_update(id, changes)
+        name = Lyra.config.model_config(CacheUser).event_name_for(:updated).to_s.gsub("::", "")
+        event_class = Lyra::Events.const_defined?(name, false) ? Lyra::Events.const_get(name, false) : Lyra::Events.const_set(name, Class.new(Lyra::Event))
+        Lyra.config.event_store.publish(
+          event_class.new(data: { model_class: "CacheUser", model_id: id, operation: :updated,
+                                  attributes: changes.transform_values(&:last), changes: changes }),
+          stream_name: "CacheUser$#{id}"
+        )
+      end
+
+      # Counts stream replays by wrapping load_events in a prepended module,
+      # switched on only inside the block.
+      module ReplayCounter
+        attr_accessor :replay_count
+
+        def load_events(*args)
+          self.replay_count += 1 if replay_count
+          super
         end
+      end
+
+      def count_replays
+        CachedProjection.singleton_class.prepend(ReplayCounter) unless CachedProjection.singleton_class.include?(ReplayCounter)
+        CachedProjection.replay_count = 0
+        yield
+        CachedProjection.replay_count
+      ensure
+        CachedProjection.replay_count = nil
+      end
+
+      def clean
+        conn = ActiveRecord::Base.connection
+        conn.execute("DELETE FROM users")
+        conn.execute("DELETE FROM event_store_events_in_streams")
+        conn.execute("DELETE FROM event_store_events")
       end
     end
   end
