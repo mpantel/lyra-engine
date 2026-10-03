@@ -129,6 +129,35 @@ class LazyProjectionTest < Minitest::Test
     assert_empty LazyProjection.checkpoint.last.keys & event_ids, "the late event is applied, not left as a gap"
   end
 
+  # A write appends events only, so the row of a record written since the
+  # last read did not exist yet: update_columns and update_all matched
+  # nothing, recorded no event, and the change was lost.
+  def test_a_callback_bypassing_write_right_after_a_write_is_kept
+    author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    author.update_columns(name: "Bea")
+    LazyAuthor.where(id: author.id).update_all(email: "bea@example.com")
+
+    assert_equal %w[Bea bea@example.com], LazyAuthor.where(id: author.id).pluck(:name, :email).first
+    assert_equal 3, @event_store.read.stream("LazyAuthor$#{author.id}").count, "each write has its event"
+  end
+
+  # Lyra's own tables are created outside the caller's transaction: created
+  # inside one that rolled back, the checkpoint table vanished while Lyra
+  # remembered it as created, and every later read failed.
+  def test_the_checkpoint_table_survives_a_rolled_back_transaction
+    conn = ActiveRecord::Base.connection
+    conn.drop_table(LazyProjection::TABLE, if_exists: true)
+    LazyProjection.instance_variable_set(:@table_ready, nil)
+
+    ActiveRecord::Base.transaction do
+      LazyProjection.checkpoint
+      raise ActiveRecord::Rollback
+    end
+
+    assert conn.table_exists?(LazyProjection::TABLE)
+    assert LazyAuthor.create!(name: "Ann", email: "ann@example.com") && LazyAuthor.count == 1
+  end
+
   def test_lazy_mode_needs_event_sourcing_mode
     Lyra.config.enable_monitor!
     author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")

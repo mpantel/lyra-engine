@@ -110,16 +110,21 @@ module Lyra
       names | timestamp_attributes_for_update_in_model | (touch == true ? [] : Array.wrap(touch).map(&:to_s))
     end
 
+    # In an events-only store (ES-NoProj) there is no row: the UPDATE matches
+    # nothing and returns false, and the event is the write. Publishing only
+    # on a matched row lost every update_columns and touch there.
     def with_bypass_event(columns, source)
       Lyra::BypassEvents.atomically(self.class) do
+        events_only = Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
         before = columns.to_h { |c| [c, attribute_in_database(c)] }
         result = yield
+        written = result || events_only
         changes = columns.each_with_object({}) do |c, h|
           now = read_attribute(c)
           h[c] = [before[c], now] unless before[c] == now
         end
-        publish_bypass_update_event(changes, source) if result && changes.any?
-        result
+        publish_bypass_update_event(changes, source) if written && changes.any?
+        events_only ? written : result
       end
     end
 

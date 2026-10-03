@@ -202,6 +202,19 @@ module Lyra
       refute BypassTestArticle.unscoped.exists?(b.id), "stale table row left behind"
     end
 
+    # In the events-only store there is no row: the UPDATE matched nothing,
+    # update_columns returned false, and no event was published, so the
+    # change was lost. The event is the write.
+    def test_update_columns_in_the_events_only_store_is_recorded
+      Lyra.config.mode = :event_sourcing
+      Lyra.config.projection_mode = :disabled
+      article = create_article("One")
+
+      assert article.update_columns(title: "Renamed")
+      assert_equal({ "title" => %w[One Renamed] }, value(events_for(article).last.data, :changes))
+      assert_equal "Renamed", BypassTestArticle.find(article.id).title
+    end
+
     def test_event_sourced_update_all_without_projections_rejects_sql_fragments
       a = create_article("One")
       Lyra.config.mode = :event_sourcing

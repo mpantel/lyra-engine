@@ -220,14 +220,14 @@ module Lyra
         def ensure_table!(connection)
           return if @table_ready
 
-          unless connection.table_exists?(TABLE)
-            connection.create_table(TABLE, id: false) do |t|
+          Lyra.create_own_table(connection, TABLE) do |conn|
+            conn.create_table(TABLE, id: false) do |t|
               t.string :name, null: false
               t.bigint :position, null: false, default: 0
               t.text :gaps
               t.datetime :updated_at
             end
-            connection.add_index(TABLE, :name, unique: true)
+            conn.add_index(TABLE, :name, unique: true)
           end
           @table_ready = true
         end

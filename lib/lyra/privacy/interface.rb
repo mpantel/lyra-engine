@@ -21,6 +21,12 @@ module Lyra
     Annotation = Struct.new(:field, :type, :sensitivity, :sensitive, :purposes, :source, :transformations,
                             keyword_init: true)
 
+    # A model's retention rule: how long its records are kept (+duration+,
+    # with per-attribute +field_durations+), what happens on expiry
+    # (+strategy+: :anonymize, :hard_delete, :soft_delete or :archive), and
+    # +applies+, a predicate on the record for the rule's conditions.
+    RetentionRule = Struct.new(:duration, :field_durations, :strategy, :applies, keyword_init: true)
+
     class Policy
       def name
         nil
@@ -61,6 +67,11 @@ module Lyra
 
       # nil means no retention limit is declared.
       def retention_for(_model_class, field_name: nil)
+        nil
+      end
+
+      # The RetentionRule the policy declares for +model_class+, or nil.
+      def retention_rule(_model_class)
         nil
       end
 

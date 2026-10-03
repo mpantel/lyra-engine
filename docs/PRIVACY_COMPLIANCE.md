@@ -94,21 +94,56 @@ Lyra::Erasure.erase!(Registration, 5, reason: "Art. 17 request #12")
 # => #<Result fields: ["email", "firstname", ...], events_rewritten: 4, row_erased: true>
 ```
 ```bash
-bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELDS=email,phone]
+bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELDS=email,phone] [EVERYWHERE=1]
 ```
 
 - Erases the personal attributes (declared by the policy, or listed by the events' privacy
   stamps, or exactly `fields:`) from the row and from every event in the record's stream,
   overwriting each event in place (same id, position and time): attributes, both sides of each
-  change, and domain-event payload keys with the attribute's name.
+  change, and payload keys with the attribute's name, plus any copy of an erased value under
+  another name (matched by value: a payload's `payer_email`).
+- `everywhere: true` (`EVERYWHERE=1`) also searches the whole log for the erased values: events
+  of other records that copied them are scrubbed, those records' rows get the value replaced
+  where they hold it, and each gets an `ErasureApplied`; `result.copies` lists them. The search
+  is a text match on the stored events, then an exact match on each candidate.
 - Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). It is not
   replayed; the stream still replays to the anonymized row.
 - Replacement: `nil` where the column allows it, `"erased:<id>"` for a NOT NULL string column,
   the column default otherwise.
 - The log is append-only except for this; the erasure itself is recorded. Crypto-shredding,
   which would leave the log untouched, is not implemented.
-- Not found: a payload that copies a value under another name (pass it in `fields:`), and other
-  records holding the same person's data (erase each; the report above lists them).
+- Without `everywhere`, other records holding the same person's data are not touched (erase each,
+  or use `everywhere`; the report above lists them). A value derived from the original (an
+  uppercased email, a substring) is not a copy and is not found.
+
+#### Erasure driven by the policy (opt-in)
+
+`Lyra::Retention` applies the policy's retention rules. Off by default:
+
+```ruby
+Lyra.configure do |config|
+  config.retention_executor = true
+  config.retention_anchors = { "Registration" => :registered_at } # default: created_at
+end
+```
+```bash
+bin/rails lyra:retention:apply DRY_RUN=1   # what would happen (works with the executor off)
+bin/rails lyra:retention:apply             # or enqueue Lyra::RetentionJob on a schedule
+```
+
+For each monitored model with a `retention { for_model(...) }` rule, a record past `keep_for`
+gets the rule's `on_expiry`:
+
+| Strategy | What happens |
+|---|---|
+| `:anonymize` | personal attributes erased from row and events (`Lyra::Erasure`), `ErasureApplied` |
+| `:hard_delete` | the same, then the record is destroyed through the normal write path |
+| `:soft_delete` | `deleted_at` / `discarded_at` set through the normal write path (skipped if neither exists) |
+| `:archive` | skipped: the policy names no archive |
+
+An attribute with its own, shorter period (`field :email, duration: 30.days`) is erased when that
+passes. Rule conditions (`when { |record| ... }`) get the record. Already-erased attributes are
+not erased again, so runs are idempotent; erasures are recorded with `erased_by: "lyra_retention"`.
 
 #### Right to Data Portability (Article 20)
 
@@ -222,8 +257,14 @@ Lyra.with_purpose(:invoicing) { Registration.select(:id, :vat_number, :address).
 - **Reads with no purpose:** `config.reads_without_purpose = :allow` (default; nothing breaks when
   a policy is added), `:audit` (logged, recorded as audited), or `:deny`
   (`Lyra::PurposeBoundReads::PurposeRequiredError`).
+- **`pluck` and `pick`** are checked by the declared attributes they name (also inside an SQL
+  fragment). A pluck reads many people at once, so its subject is the model
+  (`"Registration$*"`): under a purpose whose consent the policy requires, it is refused.
+- **ES-NoProj** rebuilds whole records from events; what a query returns is narrowed to its
+  `select` and checked, so the rule is the same in every mode.
 - **Not checked:** Lyra's own reads (projections, bypass snapshots, Genesis, DualView, mode
-  checks, repair, erasure), and reads that load no model (`pluck`, `select_value`, raw SQL).
+  checks, repair, erasure), and SQL written by hand (`connection.select_*`, `execute`): it names
+  no model. `find_by_sql` returns records, which are checked.
 
 ### 4. Data Lineage Tracking
 

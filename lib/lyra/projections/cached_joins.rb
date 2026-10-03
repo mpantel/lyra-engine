@@ -52,7 +52,7 @@ module Lyra
       private
 
       def with_rows(rows, joins)
-        relation = self.class.new(model_class, rows.map(&:first))
+        relation = spawn_records(rows.map(&:first))
         relation.instance_variable_set(:@rows, rows)
         relation.instance_variable_set(:@joins, joins)
         relation

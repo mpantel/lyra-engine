@@ -174,7 +174,7 @@ module Lyra
             id = args.first
             record = Lyra::Projections::EventStoreReader.find(self, id)
             raise ActiveRecord::RecordNotFound.new("Couldn't find #{name} with '#{primary_key}'=#{id}", self, primary_key, id) unless record
-            record
+            lyra_checked_read(record)
           else
             super
           end
@@ -182,7 +182,7 @@ module Lyra
 
         def find_by(attributes)
           if lyra_read_from_events?
-            Lyra::Projections::EventStoreReader.find_by(self, attributes)
+            lyra_checked_read(Lyra::Projections::EventStoreReader.find_by(self, attributes))
           else
             super
           end
@@ -192,10 +192,17 @@ module Lyra
           if lyra_read_from_events?
             record = Lyra::Projections::EventStoreReader.find_by(self, attributes)
             raise ActiveRecord::RecordNotFound.new("Couldn't find #{name}", self) unless record
-            record
+            lyra_checked_read(record)
           else
             super
           end
+        end
+
+        # A record rebuilt from events is checked when it is returned
+        # (Lyra::PurposeBoundReads), as a loaded row is by after_find.
+        def lyra_checked_read(record)
+          Lyra::PurposeBoundReads.check(record) if record
+          record
         end
 
         def exists?(conditions = :none)

@@ -27,6 +27,25 @@ module Lyra
     raise EventStoreUnavailableError, "could not store events in #{stream_name}: #{e.class}: #{e.message}"
   end
 
+  # Create one of Lyra's own tables (+name+, defined by the block, given a
+  # connection) so that it outlives the caller's transaction. Created inside
+  # an open transaction, the table vanished when that transaction rolled back
+  # (a failed request, every transactional test) while Lyra remembered it as
+  # created, and every later use failed on a missing table. With a
+  # transaction open, the table is created on a connection of its own, which
+  # commits at once.
+  def self.create_own_table(connection, name)
+    return if connection.table_exists?(name)
+    return yield(connection) unless connection.transaction_open?
+
+    own = connection.pool.db_config.new_connection
+    begin
+      yield(own) unless own.table_exists?(name)
+    ensure
+      own.disconnect!
+    end
+  end
+
   # Pluggable event store adapter
   class EventStoreAdapter
     class << self

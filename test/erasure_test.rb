@@ -49,7 +49,8 @@ class ErasureTest < Minitest::Test
     assert_equal %w[email name], result.fields.sort
     assert_equal 2, result.events_rewritten
     assert_equal ["erased:#{user.id}"] * 2, raw("SELECT email, name FROM users WHERE id = #{user.id}", :rows).first
-    refute_match(/ann@|Ann/, raw("SELECT string_agg(data, ' ') FROM event_store_events"), "no value left in the log")
+    assert_match(/erased:#{user.id}/, log_text, "the scan reads the stored data")
+    refute_match(/ann@|Ann/, log_text, "no value left in the log")
     assert_equal ids_before, stream(user).first(2).map(&:event_id), "overwritten in place"
     assert_nil MT.discrepancy(EraseUser, user.id.to_s), "the stream still replays to the row"
   end
@@ -80,6 +81,41 @@ class ErasureTest < Minitest::Test
 
     Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
     assert_equal "erased:#{user.id}", stream(user).first.data[:payload][:email]
+  end
+
+  # A copy under another name is found by its value.
+  def test_a_payload_copy_under_another_name_is_erased_too
+    monitor(privacy_policy: :erase_policy,
+            domain_events: [{ name: "MemberJoined", on: :create, payload: ->(u, _c) { { contact: u.email } } }])
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+    assert_equal "erased:#{user.id}", stream(user).first.data[:payload][:contact]
+    refute_match(/ann@example/, log_text)
+  end
+
+  # everywhere: another record that copied the value, its row and events.
+  def test_everywhere_erases_copies_held_by_other_records
+    Object.send(:remove_const, :EraseNote) if defined?(EraseNote)
+    Object.const_set(:EraseNote, Class.new(ActiveRecord::Base) { self.table_name = "articles" })
+    EraseNote.include(Lyra::Interceptors::CrudInterceptor)
+    EraseNote.monitor_with_lyra
+    Lyra.config.monitor_model(EraseNote)
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    note = EraseNote.create!(title: "Contact", body: "ann@example.com")
+    unrelated = EraseNote.create!(title: "Other", body: "bob@example.com")
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", everywhere: true)
+
+    assert_equal ["EraseNote #{note.id}"], result.copies
+    assert_nil raw("SELECT body FROM articles WHERE id = #{note.id}"), "nullable column: nil"
+    assert_equal "bob@example.com", raw("SELECT body FROM articles WHERE id = #{unrelated.id}")
+    refute_match(/ann@example/, log_text)
+    assert_kind_of Lyra::Events::ErasureApplied,
+                   Lyra.config.event_store.read.stream("EraseNote$#{note.id}").to_a.last
+    assert_nil MT.discrepancy(EraseNote, note.id.to_s), "the copy's stream still replays to its row"
+  ensure
+    ActiveRecord::Base.connection.execute("DELETE FROM articles")
   end
 
   def test_es_noproj_the_events_are_the_record
@@ -116,6 +152,9 @@ class ErasureTest < Minitest::Test
   end
 
   def stream(user) = Lyra.config.event_store.read.stream("EraseUser$#{user.id}").to_a
+
+  # The stored events' data as text (the column is bytea).
+  def log_text = raw("SELECT string_agg(convert_from(data, 'UTF8'), ' ') FROM event_store_events").to_s
 
   def raw(sql, kind = :value)
     conn = ActiveRecord::Base.connection

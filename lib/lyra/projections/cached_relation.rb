@@ -31,15 +31,90 @@ module Lyra
     #   relation = CachedRelation.new(User, records)
     #   relation.where(status: "active").order(:name).limit(10)
     #
+    # What an ES-NoProj query returns to the application: records narrowed to
+    # the selected columns, each checked against its policy for the purpose
+    # in scope (Lyra::PurposeBoundReads). A query here loads every record of
+    # the model and filters in memory, so the check is made on the records
+    # returned, not on the ones built; only the outermost call checks.
+    module CachedRelationDelivery
+      %i[to_a to_ary [] first last second third take take! first! last! find_by find_by!].each do |name|
+        define_method(name) do |*args, **kwargs, &block|
+          deliver { super(*args, **kwargs, &block) }
+        end
+      end
+
+      def find(*args, &block)
+        return super if block
+
+        deliver { super }
+      end
+
+      def each(&block)
+        return super unless block
+        return super if Thread.current[:lyra_cached_delivery]
+
+        deliver { @records }.each(&block)
+      end
+
+      def find_in_batches(batch_size: 1000, &block)
+        deliver { @records }.each_slice(batch_size, &block)
+      end
+
+      def pluck(*column_names)
+        Lyra::PurposeBoundReads.check_columns(model_class, column_names)
+        super
+      end
+
+      private
+
+      def deliver
+        return yield if Thread.current[:lyra_cached_delivery]
+
+        Thread.current[:lyra_cached_delivery] = true
+        result = yield
+        Thread.current[:lyra_cached_delivery] = false
+        case result
+        when Array then result.map { |record| delivered(record) }
+        when ActiveRecord::Base then delivered(result)
+        else result
+        end
+      ensure
+        Thread.current[:lyra_cached_delivery] = false
+      end
+
+      def delivered(record)
+        return record unless record.is_a?(ActiveRecord::Base)
+
+        if selected_columns
+          values = record.attributes_before_type_cast.slice(*selected_columns)
+          record = Lyra::PurposeBoundReads.internal { model_class.instantiate(values) }
+        end
+        Lyra::PurposeBoundReads.check(record)
+        record
+      end
+    end
+
     class CachedRelation
       include Enumerable
       include CachedJoins
 
       attr_reader :model_class, :records
+      # Columns a select(...) asked for: the records returned are narrowed to
+      # them, as SQL would return them, so that a purpose-bound read checks
+      # what the query selected (Lyra::PurposeBoundReads). Carried through
+      # every relation derived from this one.
+      attr_accessor :selected_columns
 
       def initialize(model_class, records = [])
         @model_class = model_class
         @records = records.to_a
+      end
+
+      # A relation over +records+ that keeps this one's selection.
+      def spawn_records(records)
+        relation = self.class.new(model_class, records)
+        relation.selected_columns = selected_columns
+        relation
       end
 
       # =========================================================================
@@ -233,7 +308,7 @@ module Lyra
           compare_for_order(a, b, args)
         end
 
-        self.class.new(model_class, sorted)
+        spawn_records(sorted)
       end
 
       def reorder(*args)
@@ -241,15 +316,15 @@ module Lyra
       end
 
       def reverse_order
-        self.class.new(model_class, @records.reverse)
+        spawn_records(@records.reverse)
       end
 
       def limit(count)
-        self.class.new(model_class, @records.first(count))
+        spawn_records(@records.first(count))
       end
 
       def offset(count)
-        self.class.new(model_class, @records.drop(count))
+        spawn_records(@records.drop(count))
       end
 
       # =========================================================================
@@ -295,7 +370,7 @@ module Lyra
         start_idx = (@current_page - 1) * @per_page
         paginated = @records[start_idx, @per_page] || []
 
-        result = self.class.new(model_class, paginated)
+        result = spawn_records(paginated)
         result.instance_variable_set(:@current_page, @current_page)
         result.instance_variable_set(:@per_page, @per_page)
         result.instance_variable_set(:@total_records, @records.size)
@@ -303,7 +378,7 @@ module Lyra
       end
 
       def distinct
-        self.class.new(model_class, @records.uniq)
+        spawn_records(@records.uniq)
       end
 
       def uniq
@@ -343,7 +418,7 @@ module Lyra
       end
 
       def none
-        self.class.new(model_class, [])
+        spawn_records([])
       end
 
       def unscoped
@@ -394,7 +469,7 @@ module Lyra
       end
 
       def limit!(value)
-        self.class.new(model_class, @records.first(value))
+        spawn_records(@records.first(value))
       end
 
       def values
@@ -411,7 +486,7 @@ module Lyra
       end
 
       def spawn
-        self.class.new(model_class, @records.dup)
+        spawn_records(@records.dup)
       end
 
       def merge(other, *rest)
@@ -469,10 +544,13 @@ module Lyra
       def select(*args, &block)
         if block_given?
           # Enumerable select
-          self.class.new(model_class, @records.select(&block))
+          spawn_records(@records.select(&block))
         else
-          # AR select (column selection) - return self since we have full records
-          self
+          # AR select (column selection): the records stay whole, for
+          # filtering; the ones returned are narrowed to these columns.
+          relation = spawn_records(@records)
+          relation.selected_columns = args.flatten.map { |name| name.to_s.split(".").last.delete('"') }
+          relation
         end
       end
 
@@ -571,9 +649,11 @@ module Lyra
 
       def in_batches(of: 1000)
         @records.each_slice(of) do |batch|
-          yield self.class.new(model_class, batch)
+          yield spawn_records(batch)
         end
       end
+
+      prepend CachedRelationDelivery
 
       # =========================================================================
       # Inspection
@@ -762,7 +842,7 @@ module Lyra
       # Keep the rows the block accepts, as a joined relation if this is one.
       def filter_rows(&block)
         rows = joined_rows.select { |record, joins| block.call(record, joins) }
-        @joins ? with_rows(rows, @joins) : self.class.new(model_class, rows.map(&:first))
+        @joins ? with_rows(rows, @joins) : spawn_records(rows.map(&:first))
       end
 
       def extract_predicate_value(node)

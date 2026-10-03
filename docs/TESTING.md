@@ -50,16 +50,16 @@ cd gems/petri_flow
 rake test
 ```
 
-### Run Lyra 6-Mode Test Suite
+### Run Lyra 7-Configuration Test Suite
 
-Lyra supports 6 operational configurations. The testbed includes a comprehensive test runner that validates all modes:
+Lyra has 4 modes (disabled, monitor, hijack, event sourcing); event sourcing has 4 projection modes, so 7 configurations in all. The testbed includes a comprehensive test runner that validates all modes:
 
 ```bash
 cd examples/aegean_epay_testbed
 rake lyra:test:all_modes
 ```
 
-#### The 6 Lyra Modes
+#### The 7 Lyra Configurations
 
 | Mode | LYRA_MODE | LYRA_PROJECTION_MODE | Description |
 |------|-----------|---------------------|-------------|
@@ -69,6 +69,7 @@ rake lyra:test:all_modes
 | 4 | `event_sourcing` | `sync` | Full ES with synchronous projections |
 | 5 | `event_sourcing` | `async` | Full ES with background projections |
 | 6 | `event_sourcing` | `disabled` | Pure CQRS, reads from cache |
+| 7 | `event_sourcing` | `lazy` | Events only on write; tables brought up to date before each read |
 
 #### Test Output
 
@@ -78,11 +79,11 @@ rake lyra:test:all_modes
  Started: 2025-12-31 14:30:00
 ================================================================================
 
-[1/6] Running: Lyra Disabled
+[1/7] Running: Lyra Disabled
 ------------------------------------------------------------
 ✓ 523 tests, 1189 assertions, 0 failures, 0 errors, 0 skips (15.2s)
 
-[2/6] Running: Monitor Mode
+[2/7] Running: Monitor Mode
 ...
 
 ================================================================================

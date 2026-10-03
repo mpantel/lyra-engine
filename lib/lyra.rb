@@ -58,6 +58,7 @@ require "lyra/genesis"
 require "lyra/repair"
 require "lyra/purpose_bound_reads"
 require "lyra/erasure"
+require "lyra/retention"
 
 # Event-aware associations
 require "lyra/associations/event_aware"

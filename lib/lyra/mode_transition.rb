@@ -335,8 +335,8 @@ module Lyra
       def table_ready?
         return true if @table_ready
 
-        unless connection.table_exists?(TABLE)
-          connection.create_table(TABLE) do |t|
+        Lyra.create_own_table(connection, TABLE) do |conn|
+          conn.create_table(TABLE) do |t|
             t.string :kind, null: false
             t.string :from_config
             t.string :to_config, null: false

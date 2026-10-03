@@ -42,6 +42,12 @@ module Lyra
     # What a read of a model with a privacy policy does when no purpose is
     # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
     attr_reader :reads_without_purpose
+    # Apply the privacy policy's retention rules (Lyra::Retention). Off by
+    # default: deleting data on a timer is the deployment's decision.
+    attr_accessor :retention_executor
+    # The column each model's retention period runs from, by model name;
+    # created_at when not named.
+    attr_accessor :retention_anchors
 
     def initialize
       @mode = :monitor
@@ -79,6 +85,8 @@ module Lyra
       @record_access_events = false
       @access_metadata_proc = nil
       @reads_without_purpose = :allow
+      @retention_executor = false
+      @retention_anchors = {}
     end
 
     def reads_without_purpose=(mode)

@@ -24,6 +24,13 @@ class PurposeBoundReadsTest < Minitest::Test
         basis :legitimate_interests
         requires :name, :email
       end
+      purpose :newsletter do
+        basis :consent
+        requires :email
+      end
+      consent do
+        for_purpose(:newsletter) { required! }
+      end
     end
     Object.send(:remove_const, :ReadUser) if defined?(ReadUser)
     Object.const_set(:ReadUser, Class.new(ActiveRecord::Base) { self.table_name = "users" })
@@ -114,6 +121,46 @@ class PurposeBoundReadsTest < Minitest::Test
 
     Lyra.with_purpose(:contact) { ReadUser.select(:id, :email).find(user.id).update!(email: "cy@new.example") }
     assert_equal "cy@new.example", ActiveRecord::Base.connection.select_value("SELECT email FROM users WHERE id = #{user.id}")
+  end
+
+  def test_pluck_and_pick_are_checked_by_the_columns_they_read
+    Lyra.with_purpose(:contact) do
+      assert_equal ["ann@example.com"], ReadUser.pluck(:email)
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.pluck(:name) }
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.where(id: @user.id).pick(:name) }
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.pluck(Arel.sql("LOWER(users.name)")) }
+      assert_equal [@user.id], ReadUser.pluck(:id), "no personal attribute, nothing to check"
+    end
+  end
+
+  # A pluck reads many people at once: no one person's consent can be checked.
+  def test_a_pluck_under_a_consent_purpose_is_refused
+    Lyra.with_purpose(:newsletter) do
+      assert_raises(PamDsl::ConsentRequiredError) { ReadUser.pluck(:email) }
+    end
+  end
+
+  def test_a_pluck_with_no_purpose_follows_the_setting
+    Lyra.config.reads_without_purpose = :deny
+    assert_raises(Lyra::PurposeBoundReads::PurposeRequiredError) { ReadUser.pluck(:email) }
+  end
+
+  # ES-NoProj rebuilds whole records from events; what a query returns is
+  # narrowed to its select and checked, so the rule is the same in every mode.
+  def test_es_noproj_returns_and_checks_what_the_query_selected
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :disabled
+    user = ReadUser.create!(name: "Cy", email: "cy@example.com")
+
+    Lyra.with_purpose(:contact) do
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.find(user.id) }
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.where(id: user.id).to_a }
+      selected = ReadUser.select(:id, :email).find_by(id: user.id)
+      assert_equal %w[email id], selected.attribute_names.sort
+      assert_equal ["cy@example.com"], ReadUser.where(id: user.id).pluck(:email)
+      assert_raises(PamDsl::PurposeFieldMismatchError) { ReadUser.where(id: user.id).pluck(:name) }
+    end
+    assert_equal "Cy", ReadUser.find(user.id).name, "outside a purpose, as before"
   end
 
   def test_a_model_without_a_policy_is_not_checked

@@ -51,16 +51,30 @@ namespace :lyra do
     abort e.message
   end
   desc "Erase one record's personal data from its row and its events (Art. 17) " \
-       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone])"
+       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone] [EVERYWHERE=1])"
   task erase: :environment do
     model = ENV.fetch("MODEL").constantize
     result = Lyra::Erasure.erase!(model, ENV.fetch("ID"), reason: ENV.fetch("REASON"),
-                                  fields: ENV["FIELDS"]&.split(",")&.map(&:strip))
+                                  fields: ENV["FIELDS"]&.split(",")&.map(&:strip),
+                                  everywhere: ENV["EVERYWHERE"].present?)
     puts "Erased #{result.fields.join(', ')} of #{result.model} #{result.id}: " \
          "#{result.events_rewritten} events rewritten, row #{result.row_erased ? 'erased' : 'absent'}."
+    puts "Copies erased: #{result.copies.join(', ')}" if result.copies.any?
   rescue KeyError => e
     abort "#{e.message}: MODEL, ID and REASON are required"
   rescue Lyra::Erasure::Unsupported => e
     abort e.message
+  end
+  namespace :retention do
+    desc "Apply the privacy policy's retention rules (config.retention_executor; DRY_RUN=1 lists what " \
+         "would happen, executor on or off; MODELS=Registration,Order limits it)"
+    task apply: :environment do
+      models = ENV["MODELS"] ? ENV["MODELS"].split(",").map { _1.strip.constantize } : lyra_monitored_models.call
+      result = Lyra::Retention.apply!(models: models, dry_run: ENV["DRY_RUN"].present?)
+      puts result.summary
+      result.actions.first(50).each { puts "  #{_1}" }
+    rescue Lyra::Retention::Disabled => e
+      abort e.message
+    end
   end
 end

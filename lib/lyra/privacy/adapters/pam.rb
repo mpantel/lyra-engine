@@ -76,6 +76,19 @@ module Lyra
           pam_policy.retention_for(model_class, field_name: field_name)
         end
 
+        def retention_rule(model_class)
+          retention = pam_policy.retention_policy
+          rule = retention.rule_for(model_class.to_s)
+          return nil unless rule
+
+          RetentionRule.new(
+            duration: rule.duration || retention.default_duration,
+            field_durations: rule.field_overrides.transform_keys(&:to_s),
+            strategy: rule.deletion_strategy,
+            applies: ->(record) { rule.applies_to?(record) }
+          )
+        end
+
         def mask(field, value, context = :display)
           pam_field = find_field(field)
           pam_field ? pam_field.apply_transformation(context, value) : value

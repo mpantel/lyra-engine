@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Erasure driven by the policy, opt-in** (`Lyra::Retention`, `config.retention_executor`,
+  `config.retention_anchors`, `bin/rails lyra:retention:apply [DRY_RUN=1] [MODELS=]`,
+  `Lyra::RetentionJob`) — applies the policy's retention rules: for each monitored model with a
+  rule, a record past its period gets the rule's `on_expiry` — `:anonymize` (Lyra::Erasure),
+  `:hard_delete` (erase, then destroy through the write path), `:soft_delete` (`deleted_at` /
+  `discarded_at` through the write path; skipped without one), `:archive` (skipped: no archive
+  is named). Attributes with a shorter period of their own are erased first; rule conditions get
+  the record; already-erased attributes are skipped, so runs are idempotent. The period runs
+  from `created_at` or the column named per model. Off by default; a dry run works either way.
+  The privacy interface gains `Policy#retention_rule`.
+- **Erasure finds copies by value, and optionally everywhere** — `Lyra::Erasure` now also
+  replaces an erased value wherever the record's events copy it under another name (a payload's
+  `payer_email`). `everywhere: true` (`EVERYWHERE=1`) searches the whole log for the values:
+  other records' events are scrubbed, their rows get the value replaced where they hold it, and
+  each gets an `ErasureApplied`; `Result#copies` lists them.
+- **Purpose-bound `pluck` and `pick`** — checked by the declared attributes they name (also
+  inside SQL fragments), with the model (`"Registration$*"`) as subject, so a purpose whose
+  consent the policy requires refuses them.
 - **Purpose-bound reads** (`Lyra::PurposeBoundReads`, `Lyra.with_purpose`, `lyra_purpose` for
   controllers and jobs, `config.reads_without_purpose`) — a read of a monitored model with a
   privacy policy, made within a declared purpose, is checked through the policy's
@@ -297,6 +315,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-NoProj lost `update_columns` and `touch`** — in the events-only store the `UPDATE` matched no
+  row and returned false, so no event was published and the change was lost, against Bypass
+  Coverage ("the events are the write"). The event is now published whatever the row count.
+- **ES-Lazy lost a callback-bypassing write made right after a write** — a write appends events
+  only, so the record's row did not exist until the next read; `update_columns`, `update_all`
+  or `delete_all` on it matched nothing, recorded no event, and the change was lost.
+  `BypassEvents.atomically` now brings the tables up to date first, as a read does.
+- **Lyra's own tables vanished with a rolled-back transaction** — `lyra_projection_checkpoints`
+  and `lyra_mode_transitions` were created inside whatever transaction was open, and remembered
+  as created; when it rolled back (a failed request, every transactional test) the table was
+  gone and every later use failed. Under ES-Lazy the testbed suite failed 395 tests this way.
+  They are now created on a connection of their own when a transaction is open
+  (`Lyra.create_own_table`).
+- **ES-NoProj ignored `select` and hid purpose refusals as "not found"** — `CachedRelation#select`
+  returned whole records, and the record builder swallowed a policy error, dropping the record.
+  Query results are now narrowed to the selected columns and checked when returned
+  (`CachedRelationDelivery`), as are the class-level `find`, `find_by` and `find_by!`.
+- **The all-modes runner skipped ES-Lazy** — `lyra:test:all_modes` and the PAM-less run now cover
+  all seven configurations.
 - **Lyra's rake tasks ran twice, and host apps got the monorepo's maintenance tasks** — Rails
   loads every `lib/tasks/*.rake` under an engine's root, and the engine also loaded its three
   task files explicitly, so each `lyra:mode:*`, `lyra:projections:*` and `lyra:schema:*` task

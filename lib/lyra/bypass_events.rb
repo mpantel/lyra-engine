@@ -27,7 +27,13 @@ module Lyra
       # Run a bypass write together with the publishing of its events: in
       # one transaction when they are required, so that a failed publish
       # rolls the write back with it.
+      #
+      # Under ES-Lazy the tables are brought up to date first, as before a
+      # read: a write appends events only, so a record written since the last
+      # read had no row yet, and update_columns, update_all or delete_all on it
+      # matched nothing, recorded no event, and the change was lost.
       def atomically(model_class, &block)
+        Lyra::Projections::LazyProjection.before_read(model_class)
         required? ? model_class.transaction(&block) : yield
       end
 

@@ -35,10 +35,18 @@ module Lyra
   # raises the policy error from the read, audit logs it and lets the read
   # through.
   #
+  # pluck and pick are checked too: the declared attributes they name (also
+  # inside an SQL fragment) must be allowed for the purpose. A pluck reads
+  # many people at once, so its subject is the model ("Registration$*"):
+  # under a purpose whose consent the policy requires (its consent block) it
+  # is refused, since no one person's consent can be checked; load the
+  # records instead.
+  #
   # Lyra's own reads (projections, bypass-event snapshots, Genesis, DualView,
   # mode checks, repair, erasure) are not data processing for a purpose and
-  # are not checked. Reads that load no model (pluck, select_value, raw SQL)
-  # are not checked either.
+  # are not checked. SQL written by hand (connection.select_*, execute,
+  # find_by_sql aside, whose records are checked) names no model, so it
+  # cannot be checked.
   module PurposeBoundReads
     MODES = %i[allow audit deny].freeze
 
@@ -82,7 +90,29 @@ module Lyra
         if purpose
           policy.validate_access!(fields, purpose, subject: record)
         else
-          without_purpose(record, policy, fields)
+          without_purpose("#{record.class.name} #{record.id}", record, policy, fields)
+        end
+      end
+
+      # pluck and pick: the declared attributes +column_names+ name.
+      def check_columns(model_class, column_names)
+        purpose = current
+        return if purpose.nil? && Lyra.config.reads_without_purpose == :allow
+        return if Thread.current[:lyra_internal_read] || Thread.current[:lyra_projection_write]
+        return if Lyra.config.disabled_mode?
+        return unless model_class.respond_to?(:lyra_monitored) && model_class.lyra_monitored
+
+        policy = Lyra::Privacy.policy_for(model_class)
+        return unless policy.loaded?
+
+        fields = named_fields(column_names, policy.declared_fields.map(&:to_s))
+        return if fields.empty?
+
+        subject = "#{model_class.name}$*"
+        if purpose
+          policy.validate_access!(fields, purpose, subject: subject)
+        else
+          without_purpose("#{model_class.name} (pluck)", subject, policy, fields)
         end
       end
 
@@ -100,13 +130,24 @@ module Lyra
         (record.attribute_names & declared).map(&:to_sym)
       end
 
-      def without_purpose(record, policy, fields)
+      # Declared attributes a pluck names: a column (name, "table.name",
+      # Arel attribute) or a declared name inside an SQL fragment.
+      def named_fields(column_names, declared)
+        column_names.flatten.flat_map do |column|
+          name = column.respond_to?(:name) && !column.is_a?(Symbol) ? column.name.to_s : column.to_s
+          plain = name.split(".").last.delete('"')
+          next [plain] if declared.include?(plain)
+
+          declared.select { |field| name.match?(/\b#{Regexp.escape(field)}\b/) }
+        end.uniq.map(&:to_sym)
+      end
+
+      def without_purpose(label, subject, policy, fields)
         error = PurposeRequiredError.new(
-          "#{record.class.name} #{record.id}: read of #{fields.join(', ')} with no declared purpose " \
-          "(Lyra.with_purpose or lyra_purpose)"
+          "#{label}: read of #{fields.join(', ')} with no declared purpose (Lyra.with_purpose or lyra_purpose)"
         )
         denied = Lyra.config.reads_without_purpose == :deny
-        record_access(policy, fields, record, denied ? :denied : :audited, error)
+        record_access(policy, fields, subject, denied ? :denied : :audited, error)
         raise error if denied
 
         Rails.logger.warn("Lyra: #{error.message}")
@@ -130,6 +171,15 @@ module Lyra
       end
     end
 
+    # Relation#pluck (and so pick and Model.pluck) checks the columns it
+    # reads.
+    module PluckCheck
+      def pluck(*column_names)
+        Lyra::PurposeBoundReads.check_columns(klass, column_names)
+        super
+      end
+    end
+
     module JobMethods
       def lyra_purpose(purpose)
         around_perform { |_job, block| Lyra.with_purpose(purpose, &block) }
@@ -143,4 +193,5 @@ end
 if defined?(ActiveSupport)
   ActiveSupport.on_load(:action_controller) { extend Lyra::PurposeBoundReads::ControllerMethods }
   ActiveSupport.on_load(:active_job) { extend Lyra::PurposeBoundReads::JobMethods }
+  ActiveSupport.on_load(:active_record) { ActiveRecord::Relation.prepend(Lyra::PurposeBoundReads::PluckCheck) }
 end
