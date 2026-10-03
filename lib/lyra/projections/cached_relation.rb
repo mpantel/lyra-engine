@@ -266,6 +266,10 @@ module Lyra
         conditions = args.first
         return self if conditions.nil?
 
+        if conditions.is_a?(String) && simple_fragment?(conditions, args.size - 1)
+          return fragment_filter(conditions, args.drop(1))
+        end
+
         check_hash_conditions!(conditions, "where(#{args.inspect[1..-2][0, 60]})")
         raise UnsupportedQuery.new(model_class, "where(#{args.inspect[1..-2][0, 60]})") if args.size > 1
 
@@ -274,6 +278,76 @@ module Lyra
         filter_rows do |record, joins|
           own.all? { |key, value| matches_value?(record, key, value) } && joined_match(joins, joined) == true
         end
+      end
+
+      # The SQL fragments evaluated here: "col OP ?" terms, one bound value
+      # each, joined all by AND or all by OR (no parentheses), where OP is =,
+      # !=, <>, <, <=, >, >=, LIKE or ILIKE and col a column of this model.
+      # That covers search boxes ("firstname ILIKE ? OR email ILIKE ?") and
+      # date filters ("registered_at >= ?"). Any other fragment is refused.
+      FRAGMENT_TERM = /\A\s*"?(\w+)"?\s*(<=|>=|<>|!=|=|<|>|\bi?like\b)\s*\?\s*\z/i
+
+      def simple_fragment?(fragment, binds)
+        joiner, terms = fragment_terms(fragment)
+        joiner && terms.size == binds && binds.positive? &&
+          terms.all? { |term| (m = term.match(FRAGMENT_TERM)) && model_class.column_names.include?(m[1]) }
+      end
+
+      def fragment_terms(fragment)
+        ors = fragment.split(/\bOR\b/i)
+        ands = fragment.split(/\bAND\b/i)
+        return [nil, []] if ors.size > 1 && ands.size > 1
+
+        ors.size > 1 ? [:or, ors] : [:and, ands]
+      end
+
+      def fragment_filter(fragment, values)
+        joiner, terms = fragment_terms(fragment)
+        tests = terms.map { |term| term.match(FRAGMENT_TERM) }.zip(values).map do |match, value|
+          fragment_test(match[1], match[2].downcase, value)
+        end
+        filter_rows do |record, _joins|
+          results = tests.map { |test| test.call(record) }
+          joiner == :or ? results.any? : results.all?
+        end
+      end
+
+      # A predicate on one record. NULL on either side is unknown, so false.
+      def fragment_test(column, op, value)
+        if op.end_with?("like")
+          regexp = like_regexp(value.to_s, case_insensitive: op == "ilike")
+          return ->(record) { (v = record.read_attribute(column)) && regexp.match?(v.to_s) }
+        end
+
+        bound = model_class.type_for_attribute(column).cast(value)
+        lambda do |record|
+          v = record.read_attribute(column)
+          next false if v.nil? || bound.nil?
+
+          cmp = v <=> bound
+          next false if cmp.nil?
+
+          case op
+          when "=" then cmp.zero?
+          when "!=", "<>" then !cmp.zero?
+          when "<" then cmp.negative?
+          when "<=" then cmp <= 0
+          when ">" then cmp.positive?
+          when ">=" then cmp >= 0
+          end
+        end
+      end
+
+      # SQL LIKE: % any run, _ any one character, \ escapes; the rest literal.
+      def like_regexp(pattern, case_insensitive:)
+        source = pattern.scan(/\\.|%|_|[^\\%_]+/).map do |piece|
+          case piece
+          when "%" then ".*"
+          when "_" then "."
+          else Regexp.escape(piece.start_with?("\\") ? piece[1..] : piece)
+          end
+        end.join
+        Regexp.new("\\A#{source}\\z", case_insensitive ? Regexp::IGNORECASE | Regexp::MULTILINE : Regexp::MULTILINE)
       end
 
       # SQL's NOT: a row is kept only when its conditions are definitely
@@ -304,11 +378,47 @@ module Lyra
       def order(*args)
         return self if args.empty?
 
+        keys = order_keys(args)
         sorted = @records.sort do |a, b|
-          compare_for_order(a, b, args)
+          compare_for_order(a, b, keys)
         end
 
         spawn_records(sorted)
+      end
+
+      # Order arguments as [{ column => :asc/:desc }]: symbols, hashes,
+      # "col [ASC|DESC], ..." strings and Arel orderings of a column. Anything
+      # else is refused; an unreadable ordering used to compare as equal and
+      # leave the result silently unordered.
+      def order_keys(args)
+        args.flatten.flat_map do |arg|
+          case arg
+          when Symbol then [{ arg => :asc }]
+          when Hash then arg.map { |column, direction| { column.to_sym => direction.to_s.downcase.to_sym } }
+          when String
+            arg.split(",").map do |part|
+              match = part.strip.match(/\A"?(?:\w+"?\.)?"?(\w+)"?(?:\s+(asc|desc))?\z/i)
+              raise UnsupportedQuery.new(model_class, "order(#{arg.inspect})") unless match && model_class.column_names.include?(match[1])
+
+              { match[1].to_sym => (match[2] || "asc").downcase.to_sym }
+            end
+          when Arel::Nodes::Ordering
+            raise UnsupportedQuery.new(model_class, "order(#{arg.to_sql})") unless arg.expr.respond_to?(:name)
+
+            [{ arg.expr.name.to_sym => arg.descending? ? :desc : :asc }]
+          else raise UnsupportedQuery.new(model_class, "order(#{arg.inspect[0, 60]})")
+          end
+        end
+      end
+
+      # SQL's OR of two relations over the same model: the records of either,
+      # each once, in this one's order and then the other's.
+      def or(other)
+        unless other.is_a?(CachedRelation) && other.model_class == model_class
+          raise UnsupportedQuery.new(model_class, "or(#{other.class})")
+        end
+
+        spawn_records((@records + other.records).uniq { |record| record.id })
       end
 
       def reorder(*args)
@@ -533,7 +643,8 @@ module Lyra
       def order!(*args)
         # In-place order modification
         return self if args.empty?
-        @records = @records.sort { |a, b| compare_for_order(a, b, args) }
+        keys = order_keys(args)
+        @records = @records.sort { |a, b| compare_for_order(a, b, keys) }
         self
       end
 
@@ -748,13 +859,17 @@ module Lyra
             raise UnsupportedQuery.new(model_class, "#{method_name}, which is not a scope")
           end
 
-          extra = unsupported_clauses(scope_result)
+          extra = unsupported_clauses(scope_result) - %w[order limit]
           raise UnsupportedQuery.new(model_class, "scope #{method_name} (it uses #{extra.join(', ')})") if extra.any?
 
           where_hash = extract_where_conditions(scope_result, strict: true)
           raise UnsupportedQuery.new(model_class, "scope #{method_name}") if where_hash.nil?
 
-          where_hash.empty? ? self : where(where_hash)
+          # A scope's where, then its order and limit, as SQL applies them.
+          relation = where_hash.empty? ? self : where(where_hash)
+          relation = relation.order(*scope_result.order_values) if scope_result.order_values.any?
+          relation = relation.limit(scope_result.limit_value) if scope_result.limit_value
+          relation
         else
           super
         end
@@ -1018,7 +1133,7 @@ module Lyra
 
       def compare_single_order(a, b, arg)
         case arg
-        when Symbol, String
+        when Symbol
           compare_values(a.send(arg), b.send(arg))
         when Hash
           arg.each do |column, direction|

@@ -315,6 +315,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **ES-NoProj answers more queries exactly instead of refusing them** — scopes with `order` or
+  `limit` (their conditions, then the order and limit); `relation.or(other)` over the same model
+  (the union); and `where` fragments of `col OP ?` terms joined all by AND or all by OR, with OP
+  one of `= != <> < <= > >= LIKE ILIKE` (values cast to the column type, NULL never matching, LIKE
+  patterns with `%`, `_` and `\` escapes). Anything else is still refused. `order("col DESC")`
+  strings and Arel orderings are read, and an ordering it cannot read now raises: it used to
+  compare as equal and leave the result silently unordered. The testbed suite under ES-NoProj
+  goes from 20 failures to none (the domain-events tests also created their records before
+  switching mode, so under ES-NoProj the parents existed only as events).
 - **ES-NoProj lost `update_columns` and `touch`** — in the events-only store the `UPDATE` matched no
   row and returned false, so no event was published and the change was lost, against Bypass
   Coverage ("the events are the write"). The event is now published whatever the row count.
