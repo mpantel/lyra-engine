@@ -24,6 +24,7 @@ require_relative "pam_dsl/field"
 require_relative "pam_dsl/purpose"
 require_relative "pam_dsl/retention"
 require_relative "pam_dsl/consent"
+require_relative "pam_dsl/enforcement"
 require_relative "pam_dsl/policy"
 require_relative "pam_dsl/registry"
 require_relative "pam_dsl/reporter"
@@ -69,9 +70,12 @@ module PamDsl
       registry.get(name) || raise(PolicyNotFoundError, "Policy '#{name}' not found")
     end
 
-    # Reset all policies (useful for testing)
+    # Reset all policies, the enforcement mode and the violation handlers
+    # (useful for testing)
     def reset!
       @registry = Registry.new
+      @enforcement_mode = nil
+      @violation_handlers = nil
     end
 
     # Convenience method to create a reporter

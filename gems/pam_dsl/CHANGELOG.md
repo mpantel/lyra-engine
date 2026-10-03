@@ -2,6 +2,20 @@
 
 All notable changes to PAM DSL will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Enforcement modes** (`PamDsl.enforcement_mode`, `PamDsl::Enforcement`): `:strict`, the
+  default and the behaviour so far, blocks an invalid access by raising its typed exception;
+  `:audit` lets it through, records **every** violation found (not only the first), logs each
+  (`PamDsl.logger`: `Rails.logger` under Rails, standard error otherwise), passes each to the
+  `PamDsl.on_violation { |violation| ... }` handlers as an `Enforcement::Violation` (policy,
+  purpose, fields, subject, error class, message, time), and makes `validate_access!` return
+  `false`. A policy can override the global mode (`enforcement :audit` in its definition). In
+  strict mode the first violation raised is the same, in the same order, as before.
+  `Policy#access_violations` returns them all without raising. `PamDsl.reset!` also resets the
+  mode and the handlers.
+
 ## [0.8.0] - 2026-06-15
 
 ### Changed

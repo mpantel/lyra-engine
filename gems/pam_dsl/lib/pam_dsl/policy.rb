@@ -12,6 +12,17 @@ module PamDsl
       @metadata = {}
     end
 
+    # Enforcement mode for this policy, overriding PamDsl.enforcement_mode:
+    # `enforcement :audit` in the definition. See PamDsl::Enforcement.
+    def enforcement(mode)
+      @enforcement_mode = Enforcement.validate_mode!(mode)
+    end
+
+    # The mode this policy enforces with: its own, or the global one.
+    def enforcement_mode
+      @enforcement_mode || PamDsl.enforcement_mode
+    end
+
     # Define a PII field
     def field(name, type:, sensitivity: :internal, &block)
       field = Field.new(name, type: type, sensitivity: sensitivity)
@@ -77,19 +88,56 @@ module PamDsl
     end
 
     # Validate data access for a (fields, purpose, subject) triple — Def. 1.
+    #
+    # Strict mode (the default) raises the first violation as its typed
+    # exception. Audit mode records every violation (logged, and passed to
+    # PamDsl.on_violation handlers) and returns false instead of raising.
+    # Either way, true means the access is valid. See PamDsl::Enforcement.
     def validate_access!(field_names, purpose_name, subject:)
-      purpose = get_purpose(purpose_name)
+      violations = access_violations(field_names, purpose_name, subject: subject)
+      return true if violations.empty?
+      raise violations.first if enforcement_mode == :strict
+
+      violations.each do |error|
+        PamDsl.report_violation(Enforcement::Violation.new(
+          policy: name, purpose: purpose_name, fields: field_names, subject: subject,
+          error_class: error.class, message: error.message, at: Time.now
+        ))
+      end
+      false
+    end
+
+    # Every violation of Def. 1 for this access, in the order validation
+    # checks them (strict mode raises the first): purpose declared, then
+    # Condition 4 (legal basis: consent), then each field (declared, then
+    # allowed for the purpose), then Condition 5 (special categories).
+    def access_violations(field_names, purpose_name, subject:)
+      purpose = begin
+        get_purpose(purpose_name)
+      rescue UndeclaredPurposeError => e
+        return [e]
+      end
+      violations = []
 
       # Condition 4 (Def. 1): legal basis satisfied — consent check delegates to CS
       if purpose.requires_consent?
-        @consent_policy.validate!(purpose_name, subject: subject)
+        begin
+          @consent_policy.validate!(purpose_name, subject: subject)
+        rescue ConsentRequiredError => e
+          violations << e
+        end
       end
 
-      # Check each field: existence first (InvalidFieldError), then membership (PurposeFieldMismatchError)
+      # Each field: existence first (InvalidFieldError), then membership (PurposeFieldMismatchError)
       field_names.each do |field_name|
-        get_field(field_name)
+        begin
+          get_field(field_name)
+        rescue InvalidFieldError => e
+          violations << e
+          next
+        end
         unless allowed?(field_name, purpose_name)
-          raise PurposeFieldMismatchError, "Field '#{field_name}' not allowed for purpose '#{purpose_name}'"
+          violations << PurposeFieldMismatchError.new("Field '#{field_name}' not allowed for purpose '#{purpose_name}'")
         end
       end
 
@@ -104,11 +152,12 @@ module PamDsl
       end
 
       if has_special_category && !purpose.art9_basis?
-        raise SensitivityViolationError,
+        violations << SensitivityViolationError.new(
           "Purpose '#{purpose_name}' accesses special-category (Article 9) data but declares no Art. 9(2) basis"
+        )
       end
 
-      true
+      violations
     end
 
     # Returns purposes whose legal basis is :legitimate_interests but whose LIA has not
