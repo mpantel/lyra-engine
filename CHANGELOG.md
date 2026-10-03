@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **`CachedRelation#delete_all`/`destroy_all`/`update_all` wiped the whole table**
+  (`Lyra::Projections::CachedRelation`, from `stack/latest-ruby-rails-res`) — the
+  `method_missing` scope fallback rebuilt them from `model_class.unscoped` and ran them
+  before checking the result, so `Model.where(id: ids).delete_all` under ES-NoProj issued
+  a bare `DELETE FROM` the whole table (found when the Aegean benchmark's ES-NoProj
+  cleanup emptied `registrations` mid-sweep). They now act only on the relation's own
+  records. `where(column: [a, b])` (an `IN` with several values) is no longer silently
+  dropped.
 - **Projection wrote through the read-from-events override** (`Lyra::Projections::ModelProjection`)
   — with `projection_mode :disabled` (ES-NoProj) a monitored model's `where`/`all` answer
   from the event store. Projection's update and destroy go through
