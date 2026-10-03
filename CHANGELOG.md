@@ -109,6 +109,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **ES-Async can run out of line in tests** — `async_projections_inline` now decides: unset
+  (the new default, `nil`) projects inline in the test environment only, as before; `true`
+  always; `false` never, so a test with an `:async` job adapter exercises the real background
+  path. The test environment used to force inline projection whatever the setting said, so no
+  test could run ES-Async as it runs in production. `Configuration#async_projections_inline?`
+  gives the effective value.
 - **ES-NoProj cache: entries stamped with their stream's last event** (`CachedProjection`) — each
   record's cached rebuild carries the id of the last event it was built from and is used only
   while that is still the stream's last event, so it is exactly right or detectably out of date.

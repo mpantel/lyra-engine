@@ -458,8 +458,9 @@ module Lyra
         event = result.events&.first
         return unless event
 
-        # In test environment, run synchronously for immediate consistency
-        if Rails.env.test? || Lyra.config.async_projections_inline
+        # Inline in the test environment unless a test opts out
+        # (Configuration#async_projections_inline?).
+        if Lyra.config.async_projections_inline?
           Lyra::Projections::ModelProjection.project(self.class, operation, result)
         else
           Lyra::Projections::AsyncProjectionJob.perform_later(

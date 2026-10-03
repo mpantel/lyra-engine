@@ -22,7 +22,10 @@ module Lyra
       @projection_mode = :sync  # :sync, :async, :disabled (ES-NoProj) or :lazy (ES-Lazy: project on read)
       @strict_projections = false  # Raise on projection errors if true
       @projection_error_handler = nil  # Custom error handler proc
-      @async_projections_inline = false  # Run async projections synchronously (useful for testing)
+      # Run :async projections inline: nil (default) = only in the test
+      # environment; true = always; false = never, so tests can exercise the
+      # real background path with an :async job adapter.
+      @async_projections_inline = nil
       # Schema validation options
       @strict_schema = false  # Fail on startup if schema changes detected
       @schema_path = nil  # Custom path for schema files (defaults to db/lyra_schemas/)
@@ -56,6 +59,16 @@ module Lyra
 
     def model_config(model_class)
       @model_configs[model_class] || ModelConfiguration.new(model_class)
+    end
+
+    # Whether :async projection mode projects inline instead of enqueueing
+    # AsyncProjectionJob. Unset, it does so in the test environment only.
+    # Before, the test environment always projected inline, whatever this
+    # said, so no test could run ES-Async as it runs in production.
+    def async_projections_inline?
+      return @async_projections_inline unless @async_projections_inline.nil?
+
+      defined?(Rails) && Rails.respond_to?(:env) && Rails.env.test? ? true : false
     end
 
     def monitor_mode?
