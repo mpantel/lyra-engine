@@ -496,6 +496,79 @@ module Lyra
       result = ::User.last(5)
       assert_equal [], result
     end
+
+    # Regression test for the CachedRelation#method_missing bug where
+    # delete_all/destroy_all/update_all were delegated to a query rebuilt
+    # from model_class.unscoped -- discarding whatever #where the relation
+    # was actually built from and mutating every row in the table. In the
+    # Aegean ePay benchmark this turned
+    # `Registration.where(id: created_ids).delete_all` into a bare
+    # `DELETE FROM "registrations"`, wiping the whole table (see
+    # examples/aegean_epay_testbed/perf/run_concurrent_benchmark.rb's
+    # per-thread cleanup) and starving the next mode of the rows it expected
+    # to read.
+    def test_delete_all_on_filtered_relation_only_deletes_matching_records
+      Lyra.config.projection_mode = :sync
+      keep = ::User.create!(name: "Keep", email: next_email)
+      gone1 = ::User.create!(name: "Gone1", email: next_email)
+      gone2 = ::User.create!(name: "Gone2", email: next_email)
+      Lyra.config.projection_mode = :disabled
+
+      cached = Lyra::Projections::CachedRelation.new(::User, [keep, gone1, gone2])
+      Lyra::Projections::EventStoreReader.stubs(:relation).with(::User).returns(cached)
+
+      deleted = ::User.where(id: [gone1.id, gone2.id]).delete_all
+
+      # ::User.exists? is itself overridden in this mode to check the event
+      # store, not the table (an id's creation event outlives delete_all on
+      # the row) -- so check the real table directly via .unscoped, which
+      # Lyra deliberately does not intercept.
+      assert_equal 2, deleted
+      assert ::User.unscoped.exists?(keep.id), "delete_all deleted a record outside its #where filter"
+      refute ::User.unscoped.exists?(gone1.id)
+      refute ::User.unscoped.exists?(gone2.id)
+    ensure
+      Lyra.config.projection_mode = :sync
+      [keep, gone1, gone2].each { |u| u&.destroy if u && ::User.unscoped.exists?(u.id) }
+    end
+
+    def test_delete_all_on_empty_relation_deletes_nothing
+      Lyra.config.projection_mode = :sync
+      survivor = ::User.create!(name: "Survivor", email: next_email)
+      Lyra.config.projection_mode = :disabled
+
+      cached = Lyra::Projections::CachedRelation.new(::User, [])
+      Lyra::Projections::EventStoreReader.stubs(:relation).with(::User).returns(cached)
+
+      deleted = ::User.where(id: [survivor.id]).delete_all
+
+      assert_equal 0, deleted
+      assert ::User.unscoped.exists?(survivor.id)
+    ensure
+      Lyra.config.projection_mode = :sync
+      survivor&.destroy if survivor && ::User.unscoped.exists?(survivor.id)
+    end
+
+    # Regression test for extract_where_conditions missing
+    # Arel::Nodes::HomogeneousIn -- the node Rails compiles `where(id: [...])`
+    # to for arrays of more than one homogeneous scalar. Before this fix, an
+    # IN condition built this way was silently dropped from the extracted
+    # hash, which (for a scope whose only condition was such an IN) made
+    # CachedRelation#method_missing's scope-delegation branch fall through to
+    # an unfiltered relation.
+    def test_extract_where_conditions_handles_homogeneous_in
+      cached = Lyra::Projections::CachedRelation.new(::User, [])
+
+      Thread.current[:lyra_bypass_read_override] = true
+      real_relation = ::User.where(id: [1, 2, 3])
+      Thread.current[:lyra_bypass_read_override] = nil
+
+      conditions = cached.send(:extract_where_conditions, real_relation)
+
+      assert_equal [1, 2, 3], conditions[:id]
+    ensure
+      Thread.current[:lyra_bypass_read_override] = nil
+    end
   end
 
   # ==========================================================================

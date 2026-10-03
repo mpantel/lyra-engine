@@ -568,7 +568,25 @@ module Lyra
         model_class.respond_to?(method_name) || super
       end
 
+      # Bulk mutations must act on exactly the records this relation has
+      # already been filtered down to (@records) -- not on a query rebuilt
+      # from model_class.unscoped, which the scope-delegation branch below
+      # does deliberately (see its comment) because that branch exists to
+      # resolve *named scopes*, whose where clauses live only on the class,
+      # not on any relation instance.
+      #
+      # delete_all/destroy_all/update_all are relation-instance methods, not
+      # scopes: model_class.respond_to?(:delete_all) is true (AR delegates it
+      # from the class to Model.all), so without this check they fell into
+      # that same branch and ran unscoped -- deleting or updating every row
+      # in the table, silently, regardless of any #where this relation was
+      # built from. Getting this wrong doesn't raise; it destroys data the
+      # caller never selected.
+      BULK_MUTATION_METHODS = %i[delete_all destroy_all update_all].freeze
+
       def method_missing(method_name, *args, **kwargs, &block)
+        return bulk_mutate(method_name, *args, **kwargs) if BULK_MUTATION_METHODS.include?(method_name)
+
         # Try to delegate to model class scopes
         if model_class.respond_to?(method_name)
           # Execute the scope on a bare unscoped relation to get the where conditions
@@ -631,6 +649,17 @@ module Lyra
               values = predicate.right.map { |v| extract_predicate_value(v) }
               conditions[column] = values
             end
+          when Arel::Nodes::HomogeneousIn
+            # IN clause over an array of same-type scalars -- Rails' own
+            # optimization of `where(column: [v1, v2, ...])`, and what
+            # `where(id: [...])` compiles to whenever the array has more than
+            # one element. Without this branch, any such condition falls
+            # through unrecognized, and this method silently omits it from
+            # `conditions` -- collapsing the scope to unfiltered if it was
+            # the only condition.
+            if predicate.type == :in && predicate.attribute.respond_to?(:name)
+              conditions[predicate.attribute.name.to_sym] = predicate.values
+            end
           end
         end
 
@@ -655,6 +684,22 @@ module Lyra
       end
 
       private
+
+      # Re-derives a real, scoped AR relation from this relation's own
+      # (already-filtered) records and runs the mutation on exactly that set.
+      # An empty relation mutates nothing, rather than the id filter
+      # collapsing to `where(id: [])`, which some AR versions optimize to "no
+      # WHERE at all" for delete_all/update_all -- the same class of bug this
+      # method exists to avoid.
+      def bulk_mutate(method_name, *args, **kwargs)
+        return 0 if @records.empty?
+
+        ids = @records.map { |r| r.public_send(model_class.primary_key) }
+        Thread.current[:lyra_bypass_read_override] = true
+        model_class.unscoped.where(model_class.primary_key => ids).public_send(method_name, *args, **kwargs)
+      ensure
+        Thread.current[:lyra_bypass_read_override] = nil
+      end
 
       def matches_value?(record, key, value)
         record_value = record.send(key)
