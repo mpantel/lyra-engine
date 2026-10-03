@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Privacy provider interface** (`Lyra::Privacy`) — `Policy` (declared attributes and their
+  `Annotation`s), `Detector` (name-based PII heuristic) and `Provider`, with null defaults when
+  no provider is installed. PAM is an adapter (`Lyra::Privacy::Adapters::Pam`), loaded when
+  `pam_dsl` is present. `Lyra::Privacy.annotations_for(event)` returns the annotation of every
+  declared attribute an event touched. The foundation for `config.privacy_policy=` and PII
+  annotation in event metadata (`FEATURE_GAP_PLAN.md`, F2 and F5). From `thesis-restructure`
+  (1adadfe); the testbed binds `Registration` and `PaymentTransaction` to its `:epay_data`
+  policy (d0df542), which adds nothing to the write path.
+- **`Lyra::IdGenerator.reserves_safely?(model)`** — true for UUID keys and for integer keys
+  backed by a PostgreSQL sequence. It uses the cached sequence lookup, so it adds no query per
+  write once a table's sequence is known.
 - **Bypass events for bulk writes** (`Lyra::BypassEvents`) — `update_all`, `delete_all`,
   `insert`/`insert_all(!)`, `upsert`/`upsert_all` and `dependent: :nullify` on a monitored model
   now publish one event per affected row, whatever the `strict_data_access` setting
@@ -85,6 +96,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **`Lyra.privacy_features_available?`** asks the installed privacy provider instead of
+  checking for `pam_dsl` directly. `PIIDetector` and `PolicyIntegration` load always and work
+  through the interface; `PIIMasker` and `GDPRCompliance` stay PAM-only.
+- **Hijack creates reserve an id only where it cannot collide** (`reserves_safely?`). Elsewhere
+  (an integer key without a PostgreSQL sequence, e.g. SQLite or MySQL) hijack falls back to the
+  `pending-<hex>` placeholder with a one-time warning, rather than guessing an id the database
+  may also hand out. On PostgreSQL nothing changes, and SQL statements per write are unchanged
+  in every mode.
 - **Bulk writes on monitored models publish events** (see Added). Code that relied on
   `update_all`/`delete_all`/`insert_all` leaving the event stream untouched should wrap them in
   `Lyra.projection_write`. Bulk-write guards are on `ActiveRecord::Relation`
@@ -120,6 +139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **An explicit id was replaced** — `CommandHandler#handle_create` generated an id even when the
+  application set one; it now keeps it, in the event and in the row. From `thesis-restructure`
+  (526908e), applied to master's own Hijack fix (cd3ea89).
 - **ES-NoProj `insert_all` ran, then raised** — through `CachedRelation`'s scope branch the
   insert executed and the caller then got `UnsupportedQuery` ("not a scope"). Inserts and
   upserts now go to the table relation and return its result.

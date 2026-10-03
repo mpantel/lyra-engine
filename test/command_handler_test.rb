@@ -61,6 +61,9 @@ module Lyra
       # its own tests (id_generator_test.rb); here a reserved integer is enough.
       Lyra::IdGenerator.stubs(:next_id).returns(1001)
       Lyra::IdGenerator.stubs(:next_id).with(@uuid_model_class).returns(SecureRandom.uuid)
+      # Stub models have no table: say the ids can be reserved safely, as on
+      # PostgreSQL with a sequence. The unsafe case has its own test below.
+      Lyra::IdGenerator.stubs(:reserves_safely?).returns(true)
 
       # Configure Lyra to monitor these models
       Lyra.config.monitor_model(@model_class, event_prefix: "TestModel")
@@ -323,13 +326,31 @@ module Lyra
       assert result.success?
     end
 
-    def test_removes_string_id_key_to_prevent_conflict
-      command = Commands::CreateCommand.new(@uuid_model_class, { "id" => "old-id", name: "Test" })
+    def test_an_explicit_id_is_kept_under_a_single_key
+      command = Commands::CreateCommand.new(@uuid_model_class, { "id" => "chosen-id", name: "Test" })
       result = CommandHandler.handle(command)
 
       assert result.success?
-      # The UUID should be the assigned one, not the old string key
-      assert_match(/\A[0-9a-f-]{36}\z/i, result.attributes[:id])
+      # The application's id is kept (it used to be replaced by a generated
+      # one), and only as :id, so the string key cannot conflict with it.
+      assert_equal "chosen-id", result.attributes[:id]
+      refute result.attributes.key?("id")
+      assert_equal "chosen-id", result.events.first.data[:model_id]
+    end
+
+    # Hijack mode inserts the row while the database may assign ids to other
+    # inserts. Where Lyra cannot reserve an id that the database will never
+    # hand out (no UUID key, no PostgreSQL sequence), it must not guess one.
+    def test_hijack_mode_falls_back_to_a_placeholder_where_reserving_is_unsafe
+      Lyra.config.mode = :hijack
+      Lyra::IdGenerator.stubs(:reserves_safely?).returns(false)
+      Lyra::IdGenerator.expects(:next_id).never
+
+      result = CommandHandler.handle(Commands::CreateCommand.new(@model_class, { name: "Test" }))
+
+      assert result.success?
+      refute result.attributes.key?(:id), "the database assigns the id"
+      assert_match(/\Apending-/, result.events.first.data[:model_id])
     end
 
     # =========================================================================

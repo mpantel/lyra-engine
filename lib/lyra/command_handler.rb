@@ -45,7 +45,21 @@ module Lyra
       # rebuilding it from events (dual view, projections) found no attributes.
       # Hijack now reserves the ID the same way event-sourcing mode does (a
       # sequence nextval on PostgreSQL) and the row is inserted with it.
-      id = IdGenerator.next_id(model_class)
+      #
+      # An ID the application set explicitly is kept (it used to be replaced
+      # with a generated one). In hijack mode the database may be assigning
+      # IDs to other inserts at the same time, so an ID is reserved only where
+      # that cannot collide (IdGenerator.reserves_safely?: a UUID, or the
+      # table's PostgreSQL sequence). Elsewhere hijack falls back to the
+      # "pending-<hex>" placeholder, with a one-time warning, rather than risk
+      # a duplicate key.
+      explicit_id = (command.attributes["id"] || command.attributes[:id]).presence
+      id = explicit_id ||
+           (IdGenerator.next_id(model_class) if Lyra.event_sourcing_mode? || IdGenerator.reserves_safely?(model_class))
+      unless id
+        warn_pending_stream(model_class)
+        id = "pending-#{SecureRandom.hex(8)}"
+      end
 
       # Create aggregate
       aggregate_class = find_aggregate_class
@@ -72,7 +86,7 @@ module Lyra
       # Remove string "id" key to prevent conflict with symbol :id
       # (AR attributes have string keys, but we add symbol keys)
       attributes.delete("id")
-      attributes[:id] = id
+      attributes[:id] = id unless id.to_s.start_with?("pending-")
       CommandResult.success(attributes: attributes, events: [event])
     end
 
@@ -152,6 +166,19 @@ module Lyra
     def find_aggregate_class
       config = Lyra.config.model_config(command.model_class)
       config.aggregate_class || Lyra::GenericAggregate
+    end
+
+    # Once per model: say why its created events are not in its own stream.
+    def warn_pending_stream(model_class)
+      @@pending_warned ||= Set.new
+      return unless @@pending_warned.add?(model_class.name)
+
+      adapter = model_class.connection.adapter_name rescue "unknown adapter"
+      Rails.logger.warn(
+        "Lyra: hijack mode can't reserve a safe id for #{model_class.name} " \
+        "(#{adapter}, integer key without a PostgreSQL sequence); " \
+        "its created events go to a pending-<hex> stream, not #{model_class.name}$<id>"
+      )
     end
   end
 end

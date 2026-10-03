@@ -43,6 +43,23 @@ module Lyra
         end
       end
 
+      # Whether next_id reserves an id that no other insert into the table
+      # will ever be given: a UUID, or a value from the table's own
+      # PostgreSQL sequence. Hi-Lo and SQLite's max+1 only avoid ids that
+      # already exist, so they are safe when Lyra makes every insert (event
+      # sourcing mode) but not when the database also assigns ids (hijack
+      # mode). Uses the cached sequence lookup, so once a table's sequence is
+      # known this costs no query per write.
+      def reserves_safely?(model_class)
+        pk_column = model_class.columns_hash[model_class.primary_key]
+        return true if pk_column&.type == :uuid
+        return false unless adapter_name(model_class) =~ /postgresql/i
+
+        postgresql_sequence_name(model_class, model_class.table_name, model_class.primary_key).present?
+      rescue StandardError
+        false
+      end
+
       private
 
       def next_integer_id(model_class)
