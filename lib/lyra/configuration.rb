@@ -28,6 +28,10 @@ module Lyra
     # (default) follows mode_transition_gate; true; false. Checked at most
     # every mode_sync_interval seconds.
     attr_accessor :mode_sync, :mode_sync_interval
+    # Stamp each event's metadata with the privacy annotation of the personal
+    # data it carries (Lyra::Privacy.stamp). Off by default: it adds work to
+    # every write, measured separately.
+    attr_accessor :annotate_privacy
 
     def initialize
       @mode = :monitor
@@ -61,6 +65,7 @@ module Lyra
       @dual_view_discrepancy_handler = nil
       @mode_sync = nil
       @mode_sync_interval = 5
+      @annotate_privacy = false
     end
 
     # Declare the models to monitor by name, in the initializer, before they

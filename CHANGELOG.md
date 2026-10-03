@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Privacy stamps on events** (`config.annotate_privacy`, default false; `Lyra::Privacy.stamp`,
+  `Lyra::Privacy.stamp_of`; FEATURE_GAP_PLAN F5) — when on, every event that carries an
+  attribute the model's privacy policy declares is stamped as it is built with
+  `metadata[:privacy]`: the policy's name and, per attribute, its type, sensitivity, allowed
+  purposes, retention period (ISO 8601) and the contexts it has a transformation for — never a
+  value. A create, import or destroy annotates the attributes it carries; an update the ones it
+  changed. All four places events are built stamp them: Monitor, the command handler (Hijack,
+  event sourcing, and so domain events), bypass events and Genesis imports. The stamp records the
+  policy as it was when the data was written, unlike `annotations_for`, which reads today's
+  policy; `stamp_of(event)` reads it back with string keys. Off by default because it adds work
+  to every write (no SQL statements); the Aegean testbed turns it on with
+  `LYRA_ANNOTATE_PRIVACY=1` and records it in its benchmark reports. The privacy `Annotation`
+  gains a `transformations` member.
 - **ModeSync: one mode per application** (`Lyra::ModeSync`, `config.mode_sync`,
   `config.mode_sync_interval`) — the latest switch recorded in `lyra_mode_transitions` is the
   application's mode; every process adopts a newer one within `mode_sync_interval` seconds

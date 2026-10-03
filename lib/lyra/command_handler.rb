@@ -191,7 +191,7 @@ module Lyra
         Lyra::Events.const_set(sanitized_name, Class.new(Lyra::Event))
       end
 
-      event_class.new(data: event_data, metadata: event_metadata)
+      event_class.new(data: event_data, metadata: Lyra::Privacy.stamp(command.model_class, event_data, event_metadata))
     end
 
     def find_aggregate_class

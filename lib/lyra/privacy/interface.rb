@@ -18,7 +18,8 @@ module Lyra
   # are what Lyra runs with when no provider is installed. PAM plugs in as
   # Lyra::Privacy::Adapters::Pam (loaded when the pam_dsl gem is present).
   module Privacy
-    Annotation = Struct.new(:field, :type, :sensitivity, :sensitive, :purposes, :source, keyword_init: true)
+    Annotation = Struct.new(:field, :type, :sensitivity, :sensitive, :purposes, :source, :transformations,
+                            keyword_init: true)
 
     class Policy
       def name
@@ -170,7 +171,74 @@ module Lyra
         end
       end
 
+      # Stamp an event's metadata with the privacy annotation of the personal
+      # data it carries (config.annotate_privacy, off by default): the policy's
+      # name and, for each declared attribute, its type, sensitivity, allowed
+      # purposes (purpose limitation), retention period (ISO 8601) and the
+      # contexts it has a transformation for. Never a value.
+      #
+      # This is step 1 of the Privacy Policy Coverage theorem done when the
+      # event is built, as the theorem states it, rather than recovered later
+      # (annotations_for): the annotation records the policy as it was when
+      # the data was written, so reclassifying a field later does not rewrite
+      # the history, and it can be read without the policy or PAM.
+      #
+      # A create (or import, or destroy) annotates the attributes it carries;
+      # an update only the ones it changed. An event with no declared
+      # attribute, or a model without a loaded policy, is left unstamped.
+      #
+      # @return [Hash] the metadata, with metadata[:privacy] added when there
+      #   is something to annotate
+      def stamp(model_class, data, metadata)
+        return metadata unless Lyra.config.annotate_privacy
+
+        policy = policy_for(model_class)
+        return metadata unless policy.loaded?
+
+        operation = (data[:operation] || data["operation"]).to_s
+        attributes = data[:attributes] || data["attributes"] || {}
+        changes = data[:changes] || data["changes"] || {}
+        touched = operation.start_with?("update") ? changes.keys : (attributes.keys | changes.keys)
+
+        fields = touched.each_with_object({}) do |field, acc|
+          annotation = policy.annotation(field)
+          next unless annotation
+
+          entry = {
+            "type" => annotation.type.to_s,
+            "sensitivity" => annotation.sensitivity.to_s,
+            "purposes" => Array(annotation.purposes).map(&:to_s)
+          }
+          retention = policy.retention_for(model_class.name, field_name: field.to_s)
+          entry["retention"] = retention.respond_to?(:iso8601) ? retention.iso8601 : "PT#{retention.to_i}S" if retention
+          transformations = Array(annotation.transformations).map(&:to_s)
+          entry["transformations"] = transformations if transformations.any?
+          acc[field.to_s] = entry
+        end
+        return metadata if fields.empty?
+
+        metadata.to_h.merge(privacy: { "policy" => policy.name.to_s, "fields" => fields })
+      end
+
+      # The stamp of a stored event, with string keys at every level (the
+      # event store's serializer may hand nested keys back as symbols), or nil
+      # if it was not stamped.
+      def stamp_of(event)
+        metadata = event.metadata.to_h
+        privacy = metadata[:privacy] || metadata["privacy"]
+        privacy && deep_stringify(privacy)
+      end
+
       private
+
+      def deep_stringify(value)
+        case value
+        when Hash then value.to_h { |k, v| [k.to_s, deep_stringify(v)] }
+        when Array then value.map { deep_stringify(_1) }
+        when Symbol then value.to_s
+        else value
+        end
+      end
 
       def default_provider
         defined?(Adapters::Pam) ? Adapters::Pam.new : Provider.new

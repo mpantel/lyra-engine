@@ -139,17 +139,15 @@ module Lyra
         record = model_class.instantiate(row)
         return nil if record.id.nil?
 
-        event = event_class(model_class).new(
-          data: {
-            model_class: model_class.name,
-            model_id: record.id,
-            operation: OPERATION,
-            attributes: record.attributes,
-            changes: {},
-            timestamp: Time.current
-          },
-          metadata: { genesis: true }
-        )
+        data = {
+          model_class: model_class.name,
+          model_id: record.id,
+          operation: OPERATION,
+          attributes: record.attributes,
+          changes: {},
+          timestamp: Time.current
+        }
+        event = event_class(model_class).new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, { genesis: true }))
         # The lock and the NOT EXISTS above make the stream empty here.
         Lyra.config.event_store.publish(event, stream_name: "#{model_class.name}$#{record.id}")
         record.id

@@ -54,17 +54,15 @@ module Lyra
           source_key(source) => source
         }.compact
 
-        event = event_class.new(
-          data: {
-            model_class: model_class.name,
-            model_id: id,
-            operation: operation,
-            attributes: attributes,
-            changes: changes,
-            timestamp: Time.current
-          },
-          metadata: metadata
-        )
+        data = {
+          model_class: model_class.name,
+          model_id: id,
+          operation: operation,
+          attributes: attributes,
+          changes: changes,
+          timestamp: Time.current
+        }
+        event = event_class.new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, metadata))
         Lyra.config.event_store.publish(event, stream_name: "#{model_class.name}$#{id}")
 
         # With projections disabled, reads come from the cached event-stream

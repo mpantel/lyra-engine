@@ -50,7 +50,8 @@ module Lyra
           return nil unless pam_field
 
           Annotation.new(field: pam_field.name, type: pam_field.type, sensitivity: pam_field.sensitivity,
-                         sensitive: pam_field.sensitive?, purposes: pam_field.purposes, source: :policy)
+                         sensitive: pam_field.sensitive?, purposes: pam_field.purposes, source: :policy,
+                         transformations: pam_field.transformations.keys)
         end
 
         def allowed?(field, purpose)

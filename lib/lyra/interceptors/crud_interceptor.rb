@@ -605,7 +605,7 @@ module Lyra
 
       def publish_event(operation, data)
         # Extract metadata from data and pass separately to RailsEventStore
-        metadata = data.delete(:metadata) || {}
+        metadata = Lyra::Privacy.stamp(self.class, data, data.delete(:metadata) || {})
         # The CRUD event, or the domain events the model's rules choose
         # (Lyra::DomainEvents): its own event first, then any additional ones.
         events = Lyra::DomainEvents.build(
