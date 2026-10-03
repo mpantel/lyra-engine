@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ES-Lazy: event sourcing that projects on read** (`projection_mode :lazy`, in
+  event-sourcing mode; `Lyra::Projections::LazyProjection`, `Lyra::Interceptors::LazyReads`)
+  — writes store events only, as in ES-NoProj; before any database read, the tables are
+  brought up to date from the event log, and the read runs as real SQL, so joins, merged
+  relations, SQL fragments and aggregates all work. The log stays the only source of
+  truth; the tables are a cache that `Rebuild` can recreate. Events are applied in the
+  log's global order under a PostgreSQL advisory lock, against a checkpoint that also
+  tracks ids still in flight (filled by replaying the record when they commit, forgotten
+  after 5 minutes). Read-your-writes consistent. Needs no migration: the checkpoint table
+  is created on first use. It runs Solidus, which ES-NoProj cannot: on 20 real Olist
+  orders it matches plain ActiveRecord with DualView clean. Cost: every read first checks
+  the log (about half ES-Sync's throughput in the replays).
 - **`Lyra::EventSerializer`** — a JSON serializer for RailsEventStore that keeps time
   precision. Ruby's `JSON` writes `Time` with `Time#to_s`, dropping fractional seconds, so
   apps passing `serializer: JSON` stored `09:51:15.304` as `"09:51:15 UTC"`, and an update

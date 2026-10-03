@@ -18,7 +18,7 @@ module Lyra
       @model_configs = {}
       @retention_policy = nil
       # Event sourcing specific options
-      @projection_mode = :sync  # :sync, :async, or :disabled
+      @projection_mode = :sync  # :sync, :async, :disabled (ES-NoProj) or :lazy (ES-Lazy: project on read)
       @strict_projections = false  # Raise on projection errors if true
       @projection_error_handler = nil  # Custom error handler proc
       @async_projections_inline = false  # Run async projections synchronously (useful for testing)

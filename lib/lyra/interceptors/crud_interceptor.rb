@@ -411,6 +411,9 @@ module Lyra
         when :disabled
           # Warm cache with the new data (uses Solid Cache or Rails.cache)
           lyra_warm_cache(@lyra_event_operation, @lyra_event_result)
+        when :lazy
+          # ES-Lazy: nothing to do now. The next read brings the tables up to
+          # date from the log (Projections::LazyProjection).
         end
 
         # Clear state

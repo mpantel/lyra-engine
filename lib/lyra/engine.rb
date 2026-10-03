@@ -29,6 +29,14 @@ module Lyra
         end
       end
 
+      # Read hooks for ES-Lazy (projection_mode :lazy); inert in other modes.
+      initializer "lyra.install_lazy_reads", after: "lyra.inject_interceptors" do
+        ActiveSupport.on_load(:active_record) do
+          require "lyra/interceptors/lazy_reads"
+          Lyra::Interceptors::LazyReads.install!
+        end
+      end
+
       # Install strict data access relation extension for update_all/delete_all
       # This intercepts bulk operations on relations (Model.where(...).update_all)
       initializer "lyra.install_strict_data_access", after: "lyra.inject_interceptors" do

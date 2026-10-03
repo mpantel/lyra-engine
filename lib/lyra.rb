@@ -45,6 +45,7 @@ require "lyra/projections/async_projection_job"
 require "lyra/projections/cached_projection"
 require "lyra/projections/cached_relation"
 require "lyra/projections/event_store_reader"
+require "lyra/projections/lazy_projection"
 
 # Event-aware associations
 require "lyra/associations/event_aware"
