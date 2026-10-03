@@ -2,8 +2,9 @@ module Lyra
   module Privacy
     # Detects personally identifiable information (PII) in data
     #
-    # This class delegates to PamDsl::PIIDetector for the core PII detection logic,
-    # providing a unified implementation across both Lyra and PAM DSL.
+    # Delegates to the installed privacy provider's Detector (PAM's
+    # name-based detector when pam_dsl is present). Without a provider it
+    # finds nothing.
     #
     # @example Detect PII in attributes
     #   PIIDetector.detect({ email: "test@example.com", name: "John" })
@@ -21,7 +22,7 @@ module Lyra
         # @return [Hash] Keys that contain PII, with their type, value, and sensitivity
         #
         def detect(attributes)
-          PamDsl::PIIDetector.detect(attributes)
+          Lyra::Privacy.detector.detect(attributes)
         end
 
         # Check if a field contains PII
@@ -30,7 +31,7 @@ module Lyra
         # @return [Boolean] true if field contains PII
         #
         def contains_pii?(field_name)
-          PamDsl::PIIDetector.contains_pii?(field_name)
+          Lyra::Privacy.detector.contains_pii?(field_name)
         end
 
         # Mask PII for display
@@ -40,13 +41,10 @@ module Lyra
         # @return [String] Masked value
         #
         def mask(value, pii_type)
-          PamDsl::PIIDetector.mask(value, pii_type)
+          Lyra::Privacy.detector.mask(value, pii_type)
         end
 
         # Extract all PII from event stream
-        #
-        # This is a convenience wrapper around PamDsl::PIIDetector.extract_pii_from_records
-        # that provides Lyra-specific extractors for Lyra::Event objects.
         #
         # @param events [Array<Lyra::Event>] Events to scan for PII
         # @return [Hash] PII inventory grouped by type
@@ -57,7 +55,7 @@ module Lyra
         #   # => { email: [{ field: :email, value: "...", event_id: "...", ... }], ... }
         #
         def extract_from_event_stream(events)
-          PamDsl::PIIDetector.extract_pii_from_records(
+          Lyra::Privacy.detector.extract_from_records(
             events,
             attribute_extractor: ->(e) { e.attributes },
             metadata_extractor: ->(e) {
@@ -77,7 +75,7 @@ module Lyra
         # @return [Boolean]
         #
         def sensitive?(pii_type)
-          PamDsl::PIIDetector.sensitive?(pii_type)
+          Lyra::Privacy.detector.sensitive?(pii_type)
         end
       end
     end

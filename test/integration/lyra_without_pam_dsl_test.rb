@@ -35,9 +35,13 @@ class LyraWithoutPamDslTest < Minitest::Test
 
     if ENV["LYRA_DISABLE_PAM_DSL"] == "true"
       refute PAM_DSL_AVAILABLE, "PAM_DSL_AVAILABLE should be false when LYRA_DISABLE_PAM_DSL=true"
-      refute defined?(Lyra::Privacy::PIIDetector), "Privacy modules should not be loaded"
+      refute defined?(Lyra::Privacy::Adapters::Pam), "PAM adapter should not be loaded"
+      refute defined?(Lyra::Privacy::GDPRCompliance), "PAM-backed compliance tools should not be loaded"
+      assert_equal :none, Lyra::Privacy.provider.name, "Lyra should fall back to the null provider"
+      assert_equal({}, Lyra::Privacy::PIIDetector.detect({ email: "a@example.com" }))
     else
       assert PAM_DSL_AVAILABLE, "PAM_DSL_AVAILABLE should be true in normal test environment"
+      assert_equal :pam, Lyra::Privacy.provider.name, "PAM should be the installed provider"
       assert defined?(Lyra::Privacy::PIIDetector), "PIIDetector should be loaded"
     end
   end
@@ -99,18 +103,18 @@ class LyraWithoutPamDslTest < Minitest::Test
   end
 
   def test_pam_dsl_constant_matches_reality
-    # This test works in both modes - verifies Lyra's privacy modules match PAM_DSL_AVAILABLE
-    # Note: PamDsl gem may be loaded by bundler regardless, but Lyra's privacy modules
-    # are only loaded when PAM_DSL_AVAILABLE is true
+    # This test works in both modes. The privacy interface (and the façades
+    # built on it) always loads; the PAM adapter and the PAM-backed tools
+    # load only when PAM_DSL_AVAILABLE is true.
+    # Note: PamDsl gem may be loaded by bundler regardless.
+    assert defined?(Lyra::Privacy::PolicyIntegration), "PolicyIntegration should always be defined"
+    assert defined?(Lyra::Privacy::PIIDetector), "Lyra::Privacy::PIIDetector should always be defined"
     if PAM_DSL_AVAILABLE
       assert defined?(PamDsl), "PamDsl should be defined when PAM_DSL_AVAILABLE is true"
       assert defined?(PamDsl::PIIDetector), "PamDsl::PIIDetector should be defined"
-      assert defined?(Lyra::Privacy::PolicyIntegration), "PolicyIntegration should be defined"
-      assert defined?(Lyra::Privacy::PIIDetector), "Lyra::Privacy::PIIDetector should be defined"
+      assert defined?(Lyra::Privacy::Adapters::Pam), "PAM adapter should be defined"
     else
-      # Lyra's privacy modules should NOT be loaded when PAM_DSL_AVAILABLE is false
-      refute defined?(Lyra::Privacy::PIIDetector), "Lyra::Privacy::PIIDetector should NOT be defined"
-      refute defined?(Lyra::Privacy::PolicyIntegration), "PolicyIntegration should NOT be defined"
+      refute defined?(Lyra::Privacy::Adapters::Pam), "PAM adapter should NOT be defined"
       refute defined?(Lyra::Privacy::PIIMasker), "Lyra::Privacy::PIIMasker should NOT be defined"
     end
   end

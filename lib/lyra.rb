@@ -55,12 +55,16 @@ require "lyra/associations/event_aware"
 # Consistency helpers
 require "lyra/consistency/read_your_writes"
 
-# Privacy and compliance (requires PAM DSL)
+# Privacy: the provider interface is always loaded and falls back to a null
+# provider. PAM plugs in as a provider when the pam_dsl gem is present; the
+# masker and GDPR compliance tools are PAM features.
+require "lyra/privacy/interface"
+require "lyra/privacy/pii_detector"
+require "lyra/privacy/policy_integration"
 if PAM_DSL_AVAILABLE
-  require "lyra/privacy/pii_detector"
+  require "lyra/privacy/adapters/pam"
   require "lyra/privacy/pii_masker"
   require "lyra/privacy/gdpr_compliance"
-  require "lyra/privacy/policy_integration"
 end
 
 # Schema validation
@@ -120,9 +124,9 @@ module Lyra
     PAM_DSL_AVAILABLE
   end
 
-  # Check if privacy features are available
+  # Check if a privacy provider is installed
   def self.privacy_features_available?
-    pam_dsl_available?
+    Lyra::Privacy.provider.available?
   end
 
   # Check if PetriFlow is available for formal verification

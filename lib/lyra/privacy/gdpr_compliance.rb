@@ -157,5 +157,55 @@ module Lyra
         }
       end
     end
+
+    # Extend GDPRCompliance with policy integration
+    class GDPRCompliance
+      # Use privacy policy for PII detection if available
+      #
+      # @param attributes [Hash] Attributes to check
+      # @param policy_name [Symbol] Policy name
+      # @param use_detector [Boolean] Fall back to PIIDetector (default: true)
+      #
+      def detect_pii_with_policy(attributes, policy_name, use_detector: true)
+        integration = PolicyIntegration.new(policy_name, use_detector: use_detector)
+        integration.detect_pii(attributes)
+      end
+
+      # Check retention compliance with policy
+      # Returns nil for models without defined retention (infinite/manual)
+      def retention_compliance_with_policy(policy_name)
+        integration = PolicyIntegration.new(policy_name)
+        events = collect_all_events
+
+        events.group_by { |e| e.model_class }.map do |model_class, model_events|
+          retention_duration = integration.retention_duration(model_class)
+
+          # nil means infinite/manual retention - always compliant
+          if retention_duration.nil?
+            {
+              model_class: model_class,
+              total_events: model_events.count,
+              expired_events: 0,
+              retention_period: nil,
+              compliance_status: :manual,
+              expired_event_ids: []
+            }
+          else
+            expired = model_events.select do |event|
+              event.timestamp && event.timestamp < (Time.current - retention_duration)
+            end
+
+            {
+              model_class: model_class,
+              total_events: model_events.count,
+              expired_events: expired.count,
+              retention_period: retention_duration,
+              compliance_status: expired.empty? ? :compliant : :requires_action,
+              expired_event_ids: expired.map(&:event_id)
+            }
+          end
+        end
+      end
+    end
   end
 end
