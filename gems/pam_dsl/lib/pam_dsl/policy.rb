@@ -93,8 +93,11 @@ module PamDsl
     # exception. Audit mode records every violation (logged, and passed to
     # PamDsl.on_violation handlers) and returns false instead of raising.
     # Either way, true means the access is valid. See PamDsl::Enforcement.
+    # Every call, whatever its outcome, goes to PamDsl.access_recorder if
+    # one is set.
     def validate_access!(field_names, purpose_name, subject:)
       violations = access_violations(field_names, purpose_name, subject: subject)
+      PamDsl.record_access(self, field_names, purpose_name, subject, violations)
       return true if violations.empty?
       raise violations.first if enforcement_mode == :strict
 

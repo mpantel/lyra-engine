@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Access log** (`config.record_access_events`, default false; `Lyra::AccessLog`,
+  `Lyra::Events::DataAccessed`, `Lyra::Events::DataAccessDenied`; FEATURE_GAP_PLAN F6) — when on,
+  every access the privacy policy validates (`validate_access!`) is recorded in the subject's
+  access stream (`Lyra::DataAccess$<Model>$<id>`): `DataAccessed` when it went ahead (outcome
+  `granted`, or `audited` with the violations audit mode let through), `DataAccessDenied` when
+  strict mode refused it. Each carries the policy, purpose, legal basis, field names (never
+  values) and outcome; user, request and correlation ids go in the metadata. Every access is
+  recorded, with no sampling; an access the store cannot record does not go ahead. Nothing is
+  recorded in disabled mode, and the record's own stream is untouched. `AccessLog.for(subject)`
+  reads them back. Off by default because reads can outnumber writes by orders of magnitude; the
+  Aegean testbed turns it on with `LYRA_RECORD_ACCESS=1`, which also makes the benchmark's reads
+  validate access, and records it in its benchmark reports. The Article 30 register stays
+  PAM's `article_30_report`, generated from the declared policy.
 - **Privacy stamps on events** (`config.annotate_privacy`, default false; `Lyra::Privacy.stamp`,
   `Lyra::Privacy.stamp_of`; FEATURE_GAP_PLAN F5) — when on, every event that carries an
   attribute the model's privacy policy declares is stamped as it is built with

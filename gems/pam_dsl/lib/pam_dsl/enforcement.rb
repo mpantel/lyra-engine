@@ -28,6 +28,13 @@ module PamDsl
       end
     end
 
+    # One validated access, as passed to PamDsl.access_recorder: the
+    # outcome is :granted (no violation), :audited (violations, let through
+    # in audit mode) or :denied (strict mode, about to raise). +violations+
+    # holds the errors found, in the order validation checks them.
+    Access = Struct.new(:policy, :purpose, :legal_basis, :fields, :subject, :outcome, :violations, :at,
+                        keyword_init: true)
+
     def self.validate_mode!(mode)
       mode = mode&.to_sym
       return mode if MODES.include?(mode)
@@ -68,6 +75,30 @@ module PamDsl
     def report_violation(violation)
       logger.warn(violation.to_s)
       violation_handlers.each { |handler| handler.call(violation) }
+    end
+
+    # Records every validate_access! call, whatever its outcome: an object
+    # answering record?(policy) and call(access), passed an
+    # Enforcement::Access. It runs before validate_access! returns or
+    # raises, and an error it raises propagates, so an access it cannot
+    # record does not go ahead. One recorder per process, set by the host
+    # (Lyra's access log); PamDsl.reset! leaves it in place.
+    attr_accessor :access_recorder
+
+    def record_access(policy, field_names, purpose_name, subject, violations)
+      recorder = access_recorder
+      return unless recorder&.record?(policy)
+
+      outcome = if violations.empty? then :granted
+                elsif policy.enforcement_mode == :strict then :denied
+                else :audited
+                end
+      purpose = policy.purposes[purpose_name.to_sym]
+      recorder.call(Enforcement::Access.new(
+        policy: policy.name, purpose: purpose_name.to_sym, legal_basis: purpose&.legal_basis,
+        fields: Array(field_names).map(&:to_sym), subject: subject, outcome: outcome,
+        violations: violations, at: Time.now
+      ))
     end
   end
 end

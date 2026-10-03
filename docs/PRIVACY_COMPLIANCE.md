@@ -138,6 +138,36 @@ activities = compliance.processing_activities
 # - Number of events
 ```
 
+The organization-wide register comes from the declared policy:
+`PamDsl.reporter(:my_policy).article_30_report` (or `bin/rails pam_dsl:report:article_30`)
+lists each purpose with its legal basis, data categories, consent requirement and retention.
+
+#### Access log (opt-in)
+
+The register says what may be processed and the event stream shows what was written; neither
+records reads. With the access log on, every `validate_access!` call is recorded:
+
+```ruby
+Lyra.configure { |config| config.record_access_events = true } # default false
+
+PamDsl.policy(:my_policy).validate_access!(%i[email], :contact, subject: user)
+Lyra::AccessLog.for(user)
+# => [#<Lyra::Events::DataAccessed data: { policy: "my_policy", purpose: "contact",
+#       legal_basis: "contract", fields: ["email"], subject: "User$5", outcome: "granted", ... }>]
+```
+
+- `DataAccessed`: the access went ahead (`outcome` `"granted"`, or `"audited"` when audit
+  mode let it through; then `violations` lists them).
+- `DataAccessDenied`: strict mode refused it (`violations` lists why).
+- Stream `Lyra::DataAccess$<Model>$<id>` per subject record, never the record's own stream,
+  so replay, DualView and mode transitions are unaffected. Field names only, never values;
+  the user, request and correlation ids are in the metadata.
+- Every access is recorded (no sampling). If the event store cannot record it, the store's
+  error propagates and the access does not go ahead. Nothing is recorded in disabled mode.
+- The log is personal data about the users who read records: cover it in your retention rules.
+- Off by default because reads can outnumber writes by orders of magnitude; the Aegean
+  testbed measures it separately with `LYRA_RECORD_ACCESS=1` (see `BENCHMARKING.md`).
+
 ### 4. Data Lineage Tracking
 
 Track how personal data flows and changes over time:

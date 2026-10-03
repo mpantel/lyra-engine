@@ -32,6 +32,10 @@ module Lyra
     # data it carries (Lyra::Privacy.stamp). Off by default: it adds work to
     # every write, measured separately.
     attr_accessor :annotate_privacy
+    # Record every access the privacy policy validates as an event
+    # (Lyra::AccessLog). Off by default: reads can outnumber writes by orders
+    # of magnitude, so its cost is measured separately.
+    attr_accessor :record_access_events
 
     def initialize
       @mode = :monitor
@@ -66,6 +70,7 @@ module Lyra
       @mode_sync = nil
       @mode_sync_interval = 5
       @annotate_privacy = false
+      @record_access_events = false
     end
 
     # Declare the models to monitor by name, in the initializer, before they

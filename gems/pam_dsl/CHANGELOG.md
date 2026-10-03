@@ -5,6 +5,12 @@ All notable changes to PAM DSL will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Access recorder** (`PamDsl.access_recorder`, `Enforcement::Access`): every
+  `validate_access!` call, whatever its outcome, is passed to the recorder before it returns or
+  raises, as an `Access` (policy, purpose, legal basis, fields, subject, outcome `:granted`,
+  `:audited` or `:denied`, the violations found, time). The recorder answers `record?(policy)`
+  and `call(access)`; an error it raises propagates, so an access it cannot record does not go
+  ahead. One per process, set by the host (Lyra's access log); `PamDsl.reset!` leaves it in place.
 - **Enforcement modes** (`PamDsl.enforcement_mode`, `PamDsl::Enforcement`): `:strict`, the
   default and the behaviour so far, blocks an invalid access by raising its typed exception;
   `:audit` lets it through, records **every** violation found (not only the first), logs each

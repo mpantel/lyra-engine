@@ -72,6 +72,7 @@ if PAM_DSL_AVAILABLE
   require "lyra/privacy/adapters/pam"
   require "lyra/privacy/pii_masker"
   require "lyra/privacy/gdpr_compliance"
+  require "lyra/access_log"
 end
 
 # Schema validation
