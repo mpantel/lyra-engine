@@ -51,6 +51,7 @@ rails console
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
 - **[Performance](docs/PERFORMANCE.md)** - Measured overhead per mode, and how to pick one
 - **[Adopting Lyra](docs/ADOPTION.md)** - What "non-intrusive" means, the costs, and a checklist for a new codebase
+- **[Switching Modes](docs/MODE_TRANSITIONS.md)** - Who holds the mode, and how to switch safely (the deploy-time rule)
 - **[Monorepo Structure](docs/MONOREPO.md)** - Repository organization
 
 ### Theoretical Foundation

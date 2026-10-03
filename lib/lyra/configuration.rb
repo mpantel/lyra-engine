@@ -24,6 +24,10 @@ module Lyra
     # Share of writes checked by DualView after commit (0.0, the default, is
     # off; the thesis suggests 0.01-0.05), and what to call on a discrepancy.
     attr_accessor :dual_view_sample_rate, :dual_view_discrepancy_handler
+    # Keep every process in the application-wide mode (Lyra::ModeSync): nil
+    # (default) follows mode_transition_gate; true; false. Checked at most
+    # every mode_sync_interval seconds.
+    attr_accessor :mode_sync, :mode_sync_interval
 
     def initialize
       @mode = :monitor
@@ -55,6 +59,8 @@ module Lyra
       @mode_transition_certificate_ttl = 3600
       @dual_view_sample_rate = 0.0
       @dual_view_discrepancy_handler = nil
+      @mode_sync = nil
+      @mode_sync_interval = 5
     end
 
     # Declare the models to monitor by name, in the initializer, before they

@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ModeSync: one mode per application** (`Lyra::ModeSync`, `config.mode_sync`,
+  `config.mode_sync_interval`) — the latest switch recorded in `lyra_mode_transitions` is the
+  application's mode; every process adopts a newer one within `mode_sync_interval` seconds
+  (default 5), checking before each web request (Rack middleware), each background job and each
+  write to a monitored model, never inside an open transaction. A runtime switch
+  (`ModeTransition.to!`) used to change only the process that made it. `to!` now logs what the
+  switch reaches. On wherever the Mode Transition Safety gate is (not in the test environment);
+  the raw `config.mode =` setter is left alone. `docs/MODE_TRANSITIONS.md` documents the
+  deploy-time rule.
 - **Mode Transition Safety** (`Lyra::ModeTransition`, `rake lyra:mode:check`; FEATURE_GAP_PLAN F3)
   — a mode switch that changes the authoritative store is allowed only when rows and events
   agree for every monitored record: escalating from Disabled or Monitor to Hijack or event

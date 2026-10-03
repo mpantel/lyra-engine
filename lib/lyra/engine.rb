@@ -51,6 +51,15 @@ module Lyra
         app.config.to_prepare { Lyra.config.apply_declared_models! }
       end
 
+      # Lyra::ModeSync: adopt a mode switched in another process, before each
+      # request and each background job.
+      initializer "lyra.mode_sync" do |app|
+        app.config.middleware.use Lyra::ModeSync::Middleware
+        ActiveSupport.on_load(:active_job) do
+          before_perform { Lyra::ModeSync.maybe_sync! }
+        end
+      end
+
       # config.verify_mapping!: verify at boot, once the models are
       # instrumented; a failure stops the boot.
       initializer "lyra.verify_mapping", after: "lyra.apply_declared_models" do

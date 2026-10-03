@@ -144,6 +144,7 @@ module Lyra
           # methods; prepend ensures ours run first and can call super. The bulk
           # methods are guarded on ActiveRecord::Relation (see Lyra::Engine).
           prepend Lyra::StrictDataAccess
+          prepend Lyra::ModeSync::BeforeWrite
         end
 
         # Override _insert_record to skip SQL INSERT when Lyra signals to skip.

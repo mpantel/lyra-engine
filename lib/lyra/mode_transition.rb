@@ -108,8 +108,26 @@ module Lyra
         end
 
         apply(mode, projection_mode)
-        record_applied(to)
+        id = record_applied(to)
+        ModeSync.seen!(id)
+        announce(from, to)
         report
+      end
+
+      # Switch this process to a recorded label ("hijack",
+      # "event_sourcing/lazy"), without the gate (ModeSync: the process that
+      # recorded it passed the gate).
+      def apply_label(label)
+        mode, projection_mode = label.split("/")
+        apply(mode, projection_mode)
+      end
+
+      # The application-wide mode: { id:, config: } of the latest applied row.
+      def latest_applied
+        return nil unless table_ready?
+
+        row = connection.select_one("SELECT id, to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
+        row && { id: row["id"].to_i, config: row["to_config"] }
       end
 
       # Compare every monitored record's row with its events. Returns a
@@ -159,13 +177,13 @@ module Lyra
         to = current
         last = last_applied
         if last.nil? || last == to || !gate_required?(last, to)
-          record_applied(to)
+          ModeSync.seen!(last == to ? latest_applied&.dig(:id) : record_applied(to))
           return
         end
 
         report = certified_check(last, to)
         if report&.clean? || ENV["LYRA_FORCE_MODE_TRANSITION"].present?
-          record_applied(to)
+          ModeSync.seen!(record_applied(to))
           return
         end
 
@@ -277,13 +295,28 @@ module Lyra
         )
       end
 
+      # Record +to+ as the application-wide mode; returns the row's id.
       def record_applied(to)
-        return unless table_ready?
+        return nil unless table_ready?
 
-        connection.execute(
+        connection.select_value(
           "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at) VALUES " \
-          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)})"
-        )
+          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}) RETURNING id"
+        ).to_i
+      end
+
+      # Say what a switch reaches: with ModeSync, every process within its
+      # interval; without it, this process only.
+      def announce(from, to)
+        message =
+          if ModeSync.enabled?
+            "Lyra: switched the application #{from} -> #{to}; other processes adopt it within " \
+            "#{Lyra.config.mode_sync_interval}s (ModeSync)"
+          else
+            "Lyra: switched this process #{from} -> #{to}. ModeSync is off: other running processes keep " \
+            "their mode until they restart with the new configuration"
+          end
+        Rails.logger.warn(message)
       end
 
       def event_position
