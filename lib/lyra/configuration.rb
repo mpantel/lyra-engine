@@ -10,6 +10,12 @@ module Lyra
     attr_accessor :metadata_proc  # Custom metadata proc for events
     attr_accessor :genesis  # Imported events for pre-existing rows (see Lyra::Genesis)
     attr_reader :monitored_models
+    # Default privacy policy for monitored models that name none of their
+    # own (monitor_with_lyra privacy_policy: ...). See Lyra::Privacy.policy_for.
+    attr_accessor :privacy_policy
+    # Models declared by name (config.models=), instrumented once the
+    # application's code has loaded. { "Name" => options }.
+    attr_reader :declared_models
 
     def initialize
       @mode = :monitor
@@ -37,6 +43,50 @@ module Lyra
       # Genesis: :auto (event-sourcing mode only), true (every event-producing
       # mode) or false. See Lyra::Genesis.
       @genesis = :auto
+    end
+
+    # Declare the models to monitor by name, in the initializer, before they
+    # are loaded:
+    #
+    #   config.models = %w[Order Payment]
+    #   config.models = { "Order" => { event_prefix: "Shop" }, "Payment" => {} }
+    #
+    # Each is given monitor_with_lyra (with its options) once the
+    # application's code has loaded (Lyra::Engine, to_prepare): no model
+    # file is edited. A name that does not resolve fails the boot.
+    def models=(models)
+      @declared_models =
+        case models
+        when Hash then models.to_h { |name, options| [name.to_s, options || {}] }
+        else Array(models).to_h { |name| [name.to_s, {}] }
+        end
+    end
+
+    # Instrument the declared models now. Called by the engine; call it
+    # yourself outside Rails. Returns the model classes.
+    def apply_declared_models!
+      (@declared_models || {}).map do |name, options|
+        model = begin
+          name.constantize
+        rescue NameError
+          raise ArgumentError, "config.models names #{name.inspect}, which is not a loaded class"
+        end
+        model.monitor_with_lyra(options) unless model.respond_to?(:lyra_monitored) && model.lyra_monitored
+        model
+      end
+    end
+
+    # Verify the CRUD-to-event mapping with PetriFlow (Lyra.verify_mapping!).
+    # In the initializer it runs at boot, after the declared models are
+    # instrumented, and a failure stops the boot; called later, it runs now.
+    def verify_mapping!
+      return Lyra.verify_mapping! if Lyra.booted?
+
+      @verify_mapping_at_boot = true
+    end
+
+    def verify_mapping_at_boot?
+      @verify_mapping_at_boot || false
     end
 
     # Register a model for monitoring/hijacking

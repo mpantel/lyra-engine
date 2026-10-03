@@ -140,11 +140,12 @@ module Lyra
         name ? provider.policy(name) : Policy.new
       end
 
-      # The policy named by a monitored model's privacy_policy option.
+      # The policy named by a monitored model's privacy_policy option, or
+      # else the default policy (Lyra.config.privacy_policy).
       def policy_for(model_class)
         config = model_class.respond_to?(:lyra_config) && model_class.lyra_config
         config ||= Lyra.config.model_config(model_class)
-        policy(config&.privacy_policy)
+        policy(config&.privacy_policy || Lyra.config.privacy_policy)
       end
 
       def detector

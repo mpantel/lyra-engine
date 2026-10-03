@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Configuration surface** (FEATURE_GAP_PLAN F2): `config.models = %w[Order Payment]` (or a
+  hash of name => options) declares the monitored models by name in the initializer; once the
+  application's code has loaded, each is given `monitor_with_lyra`, with no model file edited,
+  and a name that does not resolve fails the boot. `config.verify_mapping!` verifies the
+  CRUD-to-event mapping at boot (`Lyra.verify_mapping!`: the PetriFlow lifecycle, mode and
+  bypass nets through `CrudVerifier`, and a table and primary key for every monitored model)
+  and stops the boot with `Lyra::MappingVerificationError` naming each failed check; called
+  after boot it runs at once. `config.privacy_policy = :name` is the default policy for
+  monitored models that name none of their own.
 - **Point-in-time reconstruction** (`Lyra.state_at(model, id, time)`, `Model.as_of(time)`,
   `Lyra::Temporal`) — a record's attributes at a given time, rebuilt by replaying its stream up
   to the last event stored at or before then: `nil` if it did not exist yet or had been

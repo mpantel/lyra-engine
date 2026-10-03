@@ -45,6 +45,21 @@ module Lyra
         end
       end
 
+      # config.models = [...]: instrument the declared models once the
+      # application's code has loaded, and again after each code reload.
+      initializer "lyra.apply_declared_models", after: :load_config_initializers do |app|
+        app.config.to_prepare { Lyra.config.apply_declared_models! }
+      end
+
+      # config.verify_mapping!: verify at boot, once the models are
+      # instrumented; a failure stops the boot.
+      initializer "lyra.verify_mapping", after: "lyra.apply_declared_models" do
+        config.after_initialize do
+          Lyra.booted!
+          Lyra.verify_mapping! if Lyra.config.verify_mapping_at_boot?
+        end
+      end
+
       # Register event classes at startup for RailsEventStore deserialization
       # This ensures Object.const_get() works when reading events from the store
       initializer "lyra.register_event_classes", after: :load_config_initializers do

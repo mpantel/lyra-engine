@@ -142,6 +142,46 @@ module Lyra
     petri_flow_available?
   end
 
+  class MappingVerificationError < StandardError; end
+
+  # Whether the application has finished booting (set by the engine).
+  def self.booted?
+    @booted || false
+  end
+
+  def self.booted!
+    @booted = true
+  end
+
+  # Verify the CRUD-to-event mapping and the monitored models; raise
+  # MappingVerificationError naming every failed check. Runs the PetriFlow
+  # nets (lifecycle, Create/Update/Destroy modes, bypass writes) through
+  # CrudVerifier, and checks that each monitored model has a table and a
+  # primary key. Returns the verifier's report.
+  def self.verify_mapping!
+    unless petri_flow_available?
+      raise MappingVerificationError, "config.verify_mapping! needs the petri_flow gem, which is not installed"
+    end
+
+    report = verify_crud_mapping
+    summary = report[:summary]
+    failures = %i[lifecycle_valid modes_valid all_terminals_reachable deadlock_free bypass_covered]
+               .reject { |check| summary[check] }
+               .map { |check| "#{check} is false" }
+
+    config.monitored_models.each do |model|
+      unless model.table_exists?
+        failures << "#{model.name}: table #{model.table_name} does not exist"
+        next
+      end
+      failures << "#{model.name}: no primary key" if model.primary_key.blank?
+    end
+
+    raise MappingVerificationError, "Lyra mapping verification failed: #{failures.join('; ')}" if failures.any?
+
+    report
+  end
+
   # Run formal verification of CRUD→Event mapping
   # @return [Hash] Verification results
   # @raise [RuntimeError] if PetriFlow is not available
