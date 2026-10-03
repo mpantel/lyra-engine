@@ -111,6 +111,39 @@ module Lyra
         assert_equal 1, stats[:destroyed]
       end
 
+      # Projection must write the table even while reads come from the event
+      # store (projection_mode :disabled, ES-NoProj). Its update and destroy go
+      # through model_class.where(...), which that mode answers from events: a
+      # destroyed record is absent there, so its row was never deleted.
+      def test_rebuild_in_place_while_reads_come_from_events
+        skip_unless_full_integration
+
+        keep = @user_class.new(name: "Keep", email: "keep@example.com")
+        keep.save
+        keep.name = "Keep Updated"
+        keep.save
+        gone = @user_class.new(name: "Gone", email: "gone@example.com")
+        gone.save
+        gone_id = gone.id
+        gone.destroy
+
+        # Corrupt the table: undo the update, resurrect the destroyed row.
+        conn = ActiveRecord::Base.connection
+        table = @user_class.table_name
+        conn.execute("UPDATE #{table} SET name = 'Keep' WHERE id = #{Integer(keep.id)}")
+        conn.execute("INSERT INTO #{table} (id, name, email, created_at, updated_at) " \
+                     "VALUES (#{Integer(gone_id)}, 'Gone', 'gone@example.com', now(), now())")
+
+        Lyra.config.projection_mode = :disabled
+        Lyra::Projections::Rebuild.rebuild(@user_class, truncate: false)
+
+        assert_equal "Keep Updated", conn.select_value("SELECT name FROM #{table} WHERE id = #{Integer(keep.id)}")
+        assert_nil conn.select_value("SELECT id FROM #{table} WHERE id = #{Integer(gone_id)}"),
+                   "the destroyed record's row must be deleted"
+      ensure
+        Lyra.config.projection_mode = :sync
+      end
+
       # =========================================================================
       # Rebuilt state is dual-view consistent
       # =========================================================================

@@ -22,6 +22,15 @@ module Lyra
         # @param operation [Symbol] :create, :update, or :destroy
         # @param result [CommandResult] The result from CommandHandler
         def project(model_class, operation, result)
+          # Projection writes the table, so it must address the table. With
+          # projection_mode :disabled (ES-NoProj), the model's where/all answer
+          # from the event store instead; update and destroy below go through
+          # model_class.where(...), and would then act on event-store records
+          # rather than rows. A record destroyed in the log is absent from
+          # those, so its row was never deleted. Rebuild and AsyncProjectionJob
+          # both project through here, whatever the projection mode.
+          previous = Thread.current[:lyra_bypass_read_override]
+          Thread.current[:lyra_bypass_read_override] = true
           case operation
           when :create
             project_create(model_class, result)
@@ -32,6 +41,8 @@ module Lyra
           else
             raise ArgumentError, "Unknown operation: #{operation}"
           end
+        ensure
+          Thread.current[:lyra_bypass_read_override] = previous
         end
 
         # Insert a new record into the model table

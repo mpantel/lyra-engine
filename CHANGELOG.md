@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Projection wrote through the read-from-events override** (`Lyra::Projections::ModelProjection`)
+  — with `projection_mode :disabled` (ES-NoProj) a monitored model's `where`/`all` answer
+  from the event store. Projection's update and destroy go through
+  `model_class.where(...)`, so they acted on event-store records instead of rows: a
+  record destroyed in the log is absent there, so its row was never deleted.
+  `Rebuild` (`rake lyra:projections:rebuild`) and `AsyncProjectionJob` both project
+  through this path in any mode. Projection now always addresses the table.
 - **`invalidate_all` raised on Solid Cache, and keyed `find_by` replayed every stream**
   (`Lyra::Projections::CachedProjection`) — `invalidate_all` guarded prefix deletion with
   `respond_to?(:delete_matched)`, which every cache store answers true; Solid Cache, the
