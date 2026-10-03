@@ -105,7 +105,15 @@ bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELD
 - `everywhere: true` (`EVERYWHERE=1`) also searches the whole log for the erased values: events
   of other records that copied them are scrubbed, those records' rows get the value replaced
   where they hold it, and each gets an `ErasureApplied`; `result.copies` lists them. The search
-  is a text match on the stored events, then an exact match on each candidate.
+  is a text match on the stored events, then an exact match on each candidate. A value held by
+  more than `max_copies:` other records (default 10) is shared by many people (a city, a
+  placeholder), not a copy of this person's, and is left; `result.shared_values` counts them.
+  Only direct identifiers (fields the policy types as email, phone, identifier, card, payment
+  token, IP address, credential) are searched for in other records: a name, city or postal code
+  can belong to another customer by coincidence, so those are erased in the person's own record
+  only.
+- Rows are written with one `UPDATE` by id, so records the application marks read-only (Solidus
+  freezes an address once an order uses it) are erased too.
 - Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). It is not
   replayed; the stream still replays to the anonymized row.
 - Replacement: `nil` where the column allows it, `"erased:<id>"` for a NOT NULL string column,

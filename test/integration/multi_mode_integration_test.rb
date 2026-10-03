@@ -242,6 +242,10 @@ class MultiModeIntegrationTest < Minitest::Test
       assert_equal "Set directly", Article.find(article.id).body
       assert_equal %w[created], events_for("Article", article.id).map { |e| (e.data[:operation] || e.data["operation"]).to_s }
     end
+  ensure
+    # The guard stayed on Article, and every later test that assigned a body
+    # failed (order-dependent: 11 errors under seed 30170).
+    Article.class_eval { remove_method :body= if method_defined?(:body=, false) }
   end
 
   def test_hijack_mode_captures_events

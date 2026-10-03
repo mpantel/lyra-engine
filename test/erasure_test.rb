@@ -96,11 +96,7 @@ class ErasureTest < Minitest::Test
 
   # everywhere: another record that copied the value, its row and events.
   def test_everywhere_erases_copies_held_by_other_records
-    Object.send(:remove_const, :EraseNote) if defined?(EraseNote)
-    Object.const_set(:EraseNote, Class.new(ActiveRecord::Base) { self.table_name = "articles" })
-    EraseNote.include(Lyra::Interceptors::CrudInterceptor)
-    EraseNote.monitor_with_lyra
-    Lyra.config.monitor_model(EraseNote)
+    note_class
     user = EraseUser.create!(name: "Ann", email: "ann@example.com")
     note = EraseNote.create!(title: "Contact", body: "ann@example.com")
     unrelated = EraseNote.create!(title: "Other", body: "bob@example.com")
@@ -116,6 +112,34 @@ class ErasureTest < Minitest::Test
     assert_nil MT.discrepancy(EraseNote, note.id.to_s), "the copy's stream still replays to its row"
   ensure
     ActiveRecord::Base.connection.execute("DELETE FROM articles")
+  end
+
+  # A value held by many other records is shared, not a copy: erasing it
+  # everywhere erased everyone's (a replay's placeholder took every address).
+  def test_everywhere_leaves_a_value_many_records_share
+    note_class
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    3.times { |i| EraseNote.create!(title: "Shared #{i}", body: "ann@example.com") }
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", everywhere: true, max_copies: 2)
+
+    assert_equal 1, result.shared_values, "the email, held by three other records"
+    assert_empty result.copies
+  ensure
+    ActiveRecord::Base.connection.execute("DELETE FROM articles")
+  end
+
+  # Another customer can share a name or a postal code by coincidence: only
+  # direct identifiers (email, phone, ids, ...) are searched for elsewhere.
+  def test_everywhere_does_not_take_a_name_another_record_shares
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    other = EraseUser.create!(name: "Ann", email: "other@example.com")
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", everywhere: true)
+
+    assert_empty result.copies
+    assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{other.id}")
+    assert_equal "erased:#{user.id}", raw("SELECT name FROM users WHERE id = #{user.id}"), "the person's own is erased"
   end
 
   def test_es_noproj_the_events_are_the_record
@@ -137,6 +161,17 @@ class ErasureTest < Minitest::Test
     assert_equal "erased:#{user.id}", raw("SELECT email FROM users WHERE id = #{user.id}")
   end
 
+  # Solidus freezes an address once an order uses it; update_columns refused it.
+  def test_a_record_the_application_marks_read_only_is_erased_too
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    EraseUser.class_eval { def readonly? = persisted? }
+
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+    assert_equal "erased:#{user.id}", raw("SELECT email FROM users WHERE id = #{user.id}")
+  ensure
+    EraseUser.class_eval { remove_method :readonly? }
+  end
+
   def test_nothing_to_erase_without_a_policy_or_fields
     monitor
     user = EraseUser.create!(name: "Ann", email: "ann@example.com")
@@ -145,6 +180,14 @@ class ErasureTest < Minitest::Test
   end
 
   private
+
+  def note_class
+    Object.send(:remove_const, :EraseNote) if defined?(EraseNote)
+    Object.const_set(:EraseNote, Class.new(ActiveRecord::Base) { self.table_name = "articles" })
+    EraseNote.include(Lyra::Interceptors::CrudInterceptor)
+    EraseNote.monitor_with_lyra
+    Lyra.config.monitor_model(EraseNote)
+  end
 
   def monitor(**options)
     EraseUser.monitor_with_lyra(**options)

@@ -22,6 +22,9 @@ All notable changes to PAM DSL will be documented in this file.
   `Policy#access_violations` returns them all without raising. `PamDsl.reset!` also resets the
   mode and the handlers.
 
+### Fixed
+- `PamDsl.reporter` dropped the `output:` option, so reports always went to standard output.
+
 ## [0.8.0] - 2026-06-15
 
 ### Changed

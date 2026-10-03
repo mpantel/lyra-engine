@@ -46,11 +46,16 @@ class PrivacyStampTest < Minitest::Test
     end
   end
 
-  def test_an_update_is_stamped_with_the_attributes_it_changed
+  # Monitor's update event carries the whole row as well as the change:
+  # every declared attribute it carries is annotated, not only the changed.
+  def test_an_update_is_stamped_with_every_declared_attribute_it_carries
     user = StampUser.create!(name: "Ann", email: "ann@example.com")
     user.update!(name: "Anna")
 
-    assert_equal %w[name], privacy_of(stream(user).last)["fields"].keys
+    event = stream(user).last
+    carried = (event.data[:attributes] || {}).keys.map(&:to_s) | (event.data[:changes] || {}).keys.map(&:to_s)
+    assert_equal carried & %w[email name], privacy_of(event)["fields"].keys.sort
+    assert_includes privacy_of(event)["fields"].keys, "name"
   end
 
   def test_a_destroy_is_stamped_with_what_it_carries

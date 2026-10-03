@@ -37,10 +37,23 @@ module Lyra
 
     class Unsupported < StandardError; end
 
-    Result = Struct.new(:model, :id, :fields, :events_rewritten, :row_erased, :copies, keyword_init: true)
+    # Other records holding a value, beyond which it is taken to be shared by
+    # many people (a city, a placeholder) rather than a copy of this one's.
+    MAX_COPIES = 10
+
+    # The PAM types searched for in other records: direct identifiers, whose
+    # copy elsewhere is this person's. A name, a city or a postal code is a
+    # quasi-identifier: another customer can share it by coincidence (on the
+    # Olist replay, erasing one customer's postal code erased two other
+    # customers' addresses). Those are erased in the person's own record only.
+    IDENTIFYING_TYPES = %i[email phone identifier ssn credit_card financial payment_token ip_address
+                           credential token].freeze
+
+    Result = Struct.new(:model, :id, :fields, :events_rewritten, :row_erased, :copies, :shared_values,
+                        keyword_init: true)
 
     class << self
-      def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false)
+      def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false, max_copies: MAX_COPIES)
         stream = "#{model.name}$#{id}"
         events = Lyra.config.event_store.read.stream(stream).to_a
         personal = (fields || personal_fields(model, events)).map(&:to_s).uniq
@@ -50,6 +63,7 @@ module Lyra
         rewritten = []
         row_erased = false
         copies = []
+        shared = []
 
         PurposeBoundReads.internal do
           model.transaction do
@@ -59,13 +73,15 @@ module Lyra
             Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
             row_erased = erase_row(model, id, replacements)
             record_erasure(model, id, stream, personal, reason, erased_by)
-            copies = erase_copies(model, id, stream, originals, replacements, reason, erased_by) if everywhere
+            if everywhere
+              copies, shared = erase_copies(model, id, stream, originals, replacements, reason, erased_by, max_copies)
+            end
           end
         end
         forget_cached(model, id)
 
         Result.new(model: model.name, id: id, fields: personal, events_rewritten: rewritten.size,
-                   row_erased: row_erased, copies: copies)
+                   row_erased: row_erased, copies: copies, shared_values: shared)
       end
 
       private
@@ -166,14 +182,25 @@ module Lyra
         return false unless row
 
         columns = replacements.slice(*row.attribute_names)
-        Lyra.projection_write { row.update_columns(columns) } if columns.any?
+        write_columns(model, id, columns)
         true
       end
 
       # everywhere: events of other streams holding the erased values, and
-      # the rows of the monitored records they belong to.
-      def erase_copies(origin, origin_id, origin_stream, originals, replacements, reason, erased_by)
-        return [] if originals.empty?
+      # the rows of the monitored records they belong to. Returns [records
+      # erased, values left as shared]. A value held by more than
+      # +max_copies+ other records is shared by many people, not a copy of
+      # this one's: erasing it everywhere erased everyone's (a replay's
+      # placeholder address took all 1,954 addresses with it). It is left,
+      # and reported.
+      def erase_copies(origin, origin_id, origin_stream, originals, replacements, reason, erased_by, max_copies)
+        return [[], []] if originals.empty?
+
+        policy = Lyra::Privacy.policy_for(origin)
+        originals = originals.select { |_value, field| IDENTIFYING_TYPES.include?(policy.annotation(field)&.type&.to_sym) }
+        shared = originals.keys.select { |value| holders(value, origin_stream) > max_copies }
+        originals = originals.except(*shared)
+        return [[], shared.size] if originals.empty?
 
         candidates = events_mentioning(originals.keys).reject { |event| streams_of(event).include?(origin_stream) }
         by_record = candidates.group_by { |event| record_of(event) }
@@ -194,7 +221,18 @@ module Lyra
                          "#{reason} (copies of #{origin.name} #{origin_id})", erased_by)
           forget_cached(model, id)
           "#{model.name} #{id}"
-        end
+        end.then { |copies| [copies, shared.size] }
+      end
+
+      # How many streams other than +origin_stream+ hold +value+ (text match).
+      def holders(value, origin_stream)
+        conn = ActiveRecord::Base.connection
+        conn.select_value(<<~SQL.squish).to_i
+          SELECT count(DISTINCT s.stream) FROM event_store_events e
+          JOIN event_store_events_in_streams s ON s.event_id = e.event_id
+          WHERE convert_from(e.data, 'UTF8') LIKE #{conn.quote("%#{ActiveRecord::Base.sanitize_sql_like(value)}%")}
+            AND s.stream <> #{conn.quote(origin_stream)}
+        SQL
       end
 
       def events_mentioning(values)
@@ -233,8 +271,18 @@ module Lyra
 
           acc[column] = replacement_for(model, id, column, replacements[originals[value]])
         end
-        Lyra.projection_write { row.update_columns(columns) } if columns.any?
+        write_columns(model, id, columns)
         columns.keys
+      end
+
+      # The replacements, written to the row as Lyra's own write (no bypass
+      # event: the events were rewritten above). One UPDATE by id, so a record
+      # the application marks read-only is erased too (Solidus freezes an
+      # address once an order uses it, and update_columns refused it).
+      def write_columns(model, id, columns)
+        return if columns.empty?
+
+        Lyra.projection_write { model.unscoped.where(model.primary_key => id).update_all(columns) }
       end
 
       def events_only?

@@ -22,7 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replaces an erased value wherever the record's events copy it under another name (a payload's
   `payer_email`). `everywhere: true` (`EVERYWHERE=1`) searches the whole log for the values:
   other records' events are scrubbed, their rows get the value replaced where they hold it, and
-  each gets an `ErasureApplied`; `Result#copies` lists them.
+  each gets an `ErasureApplied`; `Result#copies` lists them. A value held by more than
+  `max_copies` other records (default 10) is shared by many people, not a copy, and is left
+  (`Result#shared_values` counts them): on the Olist replay a placeholder address shared by
+  every customer took all 1,954 addresses with it. Only direct identifiers (the policy's email,
+  phone, identifier, card, payment-token, IP, credential types) are searched for in other
+  records: a name, city or postal code can be another customer's by coincidence (erasing one
+  Olist customer's postal-code prefix took two other customers' addresses). Erasure writes rows with one `UPDATE` by id,
+  so a record the application marks read-only (a Solidus address once an order uses it) is
+  erased too.
 - **Purpose-bound `pluck` and `pick`** — checked by the declared attributes they name (also
   inside SQL fragments), with the model (`"Registration$*"`) as subject, so a purpose whose
   consent the policy requires refuses them.
@@ -84,8 +92,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attribute the model's privacy policy declares is stamped as it is built with
   `metadata[:privacy]`: the policy's name and, per attribute, its type, sensitivity, allowed
   purposes, retention period (ISO 8601) and the contexts it has a transformation for — never a
-  value. A create, import or destroy annotates the attributes it carries; an update the ones it
-  changed. All four places events are built stamp them: Monitor, the command handler (Hijack,
+  value. Every declared attribute the event carries is annotated: a create's, import's or
+  destroy's attributes, and an update's changes together with the whole row Monitor also records
+  (annotating only the changes left 28,374 of an Olist replay's events carrying personal data
+  unannotated). All four places events are built stamp them: Monitor, the command handler (Hijack,
   event sourcing, and so domain events), bypass events and Genesis imports. The stamp records the
   policy as it was when the data was written, unlike `annotations_for`, which reads today's
   policy; `stamp_of(event)` reads it back with string keys. Off by default because it adds work
@@ -315,6 +325,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **A test left a guard on `Article#body=`** (`multi_mode_integration_test`), failing 11 later
+  tests under some seeds; it now removes it.
 - **ES-NoProj answers more queries exactly instead of refusing them** — scopes with `order` or
   `limit` (their conditions, then the order and limit); `relation.or(other)` over the same model
   (the union); and `where` fragments of `col OP ?` terms joined all by AND or all by OR, with OP

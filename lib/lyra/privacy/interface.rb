@@ -206,10 +206,13 @@ module Lyra
         policy = policy_for(model_class)
         return metadata unless policy.loaded?
 
-        operation = (data[:operation] || data["operation"]).to_s
         attributes = data[:attributes] || data["attributes"] || {}
         changes = data[:changes] || data["changes"] || {}
-        touched = operation.start_with?("update") ? changes.keys : (attributes.keys | changes.keys)
+        # Every declared attribute the event carries: an update's own changes
+        # and, in Monitor, the whole row it also carries. Stamping only the
+        # changes left 28,374 of the Olist replay's events carrying personal
+        # data unannotated, against Theorem 3's premise.
+        touched = attributes.keys | changes.keys
 
         fields = touched.each_with_object({}) do |field, acc|
           annotation = policy.annotation(field)

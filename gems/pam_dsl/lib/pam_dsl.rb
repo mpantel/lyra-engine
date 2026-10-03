@@ -87,7 +87,8 @@ module PamDsl
         policy_name,
         organization: options[:organization] || rails_config&.organization,
         dpo_contact: options[:dpo_contact] || rails_config&.dpo_contact,
-        event_store: options[:event_store]
+        event_store: options[:event_store],
+        output: options[:output]
       )
     end
   end
