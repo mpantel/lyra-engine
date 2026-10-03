@@ -97,7 +97,7 @@ module Lyra
         previous_state = state.dup
 
         case event_operation(event)
-        when :created
+        when :created, :imported
           state = event_attributes(event).dup
         when :updated
           event_changes(event).each { |k, (old, new)| state[k] = new }

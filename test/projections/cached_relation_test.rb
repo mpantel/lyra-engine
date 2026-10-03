@@ -15,6 +15,10 @@ class CachedRelationTest < Minitest::Test
       @amount = attrs[:amount]
     end
 
+    def read_attribute(name)
+      public_send(name)
+    end
+
     def inspect
       "#<MockRecord id=#{id}, name=#{name}>"
     end
@@ -36,6 +40,18 @@ class CachedRelationTest < Minitest::Test
 
     def self.connection
       nil
+    end
+
+    def self.table_name
+      "mock_models"
+    end
+
+    def self.column_names
+      %w[id name status active amount]
+    end
+
+    def self.type_for_attribute(name)
+      Struct.new(:type).new(name.to_s == "active" ? :boolean : (%w[id amount].include?(name.to_s) ? :integer : :string))
     end
 
     # Simulate AR model responding to scopes

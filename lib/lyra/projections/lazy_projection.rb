@@ -182,7 +182,7 @@ module Lyra
 
         def operation_of(event)
           case (event.data[:operation] || event.data["operation"]).to_s
-          when "created", "create" then :create
+          when "created", "create", "imported" then :create
           when "updated", "update" then :update
           when "destroyed", "destroy" then :destroy
           end

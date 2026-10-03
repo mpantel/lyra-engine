@@ -32,4 +32,26 @@ namespace :lyra do
       puts "Done."
     end
   end
+
+  desc "Give rows that predate Lyra their Imported events, ahead of first use " \
+       "(MODEL=Namespace::Model[,Other] for specific models, or all monitored models)"
+  task genesis: :environment do
+    models =
+      if ENV["MODEL"]
+        ENV["MODEL"].split(",").map { |name| name.strip.constantize }
+      else
+        Lyra.config.monitored_models
+      end
+
+    if models.empty?
+      puts "No models to import."
+      puts "Pass MODEL=YourModel, or configure models with Lyra.config.monitor_model(YourModel)."
+      exit 1
+    end
+
+    models.each do |model_class|
+      puts format("  %-30s %6d rows imported", model_class.name, Lyra::Genesis.import_all(model_class))
+    end
+    puts "Done."
+  end
 end

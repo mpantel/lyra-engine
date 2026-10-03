@@ -267,7 +267,7 @@ module Lyra
 
           events.each do |event|
             case event.event_type
-            when /Created$/
+            when /Created$/, /Imported$/
               event_attrs = event.data[:attributes] || event.data["attributes"] || {}
               attributes.merge!(stringify_keys(event_attrs))
             when /Updated$/

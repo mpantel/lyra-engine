@@ -33,7 +33,7 @@ module Lyra
 
       events.each do |event|
         case event_operation(event)
-        when :created
+        when :created, :imported
           state = event_attributes(event)
         when :updated
           state.merge!(event_changes(event).transform_values { |v| v.last })

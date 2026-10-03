@@ -12,6 +12,9 @@ module Lyra
     #   EventStoreReader.find_by(User, email: "test@example.com")
     #   EventStoreReader.where(User, status: "active")
     #
+    # Every read first runs Genesis.first_use: on the model's first read in the
+    # process, rows that predate Lyra get their Imported events, so the answer
+    # -- aggregates included -- comes from streams alone and covers them.
     class EventStoreReader
       class << self
         # Find a record by ID (cached)
@@ -20,6 +23,7 @@ module Lyra
         # @param id [Integer, String] The record ID
         # @return [ActiveRecord::Base, nil] The reconstructed record or nil
         def find(model_class, id)
+          Genesis.first_use(model_class)
           attributes = CachedProjection.find(model_class, id)
           return nil unless attributes
 
@@ -32,6 +36,7 @@ module Lyra
         # @param attributes [Hash] The attributes to match
         # @return [ActiveRecord::Base, nil] The first matching record or nil
         def find_by(model_class, attributes)
+          Genesis.first_use(model_class)
           result = CachedProjection.find_by(model_class, attributes)
           return nil unless result
 
@@ -44,6 +49,7 @@ module Lyra
         # @param id [Integer, String] The record ID
         # @return [Boolean] True if record exists and is not destroyed
         def exists?(model_class, id)
+          Genesis.first_use(model_class)
           CachedProjection.exists?(model_class, id)
         end
 
@@ -52,6 +58,7 @@ module Lyra
         # @param model_class [Class] The ActiveRecord model class
         # @return [CachedRelation] A relation-like object for chaining
         def relation(model_class)
+          Genesis.first_use(model_class)
           results = CachedProjection.all(model_class)
           records = results.map { |attrs| build_instance(model_class, attrs) }.compact
           CachedRelation.new(model_class, records)
@@ -81,6 +88,7 @@ module Lyra
         # @param conditions [Hash] Optional conditions
         # @return [Integer] Count of matching records
         def count(model_class, conditions = {})
+          Genesis.first_use(model_class)
           CachedProjection.count(model_class, conditions)
         end
 

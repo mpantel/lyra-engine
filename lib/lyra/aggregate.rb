@@ -96,7 +96,7 @@ module Lyra
     def extract_operation(event_name)
       # Match common operation suffixes
       case event_name
-      when /_created$/
+      when /_created$/, /_imported$/
         "created"
       when /_updated$/
         "updated"

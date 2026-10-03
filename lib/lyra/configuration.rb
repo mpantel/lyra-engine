@@ -8,6 +8,7 @@ module Lyra
     attr_accessor :strict_schema, :schema_path
     attr_accessor :strict_data_access  # Raise on callback-bypassing operations
     attr_accessor :metadata_proc  # Custom metadata proc for events
+    attr_accessor :genesis  # Imported events for pre-existing rows (see Lyra::Genesis)
     attr_reader :monitored_models
 
     def initialize
@@ -30,6 +31,9 @@ module Lyra
       # User tracking - custom metadata proc called for every event
       # Signature: ->(record, operation) { { user_id: ..., ... } }
       @metadata_proc = nil
+      # Genesis: :auto (event-sourcing mode only), true (every event-producing
+      # mode) or false. See Lyra::Genesis.
+      @genesis = :auto
     end
 
     # Register a model for monitoring/hijacking

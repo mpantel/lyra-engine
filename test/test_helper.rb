@@ -126,6 +126,8 @@ module LyraConfigIsolation
 
     def install_fresh_config
       Lyra.instance_variable_set(:@config, fresh_config) if baseline
+      # Genesis remembers which models it imported; that memory is per test too.
+      Lyra::Genesis.reset! if defined?(Lyra::Genesis)
     end
   end
 

@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Genesis: event streams for rows that predate Lyra** (`Lyra::Genesis`,
+  `config.genesis`, `rake lyra:genesis`) — a row written before Lyra was enabled had no
+  stream, so its first `Updated` event started a stream with no head, and DualView,
+  `Rebuild` and ES-NoProj reads saw the record wrongly or not at all. On a model's first
+  use in a process (its first write, or in ES-NoProj its first read or aggregate), every
+  row without a stream now gets one `Imported` event holding the row as it is. `Imported`
+  is replayed like `Created` everywhere state is rebuilt. Later uses cost nothing; when
+  every row already has a stream the check is one query and takes no lock. The import
+  runs under a per-model advisory lock on a connection of its own, so a long caller
+  transaction does not block other first uses and a caller's rollback does not undo it.
+  `config.genesis`: `:auto` (default, event-sourcing mode only), `true` (also Monitor and
+  Hijack) or `false`. `rake lyra:genesis MODEL=...` imports ahead of time for large tables.
+- **ES-NoProj SQL aggregates computed from streams only, with SQL semantics** —
+  `count(column)`, `sum`, `average`, `minimum`, `maximum` and `calculate` on an ES-NoProj
+  relation run over the records rebuilt from streams (rows that predate Lyra included, via
+  Genesis). `sum` used to go through `to_f` (losing decimal precision) and now keeps the
+  column's type, returning 0 over no rows; `average` returns a `BigDecimal` for integer and
+  decimal columns, as ActiveRecord does; `count(column)` counts non-NULL values, where it
+  used `present?` and dropped `""` and `false`. An SQL expression (`sum("price * qty")`)
+  raises `UnsupportedQuery` instead of being guessed. Known difference: `average` keeps
+  every digit of the quotient, while PostgreSQL rounds a numeric `AVG` to about 16
+  significant digits.
 - **ES-Lazy: event sourcing that projects on read** (`projection_mode :lazy`, in
   event-sourcing mode; `Lyra::Projections::LazyProjection`, `Lyra::Interceptors::LazyReads`)
   — writes store events only, as in ES-NoProj; before any database read, the tables are

@@ -26,7 +26,7 @@ module Lyra
           Lyra.config.monitored_models.each do |model_class|
             config = Lyra.config.model_config(model_class)
 
-            [:created, :updated, :destroyed].each do |operation|
+            [:created, :updated, :destroyed, :imported].each do |operation|
               event_name = config.event_name_for(operation)
               ensure_event_class_exists(event_name)
             end

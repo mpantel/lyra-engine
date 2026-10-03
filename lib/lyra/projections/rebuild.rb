@@ -100,7 +100,7 @@ module Lyra
         # Map an event type to a CRUD operation. Unknown event types are skipped.
         def operation_for(event)
           case event.event_type.to_s
-          when /Created$/   then :create
+          when /Created$/, /Imported$/ then :create
           when /Updated$/   then :update
           when /Destroyed$/ then :destroy
           end

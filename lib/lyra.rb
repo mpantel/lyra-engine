@@ -46,6 +46,7 @@ require "lyra/projections/cached_projection"
 require "lyra/projections/cached_relation"
 require "lyra/projections/event_store_reader"
 require "lyra/projections/lazy_projection"
+require "lyra/genesis"
 
 # Event-aware associations
 require "lyra/associations/event_aware"

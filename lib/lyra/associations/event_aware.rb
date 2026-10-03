@@ -119,7 +119,7 @@ module Lyra
             operation = data[:operation] || data["operation"]
 
             case operation&.to_sym
-            when :created
+            when :created, :imported
               state.merge!(data[:attributes] || data["attributes"] || {})
             when :updated
               changes = data[:changes] || data["changes"] || {}

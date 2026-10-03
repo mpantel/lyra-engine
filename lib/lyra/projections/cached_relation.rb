@@ -69,13 +69,15 @@ module Lyra
         size
       end
 
+      # COUNT(*) or COUNT(column): SQL counts the non-NULL values of a column,
+      # so "" and false count (present? would drop them).
       def count(column_name = nil, &block)
         if block_given?
           @records.count(&block)
-        elsif column_name
-          @records.count { |r| r.send(column_name).present? }
-        else
+        elsif column_name.nil? || [:all, "*"].include?(column_name) || column_name.to_s == "all"
           @records.size
+        else
+          aggregate_values(column_name).size
         end
       end
 
@@ -470,28 +472,54 @@ module Lyra
       # Aggregations
       # =========================================================================
 
+      # Aggregates follow SQL (and ActiveRecord's casting of its results), and
+      # are computed from the records the streams produce, never the table:
+      # - NULLs are ignored; SUM of nothing is 0, AVG/MIN/MAX of nothing nil.
+      # - SUM keeps the column's type (Integer, BigDecimal, Float); there is
+      #   no rounding through Float. AVG is a BigDecimal for integer and
+      #   decimal columns and a Float for float columns, as ActiveRecord
+      #   returns them.
+      # - Only plain columns: an SQL expression ("price * quantity") cannot be
+      #   evaluated here and raises UnsupportedQuery.
+      # AVG keeps more digits than the database, which rounds a numeric
+      # quotient to its own scale (PostgreSQL: about 16 significant digits).
+      # MIN/MAX on strings compare by Ruby's byte order, which can differ from
+      # the database collation.
       def sum(column_name = nil, &block)
-        if block_given?
-          @records.sum(&block)
-        elsif column_name
-          @records.sum { |r| r.send(column_name).to_f }
-        else
-          0
-        end
+        return @records.sum(&block) if block_given?
+        return 0 unless column_name
+
+        aggregate_values(column_name).sum(0)
       end
 
       def average(column_name)
-        values = @records.map { |r| r.send(column_name) }.compact
+        values = aggregate_values(column_name)
         return nil if values.empty?
-        values.sum.to_f / values.size
+
+        if %i[integer decimal].include?(column_type(column_name))
+          values.sum(0).to_d / values.size
+        else
+          values.sum(0).to_f / values.size
+        end
       end
 
       def minimum(column_name)
-        @records.map { |r| r.send(column_name) }.compact.min
+        aggregate_values(column_name).min
       end
 
       def maximum(column_name)
-        @records.map { |r| r.send(column_name) }.compact.max
+        aggregate_values(column_name).max
+      end
+
+      def calculate(operation, column_name = nil)
+        case operation.to_s
+        when "count" then count(column_name)
+        when "sum" then sum(column_name)
+        when "average", "avg" then average(column_name)
+        when "minimum", "min" then minimum(column_name)
+        when "maximum", "max" then maximum(column_name)
+        else raise UnsupportedQuery.new(model_class, "calculate(#{operation.inspect})")
+        end
       end
 
       def pluck(*column_names)
@@ -731,6 +759,24 @@ module Lyra
       end
 
       private
+
+      # The non-NULL values of a plain column, typed by the model's attribute.
+      def aggregate_values(column_name)
+        column = aggregate_column(column_name)
+        @records.map { |record| record.read_attribute(column) }.compact
+      end
+
+      def aggregate_column(column_name)
+        name = column_name.to_s.delete('"')
+        name = name.delete_prefix("#{model_class.table_name}.")
+        return name if model_class.column_names.include?(name)
+
+        raise UnsupportedQuery.new(model_class, "an aggregate over #{column_name.inspect}")
+      end
+
+      def column_type(column_name)
+        model_class.type_for_attribute(aggregate_column(column_name)).type
+      end
 
       # Re-derives a real, scoped AR relation from this relation's own
       # (already-filtered) records and runs the mutation on exactly that set.

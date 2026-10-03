@@ -17,6 +17,7 @@ module Lyra
     # transaction rolls back (throw(:abort) is not caught inside the block).
     module WriteHooks
       def _create_record(*args)
+        lyra_genesis_first_use
         return super unless lyra_takes_over_write_here?
         return false unless lyra_hijack_mode? ? lyra_hijack_create : lyra_prepare_event_source_create
 
@@ -29,6 +30,7 @@ module Lyra
       end
 
       def _update_record(*)
+        lyra_genesis_first_use
         return super unless lyra_takes_over_write_here?
         return false unless lyra_hijack_mode? ? lyra_hijack_update : lyra_prepare_event_source_update
 
@@ -36,6 +38,7 @@ module Lyra
       end
 
       def destroy
+        lyra_genesis_first_use
         return super unless lyra_takes_over_write_here? && persisted?
         return false unless lyra_hijack_mode? ? lyra_hijack_destroy : lyra_prepare_event_source_destroy
 
@@ -43,6 +46,15 @@ module Lyra
       end
 
       private
+
+      # Before the model's first write in this process, give its pre-existing
+      # rows their Imported events (Lyra::Genesis), so this write's event never
+      # starts a stream without a head.
+      def lyra_genesis_first_use
+        return unless respond_to?(:lyra_events_enabled?, true) && lyra_events_enabled?
+
+        Lyra::Genesis.first_use(self.class)
+      end
 
       def lyra_takes_over_write_here?
         respond_to?(:lyra_takes_over_write?, true) && lyra_takes_over_write?
