@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ES-NoProj joins, evaluated in memory** (`Lyra::Projections::CachedJoins`) — `joins`,
+  `left_joins`/`left_outer_joins`, `where.missing` and `where.associated` on `belongs_to`,
+  `has_many` and `has_one` associations, with hash conditions on the joined table
+  (`where(programs: { available: true })`, by table or association name), used to raise
+  `UnsupportedQuery`. They are now evaluated as SQL would: a joined relation holds rows of a
+  record and its partners; an inner join drops records without a partner; a `has_many` join
+  repeats the record per partner (so `count` agrees, and `distinct` removes the repeats); a
+  missing left-join partner behaves like NULL, including under `where.not`. Partners come from
+  the joined model's streams if it is an ES-NoProj model, otherwise from one SQL query on its
+  table. Still refused: SQL-string, nested, `:through`, polymorphic and scoped joins, a
+  condition on a table not joined first, and `merge` with an arbitrary relation (so Solidus
+  still needs ES-Lazy). `where` with no arguments now returns the where-chain, as in
+  ActiveRecord.
 - **Privacy provider interface** (`Lyra::Privacy`) — `Policy` (declared attributes and their
   `Annotation`s), `Detector` (name-based PII heuristic) and `Provider`, with null defaults when
   no provider is installed. PAM is an adapter (`Lyra::Privacy::Adapters::Pam`), loaded when

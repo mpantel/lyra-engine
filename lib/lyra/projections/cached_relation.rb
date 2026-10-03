@@ -33,6 +33,7 @@ module Lyra
     #
     class CachedRelation
       include Enumerable
+      include CachedJoins
 
       attr_reader :model_class, :records
 
@@ -182,28 +183,47 @@ module Lyra
       # Query methods (return new CachedRelation for chaining)
       # =========================================================================
 
-      def where(conditions = nil, *args)
+      # where with no arguments returns the chain (where.not, where.missing,
+      # where.associated), as ActiveRecord's does; where(nil) is a no-op.
+      def where(*args)
+        return WhereChain.new(self) if args.empty? || args.first == :chain
+
+        conditions = args.first
         return self if conditions.nil?
 
-        # Handle where.not(...) chain
-        return WhereChain.new(self) if conditions == :chain
+        check_hash_conditions!(conditions, "where(#{args.inspect[1..-2][0, 60]})")
+        raise UnsupportedQuery.new(model_class, "where(#{args.inspect[1..-2][0, 60]})") if args.size > 1
 
-        check_hash_conditions!(conditions, "where(#{conditions.inspect[0, 60]})")
-        conditions = AssociationConditions.rewrite(model_class, conditions)
-        filtered = @records.select do |record|
-          conditions.all? { |key, value| matches_value?(record, key, value) }
+        own, joined = split_joined_conditions(conditions)
+        own = AssociationConditions.rewrite(model_class, own)
+        filter_rows do |record, joins|
+          own.all? { |key, value| matches_value?(record, key, value) } && joined_match(joins, joined) == true
         end
-
-        self.class.new(model_class, filtered)
       end
 
+      # SQL's NOT: a row is kept only when its conditions are definitely
+      # false. One with a missing left-join partner under a condition on the
+      # joined table is unknown (NULL), and is excluded, as SQL excludes it.
       def not(conditions)
         check_hash_conditions!(conditions, "where.not(#{conditions.inspect[0, 60]})")
-        conditions = AssociationConditions.rewrite(model_class, conditions)
-        filtered = @records.reject do |record|
-          conditions.all? { |key, value| matches_value?(record, key, value) }
+        own, joined = split_joined_conditions(conditions)
+        own = AssociationConditions.rewrite(model_class, own)
+        filter_rows do |record, joins|
+          own_match = own.all? { |key, value| matches_value?(record, key, value) }
+          combine_and(own_match, joined_match(joins, joined)) == false
         end
-        self.class.new(model_class, filtered)
+      end
+
+      # where.missing(:assoc): records with no partner (a left join).
+      def where_missing(*associations)
+        names = associations.flatten.map(&:to_sym)
+        left_joins(*names).send(:filter_rows) { |_record, joins| names.all? { joins[_1].nil? } }
+      end
+
+      # where.associated(:assoc): records with a partner (an inner join,
+      # so a has_many repeats the record per partner, as ActiveRecord does).
+      def where_associated(*associations)
+        joins(*associations)
       end
 
       def order(*args)
@@ -312,20 +332,6 @@ module Lyra
 
       def references(*args)
         self
-      end
-
-      # A join changes which records match (an inner join drops records with
-      # no partner, an outer join can repeat them), so it cannot be ignored.
-      def joins(*args)
-        raise UnsupportedQuery.new(model_class, "joins(#{args.inspect[1..-2]})")
-      end
-
-      def left_joins(*args)
-        raise UnsupportedQuery.new(model_class, "left_joins(#{args.inspect[1..-2]})")
-      end
-
-      def left_outer_joins(*args)
-        raise UnsupportedQuery.new(model_class, "left_outer_joins(#{args.inspect[1..-2]})")
       end
 
       # =========================================================================
@@ -745,12 +751,18 @@ module Lyra
         {}
       end
 
-      # Conditions must be a hash of this model's own attributes. A SQL
-      # fragment, an Arel node or a condition on another table cannot be
-      # evaluated against cached records, and ignoring it would widen the answer.
+      # Conditions must be a hash: of this model's own attributes, or of a
+      # table joined before (see CachedJoins). A SQL fragment or an Arel node
+      # cannot be evaluated against cached records, and ignoring it would
+      # widen the answer.
       def check_hash_conditions!(conditions, what)
         raise UnsupportedQuery.new(model_class, what) unless conditions.is_a?(Hash)
-        raise UnsupportedQuery.new(model_class, what) if conditions.values.any? { |v| v.is_a?(Hash) }
+      end
+
+      # Keep the rows the block accepts, as a joined relation if this is one.
+      def filter_rows(&block)
+        rows = joined_rows.select { |record, joins| block.call(record, joins) }
+        @joins ? with_rows(rows, @joins) : self.class.new(model_class, rows.map(&:first))
       end
 
       def extract_predicate_value(node)
@@ -960,11 +972,11 @@ module Lyra
         end
 
         def missing(*associations)
-          raise UnsupportedQuery.new(@relation.model_class, "where.missing(#{associations.inspect[1..-2]})")
+          @relation.where_missing(*associations)
         end
 
         def associated(*associations)
-          raise UnsupportedQuery.new(@relation.model_class, "where.associated(#{associations.inspect[1..-2]})")
+          @relation.where_associated(*associations)
         end
       end
     end
