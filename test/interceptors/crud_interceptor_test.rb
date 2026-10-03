@@ -308,10 +308,10 @@ module Lyra
         user.instance_variable_set(:@lyra_event_result, nil)
         user.send(:lyra_finalize_event_source)
 
-        # The flag is only cleared inside the finalize if there's an event result
-        # So when there's no result, finalize returns early and flag remains
-        # This tests the early return path
-        assert Thread.current[:lyra_skip_insert]
+        # Finalize clears its state on every exit, the early return included.
+        # It used to leave the flag set there, and after a failed store too, so
+        # the next insert of any model on the thread skipped its row.
+        assert_nil Thread.current[:lyra_skip_insert]
       ensure
         Thread.current[:lyra_skip_insert] = nil
       end

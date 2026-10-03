@@ -27,6 +27,11 @@ module Lyra
         pk = self.class.primary_key
         args[0] = Array(args[0]) | [pk] if args.any? && pk && !id.nil?
         super(*args)
+      ensure
+        # The skip-insert signal is for this record's INSERT only. Left set
+        # (as it was when a later step failed), the next insert of any model
+        # on this thread silently skipped its row while reporting success.
+        Thread.current[:lyra_skip_insert] = nil
       end
 
       def _update_record(*)
@@ -428,7 +433,9 @@ module Lyra
           # date from the log (Projections::LazyProjection).
         end
 
-        # Clear state
+      ensure
+        # Clear state whatever happened: a failed store (which now fails the
+        # write) must not leave it for the next write.
         @lyra_event_result = nil
         @lyra_event_operation = nil
         @lyra_skip_sql = false
@@ -503,17 +510,20 @@ module Lyra
       end
 
       # Store events to the event store
+      # In event-sourcing mode the stored event is the write: if it cannot
+      # be stored, the write must fail and its transaction roll back. This
+      # used to log the error and carry on (unless strict_projections, a
+      # setting about projections, was on). ES-NoProj then reported a write
+      # that existed nowhere, and ES-Sync projected a row from an event that
+      # was never stored.
       def lyra_store_events(events)
         stream_name = lyra_stream_name
         events.each do |event|
           Lyra.config.event_store.publish(event, stream_name: stream_name)
         end
       rescue => e
-        if Lyra.config.strict_projections
-          raise
-        else
-          Rails.logger.error("Lyra: Failed to store events - #{e.message}")
-        end
+        Rails.logger.error("Lyra: Failed to store events, the write is rolled back - #{e.message}")
+        raise
       end
 
       # Disable PaperTrail for this record in hijack/event_sourcing mode

@@ -839,6 +839,11 @@ module Lyra
       def event_sourced_bulk_mutate(method_name, *args, **kwargs)
         return @records.each(&:destroy) if method_name == :destroy_all
 
+        # One transaction: a failed publish part-way leaves none of them.
+        model_class.transaction { publish_bulk_events(method_name, *args, **kwargs) }
+      end
+
+      def publish_bulk_events(method_name, *args, **kwargs)
         if Lyra.config.strict_data_access && !Thread.current[:lyra_bypass_strict_access]
           raise Lyra::StrictDataAccessViolation.new(method_name, model_class)
         end

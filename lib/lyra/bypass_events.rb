@@ -14,6 +14,31 @@ module Lyra
     TIMESTAMP_COLUMNS = %w[created_at updated_at].freeze
 
     class << self
+      # Whether a bypass write's events must be stored for the write to
+      # stand. In Hijack and the event-sourcing modes the log is the record of
+      # every change (in ES-NoProj the only one), so a write whose event
+      # cannot be stored must not happen: it fails, and is rolled back. In
+      # Monitor the table stays authoritative and the event is a copy, so a
+      # failed publish is logged and the write stands.
+      def required?
+        Lyra.hijack_mode? || Lyra.event_sourcing_mode?
+      end
+
+      # Run a bypass write together with the publishing of its events: in
+      # one transaction when they are required, so that a failed publish
+      # rolls the write back with it.
+      def atomically(model_class, &block)
+        required? ? model_class.transaction(&block) : yield
+      end
+
+      # Report a failed publish: raise when the events are required (see
+      # required?), log otherwise.
+      def publish_failed!(error, source)
+        raise error if required?
+
+        Rails.logger.error("Lyra: Failed to publish bypass event (#{source}) - #{error.message}")
+      end
+
       def enabled_for?(model_class)
         return false if Thread.current[:lyra_projection_write]
         return false if Lyra.config.mode == :disabled

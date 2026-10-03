@@ -170,6 +170,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Event sourcing lost writes whose event could not be stored** — `lyra_store_events` logged a
+  failed append and carried on (unless `strict_projections`, a setting about projections, was
+  on): ES-NoProj reported a write that existed nowhere, and ES-Sync projected a row from an
+  event that was never stored. In Hijack and the event-sourcing modes a write whose event
+  cannot be stored now fails and is rolled back, bypass writes included
+  (`BypassEvents.required?`, `BypassEvents.atomically`: the write and its events share a
+  transaction). Monitor, where the table stays authoritative, still logs the failure and keeps
+  the write.
+- **A failed event-sourced create made the next insert on its thread vanish** — the
+  skip-insert signal was cleared only at the end of a successful finalize, so after any
+  failure the next insert of any model on that thread (a Puma thread, say) skipped its row while
+  reporting success. It is now cleared as soon as the record's own INSERT has run, and
+  finalize clears its state on every exit.
 - **ES-NoProj evaluated association conditions record by record, and some wrongly** —
   `where(program: x)` loaded each cached record's association (one query per record: about
   10,000 for one `count` in the mode-comparison benchmark) and compared objects;

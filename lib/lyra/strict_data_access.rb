@@ -111,14 +111,16 @@ module Lyra
     end
 
     def with_bypass_event(columns, source)
-      before = columns.to_h { |c| [c, attribute_in_database(c)] }
-      result = yield
-      changes = columns.each_with_object({}) do |c, h|
-        now = read_attribute(c)
-        h[c] = [before[c], now] unless before[c] == now
+      Lyra::BypassEvents.atomically(self.class) do
+        before = columns.to_h { |c| [c, attribute_in_database(c)] }
+        result = yield
+        changes = columns.each_with_object({}) do |c, h|
+          now = read_attribute(c)
+          h[c] = [before[c], now] unless before[c] == now
+        end
+        publish_bypass_update_event(changes, source) if result && changes.any?
+        result
       end
-      publish_bypass_update_event(changes, source) if result && changes.any?
-      result
     end
 
     # Publish an "updated" event for a write that bypassed callbacks.
@@ -133,10 +135,12 @@ module Lyra
       end
     end
 
+    # A failed publish fails the write in Hijack and the event-sourcing
+    # modes, and is logged in Monitor (BypassEvents.required?).
     def safely_publish(source)
       yield
     rescue => e
-      Rails.logger.error("Lyra: Failed to publish bypass event (#{source}) - #{e.message}")
+      Lyra::BypassEvents.publish_failed!(e, source)
     end
   end
 
@@ -158,10 +162,12 @@ module Lyra
       check_strict_mode!(:update_all)
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
-      before = Lyra::BypassEvents.snapshot(klass, self)
-      result = super
-      safely_publish_bulk("update_all") { Lyra::BypassEvents.publish_updates(klass, before, source: "update_all") }
-      result
+      Lyra::BypassEvents.atomically(klass) do
+        before = Lyra::BypassEvents.snapshot(klass, self)
+        result = super
+        safely_publish_bulk("update_all") { Lyra::BypassEvents.publish_updates(klass, before, source: "update_all") }
+        result
+      end
     end
 
     def delete_all
@@ -170,10 +176,12 @@ module Lyra
       check_strict_mode!(:delete_all)
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
-      before = Lyra::BypassEvents.snapshot(klass, self)
-      result = super
-      safely_publish_bulk("delete_all") { Lyra::BypassEvents.publish_destroys(klass, before, source: "delete_all") }
-      result
+      Lyra::BypassEvents.atomically(klass) do
+        before = Lyra::BypassEvents.snapshot(klass, self)
+        result = super
+        safely_publish_bulk("delete_all") { Lyra::BypassEvents.publish_destroys(klass, before, source: "delete_all") }
+        result
+      end
     end
 
     def insert_all(attributes, returning: nil, **options)
@@ -182,9 +190,11 @@ module Lyra
       check_strict_mode!(:insert_all)
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
-      result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
-      safely_publish_bulk("insert_all") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all") }
-      result
+      Lyra::BypassEvents.atomically(klass) do
+        result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
+        safely_publish_bulk("insert_all") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all") }
+        result
+      end
     end
 
     def insert_all!(attributes, returning: nil, **options)
@@ -193,9 +203,11 @@ module Lyra
       check_strict_mode!(:insert_all!)
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
-      result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
-      safely_publish_bulk("insert_all!") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all!") }
-      result
+      Lyra::BypassEvents.atomically(klass) do
+        result, ids = with_primary_keys(returning) { |ret| super(attributes, returning: ret, **options) }
+        safely_publish_bulk("insert_all!") { Lyra::BypassEvents.publish_upserts(klass, {}, ids, source: "insert_all!") }
+        result
+      end
     end
 
     # One statement inserts some rows and updates others. The rows that
@@ -215,13 +227,15 @@ module Lyra
 
       rows = Array(attributes).map { |row| row.to_h.transform_keys(&:to_s) }
       keys = conflict_columns(unique_by)
-      before = Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys)
-      result, ids = with_primary_keys(returning) do |ret|
-        super(attributes, returning: ret, unique_by: unique_by, **options)
+      Lyra::BypassEvents.atomically(klass) do
+        before = Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys)
+        result, ids = with_primary_keys(returning) do |ret|
+          super(attributes, returning: ret, unique_by: unique_by, **options)
+        end
+        ids ||= Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys).keys
+        safely_publish_bulk("upsert_all") { Lyra::BypassEvents.publish_upserts(klass, before, ids, source: "upsert_all") }
+        result
       end
-      ids ||= Lyra::BypassEvents.snapshot_by_keys(klass, rows, keys).keys
-      safely_publish_bulk("upsert_all") { Lyra::BypassEvents.publish_upserts(klass, before, ids, source: "upsert_all") }
-      result
     end
 
     private
@@ -281,7 +295,7 @@ module Lyra
     def safely_publish_bulk(source)
       yield
     rescue => e
-      Rails.logger.error("Lyra: Failed to publish bypass events (#{source}) - #{e.message}")
+      Lyra::BypassEvents.publish_failed!(e, source)
     end
 
     # Detect if this is an association nullify operation (dependent: :nullify)
@@ -312,8 +326,9 @@ module Lyra
                                    source: "dependent_association")
       end
     rescue => e
-      # Don't fail the nullify operation if event publishing fails
-      Rails.logger.error("Lyra: Failed to publish nullify events - #{e.message}")
+      # Fails the parent's destroy in Hijack and the event-sourcing modes
+      # (it runs inside its transaction); logged in Monitor.
+      Lyra::BypassEvents.publish_failed!(e, "dependent_association")
     end
 
     # Fetch affected records for nullify operation
