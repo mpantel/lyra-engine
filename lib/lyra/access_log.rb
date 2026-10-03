@@ -15,6 +15,13 @@ module Lyra
   # own stream, so replay, DualView and mode transitions do not see it.
   # Field names only, never values.
   #
+  # Who accessed goes in the metadata: user_id (Current.user) and
+  # ip_address (Current.ip_address) when the application keeps them in
+  # Current, request and correlation ids, and whatever
+  # config.access_metadata_proc returns for the access (a console, a job,
+  # an API token: anything Current does not know). Without either, an
+  # access carries no user: set one.
+  #
   # Every access is recorded, with no sampling. An access that cannot be
   # recorded does not go ahead: the store's error propagates from
   # validate_access!. Off by default, and nothing is recorded in disabled
@@ -36,7 +43,7 @@ module Lyra
       def call(access)
         event_class = access.outcome == :denied ? Lyra::Events::DataAccessDenied : Lyra::Events::DataAccessed
         subject = subject_key(access.subject)
-        event = event_class.new(data: data_for(access, subject), metadata: metadata)
+        event = event_class.new(data: data_for(access, subject), metadata: metadata(access))
         Lyra.config.event_store.publish(event, stream_name: stream_for(subject))
       end
 
@@ -76,14 +83,31 @@ module Lyra
         data
       end
 
-      def metadata
+      def metadata(access)
         {
-          user_id: defined?(Current) && Current.respond_to?(:user) ? Current.user&.id : nil,
-          request_id: defined?(Current) && Current.respond_to?(:request_id) ? Current.request_id : nil,
+          user_id: current(:user)&.id,
+          ip_address: current(:ip_address),
+          request_id: current(:request_id),
           correlation_id: Lyra::Correlation.current_id,
-          causation_id: Lyra::Causation.current_id,
-          source: "lyra_access_log"
-        }.compact
+          causation_id: Lyra::Causation.current_id
+        }.merge(custom_metadata(access)).merge(source: "lyra_access_log").compact
+      end
+
+      def current(attribute)
+        defined?(::Current) && ::Current.respond_to?(attribute) ? ::Current.public_send(attribute) : nil
+      end
+
+      # config.access_metadata_proc's hash, with symbol keys. A failing proc
+      # is logged and skipped: the access is still recorded, without it.
+      def custom_metadata(access)
+        proc = Lyra.config.access_metadata_proc
+        return {} unless proc
+
+        result = proc.call(access)
+        result.is_a?(Hash) ? result.transform_keys(&:to_sym) : {}
+      rescue => e
+        Rails.logger.warn("Lyra: access_metadata_proc failed - #{e.message}")
+        {}
       end
     end
   end

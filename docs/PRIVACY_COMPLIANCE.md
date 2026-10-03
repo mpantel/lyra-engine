@@ -160,8 +160,13 @@ Lyra::AccessLog.for(user)
   mode let it through; then `violations` lists them).
 - `DataAccessDenied`: strict mode refused it (`violations` lists why).
 - Stream `Lyra::DataAccess$<Model>$<id>` per subject record, never the record's own stream,
-  so replay, DualView and mode transitions are unaffected. Field names only, never values;
-  the user, request and correlation ids are in the metadata.
+  so replay, DualView and mode transitions are unaffected. Field names only, never values.
+- Who accessed is in the metadata: `user_id` (`Current.user.id`) and `ip_address`
+  (`Current.ip_address`) when your app sets them in `Current`, plus request and correlation
+  ids. Where `Current` does not know (a console, a job, an API token), add your own:
+  `config.access_metadata_proc = ->(access) { { actor: Current.api_token&.name || "console" } }` (string,
+  number, boolean or nil values; a failing proc is logged and the access recorded without it).
+  With neither, an access carries no user.
 - Every access is recorded (no sampling). If the event store cannot record it, the store's
   error propagates and the access does not go ahead. Nothing is recorded in disabled mode.
 - The log is personal data about the users who read records: cover it in your retention rules.

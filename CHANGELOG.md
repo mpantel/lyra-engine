@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   access stream (`Lyra::DataAccess$<Model>$<id>`): `DataAccessed` when it went ahead (outcome
   `granted`, or `audited` with the violations audit mode let through), `DataAccessDenied` when
   strict mode refused it. Each carries the policy, purpose, legal basis, field names (never
-  values) and outcome; user, request and correlation ids go in the metadata. Every access is
+  values) and outcome. Who accessed goes in the metadata: `user_id` and `ip_address` from the
+  application's `Current.user` / `Current.ip_address`, request and correlation ids, and whatever
+  `config.access_metadata_proc` returns for the access (for consoles, jobs and API tokens that
+  `Current` does not know; a failing proc is logged and skipped). Every access is
   recorded, with no sampling; an access the store cannot record does not go ahead. Nothing is
   recorded in disabled mode, and the record's own stream is untouched. `AccessLog.for(subject)`
   reads them back. Off by default because reads can outnumber writes by orders of magnitude; the

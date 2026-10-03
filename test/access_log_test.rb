@@ -96,6 +96,40 @@ class AccessLogTest < Minitest::Test
     end
   end
 
+  # Who accessed: the application's Current user and IP address.
+  def test_the_user_and_ip_address_are_recorded_from_current
+    with_current do
+      AccessLogCurrent.user = Struct.new(:id).new(7)
+      AccessLogCurrent.ip_address = "10.0.0.1"
+      AccessLogCurrent.request_id = "req-1"
+      assert_raises(PamDsl::PurposeFieldMismatchError) { @policy.validate_access!([:ssn], :contact, subject: @user) }
+    end
+
+    metadata = Lyra::AccessLog.for(@user).sole.metadata
+    assert_equal [7, "10.0.0.1", "req-1"], metadata.to_h.values_at(:user_id, :ip_address, :request_id),
+                 "a refusal names who tried"
+  end
+
+  # Where Current does not know (a console, a job, an API token).
+  def test_access_metadata_proc_adds_to_the_metadata_and_a_failing_one_is_skipped
+    Lyra.config.access_metadata_proc = ->(access) { { "actor" => "job:export", "purpose" => access.purpose.to_s } }
+    @policy.validate_access!([:email], :contact, subject: @user)
+    Lyra.config.access_metadata_proc = ->(_access) { raise "broken" }
+    @policy.validate_access!([:email], :contact, subject: @user)
+
+    first, second = Lyra::AccessLog.for(@user).map { _1.metadata.to_h }
+    assert_equal ["job:export", "contact", "lyra_access_log"], first.values_at(:actor, :purpose, :source)
+    assert_nil second[:actor], "recorded without it"
+  ensure
+    Lyra.config.access_metadata_proc = nil
+  end
+
+  def test_without_current_or_a_proc_no_user_is_recorded
+    @policy.validate_access!([:email], :contact, subject: @user)
+
+    assert_nil Lyra::AccessLog.for(@user).sole.metadata[:user_id]
+  end
+
   def test_off_by_default_and_in_disabled_mode_nothing_is_recorded
     refute Lyra::Configuration.new.record_access_events
 
@@ -111,6 +145,22 @@ class AccessLogTest < Minitest::Test
   end
 
   private
+
+  class AccessLogCurrent < ActiveSupport::CurrentAttributes
+    attribute :user, :ip_address, :request_id
+  end
+
+  # The application's Current, for the block only; another test's Current
+  # is put back afterwards.
+  def with_current
+    original = Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+    Object.const_set(:Current, AccessLogCurrent)
+    yield
+  ensure
+    AccessLogCurrent.reset
+    Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+    Object.const_set(:Current, original) if original
+  end
 
   def clean
     conn = ActiveRecord::Base.connection

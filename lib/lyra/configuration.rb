@@ -36,6 +36,9 @@ module Lyra
     # (Lyra::AccessLog). Off by default: reads can outnumber writes by orders
     # of magnitude, so its cost is measured separately.
     attr_accessor :record_access_events
+    # Extra metadata for each recorded access, from a proc given the
+    # PamDsl::Enforcement::Access: who accessed, where Current does not say.
+    attr_accessor :access_metadata_proc
 
     def initialize
       @mode = :monitor
@@ -71,6 +74,7 @@ module Lyra
       @mode_sync_interval = 5
       @annotate_privacy = false
       @record_access_events = false
+      @access_metadata_proc = nil
     end
 
     # Declare the models to monitor by name, in the initializer, before they
