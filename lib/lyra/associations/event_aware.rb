@@ -116,9 +116,8 @@ module Lyra
 
           events.each do |event|
             data = event.data.is_a?(Hash) ? event.data : {}
-            operation = data[:operation] || data["operation"]
 
-            case operation&.to_sym
+            case Lyra::Event.operation_of(event)
             when :created, :imported
               state.merge!(data[:attributes] || data["attributes"] || {})
             when :updated

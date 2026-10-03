@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Domain events** (`monitor_with_lyra domain_events: [...]`, `Lyra::DomainEvents`;
+  FEATURE_GAP_PLAN F8) — rules name a write's event after what it means instead of the CRUD
+  operation: `{ name: "PaymentCompleted", on: %i[create update], if: ->(payment, changes) { ... } }`.
+  The first matching rule names the write's own event, which keeps Lyra's envelope (model, id,
+  operation, attributes, changes), so replay, projections, DualView and `Lyra.state_at` work
+  unchanged; a write no rule matches keeps its CRUD event. `payload:` adds fields for the
+  event's consumers under `data[:payload]`; `class:` uses an event class of your own (a
+  `RubyEventStore::Event` subclass) instead of a generated `Lyra::Events::<name>`;
+  `also: true` emits an additional event from the same write, in the same stream and
+  transaction, marked `replay: false` and pointing to the write's own event through its
+  `causation_id`. Works in Monitor, Hijack and every event-sourcing mode; writes that skip
+  callbacks are still recorded as CRUD bypass events. Generated event classes are registered
+  at boot. A rule whose block raises fails the write where events are the record (Hijack,
+  event sourcing) and is logged in Monitor. Commands now carry their `record`.
 - **Configuration surface** (FEATURE_GAP_PLAN F2): `config.models = %w[Order Payment]` (or a
   hash of name => options) declares the monitored models by name in the initializer; once the
   application's code has loaded, each is given `monitor_with_lyra`, with no model file edited,
@@ -187,6 +201,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **Renamed events were skipped on replay** — `Rebuild`, the ES-NoProj cache and the aggregate
+  decided what an event did from the end of its name (`…Created`, `…Updated`, `…Destroyed`).
+  An event renamed with `event_mapping` (or, now, a domain event) was skipped: `Rebuild` left
+  the record's row empty and ES-NoProj could not read it. Every replay site now dispatches on
+  the operation each event records in its data (`Lyra::Event.operation_of`); only events too
+  old to carry one fall back to the name.
 - **Event sourcing lost writes whose event could not be stored** — `lyra_store_events` logged a
   failed append and carried on (unless `strict_projections`, a setting about projections, was
   on): ES-NoProj reported a write that existed nowhere, and ES-Sync projected a row from an

@@ -49,7 +49,9 @@ module Lyra
     private
 
     def event_operation(event)
+      return Lyra::Event.operation_of(event) if event.respond_to?(:data) && event.respond_to?(:event_type)
       return event.operation if event.respond_to?(:operation)
+
       op = event.data[:operation] || event.data["operation"]
       op.is_a?(String) ? op.to_sym : op
     end

@@ -76,12 +76,14 @@ module Lyra
       "#{@model_class.name}$#{id}"
     end
 
-    # Override apply to handle dynamic event class names (e.g., RegistrationCreated -> apply_created)
+    # Apply by the operation the event records (Lyra::Event.operation_of),
+    # so a write mapped to a domain event (PaymentCompleted) applies as the
+    # create or update it was. Events without one fall back to the class
+    # name (RegistrationCreated -> apply_created).
     def apply(event, persisted: false)
-      event_name = event.class.name.demodulize.underscore
-
-      # Extract operation from event name (e.g., "registration_created" -> "created")
-      operation = extract_operation(event_name)
+      operation = Lyra::Event.operation_of(event)
+      operation = :created if operation == :imported
+      operation ||= extract_operation(event.class.name.demodulize.underscore)
       method_name = "apply_#{operation}"
 
       if respond_to?(method_name, true)

@@ -1,6 +1,41 @@
 module Lyra
   # Base event class for all Lyra events
   class Event < RubyEventStore::Event
+    # What a stored event does to its record when replayed: :created,
+    # :imported, :updated, :destroyed, or nil (not replayed).
+    #
+    # Read from the event's data (every event Lyra writes records its
+    # operation there), not from its name: a write mapped to a domain event
+    # (PaymentCompleted, see DomainEvents) replays as the operation it was.
+    # Replay used to look at the name's suffix (...Created, ...Updated,
+    # ...Destroyed), so a renamed event was silently skipped. Only events too
+    # old to carry an operation fall back to the name.
+    #
+    # An additional domain event emitted alongside a write's own event
+    # (data replay: false) returns nil: the write is replayed once, from its
+    # own event.
+    def self.operation_of(event)
+      data = event.data.is_a?(Hash) ? event.data : {}
+      return nil if data[:replay] == false || data["replay"] == false
+
+      case (data[:operation] || data["operation"]).to_s
+      when "created", "create" then :created
+      when "imported" then :imported
+      when "updated", "update" then :updated
+      when "destroyed", "destroy", "deleted" then :destroyed
+      when "" then operation_from_name(event)
+      end
+    end
+
+    def self.operation_from_name(event)
+      case event.event_type.to_s
+      when /Created\z/ then :created
+      when /Imported\z/ then :imported
+      when /Updated\z/ then :updated
+      when /Destroyed\z/ then :destroyed
+      end
+    end
+
     def self.inherited(subclass)
       super
       # Auto-register event types

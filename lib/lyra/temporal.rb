@@ -42,8 +42,8 @@ module Lyra
               "(when Lyra imported it) was not recorded"
       end
 
-      replayed = events.take_while { |event| event_time(event) <= time }
-      return nil if replayed.empty? || operation(replayed.last) == :destroyed
+      replayed = events.take_while { |event| event_time(event) <= time }.select { Lyra::Event.operation_of(_1) }
+      return nil if replayed.empty? || Lyra::Event.operation_of(replayed.last) == :destroyed
 
       state = Lyra::StateProjection.new.rebuild_from_events(replayed).transform_keys(&:to_s)
       state.merge("id" => id.to_s.match?(/\A\d+\z/) ? id.to_i : id)
@@ -53,13 +53,8 @@ module Lyra
       (event.timestamp || event.data[:timestamp] || event.data["timestamp"]).to_time
     end
 
-    def operation(event)
-      op = event.data[:operation] || event.data["operation"]
-      op&.to_sym
-    end
-
     def imported?(event)
-      operation(event) == :imported
+      Lyra::Event.operation_of(event) == :imported
     end
 
     def attribute_time(event, name)

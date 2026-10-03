@@ -191,9 +191,10 @@ module Lyra
           return [nil, nil] if events.empty?
 
           version = events.last.event_id
-          return [nil, version] if events.last.event_type.end_with?("Destroyed")
+          replayed = events.select { Lyra::Event.operation_of(_1) }
+          return [nil, version] if replayed.empty? || Lyra::Event.operation_of(replayed.last) == :destroyed
 
-          [reconstruct_state(model_class, id, events), version]
+          [reconstruct_state(model_class, id, replayed), version]
         end
 
         # The id of the last event in a record's stream, or nil if it has none.
@@ -247,11 +248,11 @@ module Lyra
           attributes = { "id" => id }
 
           events.each do |event|
-            case event.event_type
-            when /Created$/, /Imported$/
+            case Lyra::Event.operation_of(event)
+            when :created, :imported
               event_attrs = event.data[:attributes] || event.data["attributes"] || {}
               attributes.merge!(stringify_keys(event_attrs))
-            when /Updated$/
+            when :updated
               changes = event.data[:changes] || event.data["changes"] || {}
               changes.each do |field, change|
                 new_value = change.is_a?(Array) ? change.last : change

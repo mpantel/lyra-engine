@@ -93,16 +93,18 @@ module Lyra
             replayed += 1
           end
 
-          present = !(events.last && events.last.event_type.to_s.end_with?("Destroyed"))
+          last = events.reverse_each.find { Lyra::Event.operation_of(_1) }
+          present = !(last && Lyra::Event.operation_of(last) == :destroyed)
           [replayed, present]
         end
 
-        # Map an event type to a CRUD operation. Unknown event types are skipped.
+        # The projection operation for an event (Lyra::Event.operation_of);
+        # events that are not replayed are skipped.
         def operation_for(event)
-          case event.event_type.to_s
-          when /Created$/, /Imported$/ then :create
-          when /Updated$/   then :update
-          when /Destroyed$/ then :destroy
+          case Lyra::Event.operation_of(event)
+          when :created, :imported then :create
+          when :updated then :update
+          when :destroyed then :destroy
           end
         end
 
