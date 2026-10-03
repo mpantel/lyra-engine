@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **ES-NoProj answers exactly or raises** (`Lyra::Projections::CachedRelation`, new
+  `Lyra::Projections::UnsupportedQuery`) — reading from the event store, `CachedRelation`
+  used to answer queries it could not evaluate anyway, with the wrong records: a
+  SQL-string `where` kept every record, unrecognised conditions (`!=`, ranges written as
+  SQL, ORs) were dropped, `joins` and `where.missing`/`where.associated` were ignored, a
+  condition on an unknown column matched nothing, and a scope that failed, carried
+  `order`/`limit`/`group` and the like, or was not a scope at all, returned the whole set.
+  Each now raises `UnsupportedQuery`, naming the query and the alternatives. Hash
+  conditions, ordering, limits, loading hints and scopes made of hash conditions work as
+  before. This found the Aegean benchmark's own cleanup, `where("email LIKE ?")` under
+  ES-NoProj, silently matching every registration.
 - **RailsEventStore 3** — `lyra.gemspec` now requires `rails_event_store ~> 3.0` (3.1.0 in the
   lockfile), on Ruby 4.0.7 and Rails 8.1.3.1. RES 3 moved the ActiveRecord repository to
   `RubyEventStore::ActiveRecord::EventRepository` and the event base class and errors to

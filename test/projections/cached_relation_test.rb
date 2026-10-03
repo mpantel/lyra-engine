@@ -256,9 +256,10 @@ class CachedRelationTest < Minitest::Test
     assert_equal 3, result.count
   end
 
-  def test_joins_is_noop
-    result = @relation.joins(:other)
-    assert_equal 3, result.count
+  # A join changes which records match, so it is refused rather than ignored
+  # (it used to be a silent no-op).
+  def test_joins_raises
+    assert_raises(Lyra::Projections::UnsupportedQuery) { @relation.joins(:other) }
   end
 
   def test_preload_is_noop

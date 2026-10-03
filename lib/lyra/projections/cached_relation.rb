@@ -2,7 +2,27 @@
 
 module Lyra
   module Projections
+    # Raised when ES-NoProj is asked a query it cannot answer exactly from
+    # events. It used to answer such queries anyway, unfiltered or partly
+    # filtered; a wrong answer is worse than an error.
+    class UnsupportedQuery < StandardError
+      def initialize(model_class, what)
+        name = model_class.respond_to?(:name) ? model_class.name : model_class.to_s
+        super(
+          "ES-NoProj cannot evaluate #{what} on #{name} from the event store, and will not guess " \
+          "(an unfiltered or partly filtered answer would be wrong). Use a projected mode " \
+          "(projection_mode :sync or :async), or projection_mode :lazy, which runs real SQL " \
+          "on a table brought up to date from the event log before each query."
+        )
+      end
+    end
+
     # ActiveRecord::Relation-like wrapper for cached projection results.
+    #
+    # It answers exactly or raises UnsupportedQuery: it evaluates hash
+    # conditions, ordering, limits and scopes made of hash conditions in Ruby,
+    # and refuses SQL fragments, joins, conditions it cannot read and scopes it
+    # cannot reduce to conditions.
     #
     # Enables method chaining on cached results so that code written for
     # ActiveRecord works transparently in disabled projections mode.
@@ -166,23 +186,16 @@ module Lyra
         # Handle where.not(...) chain
         return WhereChain.new(self) if conditions == :chain
 
+        check_hash_conditions!(conditions, "where(#{conditions.inspect[0, 60]})")
         filtered = @records.select do |record|
-          case conditions
-          when Hash
-            conditions.all? { |key, value| matches_value?(record, key, value) }
-          when String
-            # SQL string conditions - can't evaluate, return all
-            # This is a limitation of the cached approach
-            true
-          else
-            true
-          end
+          conditions.all? { |key, value| matches_value?(record, key, value) }
         end
 
         self.class.new(model_class, filtered)
       end
 
       def not(conditions)
+        check_hash_conditions!(conditions, "where.not(#{conditions.inspect[0, 60]})")
         filtered = @records.reject do |record|
           conditions.all? { |key, value| matches_value?(record, key, value) }
         end
@@ -297,18 +310,18 @@ module Lyra
         self
       end
 
+      # A join changes which records match (an inner join drops records with
+      # no partner, an outer join can repeat them), so it cannot be ignored.
       def joins(*args)
-        # Can't actually join - return self to allow chain to continue
-        # Note: This may produce incorrect results for complex queries
-        self
+        raise UnsupportedQuery.new(model_class, "joins(#{args.inspect[1..-2]})")
       end
 
       def left_joins(*args)
-        self
+        raise UnsupportedQuery.new(model_class, "left_joins(#{args.inspect[1..-2]})")
       end
 
       def left_outer_joins(*args)
-        self
+        raise UnsupportedQuery.new(model_class, "left_outer_joins(#{args.inspect[1..-2]})")
       end
 
       # =========================================================================
@@ -602,28 +615,48 @@ module Lyra
             # Don't swallow strict data access violations - these are intentional framework errors
             raise
           rescue => e
-            Rails.logger.debug("Lyra::CachedRelation: Could not execute scope #{method_name} - #{e.message}")
-            return self
+            # Answering anyway (as this used to, unfiltered) would be wrong.
+            raise UnsupportedQuery.new(model_class, "#{method_name} (it raised #{e.class})")
           ensure
             Thread.current[:lyra_bypass_read_override] = nil
           end
 
-          if scope_result.is_a?(ActiveRecord::Relation)
-            # Extract where conditions from the scope result
-            where_hash = extract_where_conditions(scope_result)
-            if where_hash.present?
-              return where(where_hash)
-            end
+          unless scope_result.is_a?(ActiveRecord::Relation)
+            raise UnsupportedQuery.new(model_class, "#{method_name}, which is not a scope")
           end
 
-          # Fallback: return self to allow chaining
-          self
+          extra = unsupported_clauses(scope_result)
+          raise UnsupportedQuery.new(model_class, "scope #{method_name} (it uses #{extra.join(', ')})") if extra.any?
+
+          where_hash = extract_where_conditions(scope_result, strict: true)
+          raise UnsupportedQuery.new(model_class, "scope #{method_name}") if where_hash.nil?
+
+          where_hash.empty? ? self : where(where_hash)
         else
           super
         end
       end
 
-      def extract_where_conditions(relation)
+      # Clauses of a scope's relation, other than its where clause, that this
+      # class cannot reproduce. Ignoring any of them would change the answer.
+      def unsupported_clauses(relation)
+        {
+          "joins" => relation.joins_values.any? || relation.left_outer_joins_values.any?,
+          "order" => relation.order_values.any?,
+          "group" => relation.group_values.any?,
+          "having" => !relation.having_clause.empty?,
+          "limit" => !relation.limit_value.nil?,
+          "offset" => !relation.offset_value.nil?,
+          "distinct" => relation.distinct_value,
+          "select" => relation.select_values.any?,
+          "from" => !relation.from_clause.empty?
+        }.select { |_, used| used }.keys
+      end
+
+      # Hash conditions only; with strict: true, returns nil as soon as one
+      # predicate is something it cannot read, so the caller refuses rather
+      # than filter by a subset of the conditions.
+      def extract_where_conditions(relation, strict: false)
         # Try to extract hash conditions from the relation's where clause
         return {} unless relation.respond_to?(:where_clause)
 
@@ -659,14 +692,28 @@ module Lyra
             # the only condition.
             if predicate.type == :in && predicate.attribute.respond_to?(:name)
               conditions[predicate.attribute.name.to_sym] = predicate.values
+            elsif strict
+              return nil
             end
+          else
+            return nil if strict
           end
         end
 
         conditions
       rescue => e
+        return nil if strict
+
         Rails.logger.debug("Lyra::CachedRelation: Could not extract where conditions - #{e.message}")
         {}
+      end
+
+      # Conditions must be a hash of this model's own attributes. A SQL
+      # fragment, an Arel node or a condition on another table cannot be
+      # evaluated against cached records, and ignoring it would widen the answer.
+      def check_hash_conditions!(conditions, what)
+        raise UnsupportedQuery.new(model_class, what) unless conditions.is_a?(Hash)
+        raise UnsupportedQuery.new(model_class, what) if conditions.values.any? { |v| v.is_a?(Hash) }
       end
 
       def extract_predicate_value(node)
@@ -718,8 +765,9 @@ module Lyra
           values_match?(record_value, value)
         end
       rescue NoMethodError
-        # Attribute doesn't exist on record
-        false
+        # ActiveRecord would reject a condition on an unknown column; treating
+        # it as "no match" (as this used to) silently empties the answer.
+        raise UnsupportedQuery.new(model_class, "a condition on unknown attribute #{key}")
       end
 
       # Compare values with type coercion for common AR patterns
@@ -788,13 +836,11 @@ module Lyra
         end
 
         def missing(*associations)
-          # Can't check missing associations in cached mode
-          @relation
+          raise UnsupportedQuery.new(@relation.model_class, "where.missing(#{associations.inspect[1..-2]})")
         end
 
         def associated(*associations)
-          # Can't check associations in cached mode
-          @relation
+          raise UnsupportedQuery.new(@relation.model_class, "where.associated(#{associations.inspect[1..-2]})")
         end
       end
     end
