@@ -3,6 +3,14 @@ module PamDsl
   class Policy
     attr_reader :name, :fields, :purposes, :retention_policy, :consent_policy, :metadata
 
+    # Article 30(1) items each purpose must declare for the record of
+    # processing, and the clause that asks for each.
+    ARTICLE_30_PURPOSE_ITEMS = {
+      data_subjects: "Art. 30(1)(c) categories of data subjects",
+      recipients: "Art. 30(1)(d) categories of recipients",
+      transfers: "Art. 30(1)(e) transfers to third countries"
+    }.freeze
+
     def initialize(name)
       @name = name.to_sym
       @fields = {}
@@ -10,6 +18,30 @@ module PamDsl
       @retention_policy = RetentionPolicy.new
       @consent_policy = ConsentPolicy.new
       @metadata = {}
+      @security_measures = []
+    end
+
+    # A general description of the technical and organisational security
+    # measures (Art. 30(1)(g)): "TLS in transit", "role-based access".
+    def security_measures(*measures)
+      return @security_measures if measures.empty?
+
+      @security_measures |= measures.flatten.map(&:to_s)
+      self
+    end
+
+    # What the record of processing cannot state because the policy does not
+    # declare it: [[purpose name or nil, the Article 30(1) item]]. Empty when
+    # the register is complete.
+    def article_30_gaps
+      gaps = @purposes.values.flat_map do |purpose|
+        ARTICLE_30_PURPOSE_ITEMS.filter_map do |item, clause|
+          declared = item == :transfers ? purpose.transfers_declared? : purpose.public_send(item).any?
+          [purpose.name, clause] unless declared
+        end
+      end
+      gaps << [nil, "Art. 30(1)(g) security measures"] if @security_measures.empty?
+      gaps
     end
 
     # Enforcement mode for this policy, overriding PamDsl.enforcement_mode:
@@ -196,6 +228,7 @@ module PamDsl
         purposes: @purposes.transform_values { |p| purpose_to_h(p) },
         retention: retention_to_h,
         consent: consent_to_h,
+        security_measures: @security_measures,
         metadata: @metadata
       }
     end
@@ -217,6 +250,9 @@ module PamDsl
         legal_basis: purpose.legal_basis,
         required_fields: purpose.required_fields,
         optional_fields: purpose.optional_fields,
+        data_subjects: purpose.data_subjects,
+        recipients: purpose.recipients,
+        transfers: purpose.transfers,
         metadata: purpose.metadata
       }
     end

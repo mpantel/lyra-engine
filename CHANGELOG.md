@@ -260,6 +260,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **Article 30 register (PAM)** — `pam_dsl:report:article_30` states only what the policy declares (data subjects, recipients, transfers, security measures) and lists the rest as not declared; see `gems/pam_dsl/CHANGELOG.md`.
 - **PII detection (PAM)** — Lyra's detector fallback (`Lyra::Privacy::PIIDetector`, `PolicyIntegration`) uses PAM's merged dictionary: more personal columns found (street, postal code, IP columns, card digits, account tokens), foreign keys and generic `*_name` columns no longer flagged. See `gems/pam_dsl/CHANGELOG.md`.
 - **Hijack fails a write whose event cannot be stored with `EventStoreUnavailableError`**, as event
   sourcing does, instead of a refused save (`save` returning false with the store's message on

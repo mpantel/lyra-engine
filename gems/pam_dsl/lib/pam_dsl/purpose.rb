@@ -1,7 +1,8 @@
 module PamDsl
   # Represents a processing purpose
   class Purpose
-    attr_reader :name, :description, :legal_basis, :art9_bases, :required_fields, :optional_fields, :metadata
+    attr_reader :name, :description, :legal_basis, :art9_bases, :required_fields, :optional_fields, :metadata,
+                :data_subjects, :recipients, :transfers
 
     # Art. 9(2) sub-clauses permitting processing of special-category data
     ART9_BASES = [
@@ -35,6 +36,9 @@ module PamDsl
       @required_fields = []
       @optional_fields = []
       @metadata = {}
+      @data_subjects = []
+      @recipients = []
+      @transfers = nil # nil: not declared; []: declared none
     end
 
     # Set description
@@ -89,6 +93,43 @@ module PamDsl
     def optionally(*field_names)
       @optional_fields.concat(field_names.map(&:to_sym))
       self
+    end
+
+    # ── Article 30(1) facts about the purpose, for the record of processing ──
+
+    # Categories of data subjects (Art. 30(1)(c)): "applicants", "customers".
+    def data_subjects(*categories)
+      return @data_subjects if categories.empty?
+
+      @data_subjects |= categories.flatten.map(&:to_s)
+      self
+    end
+
+    # Categories of recipients the data is disclosed to (Art. 30(1)(d)),
+    # including processors: "card payment processor", "tax authority".
+    def recipients(*names)
+      return @recipients if names.empty?
+
+      @recipients |= names.flatten.map(&:to_s)
+      self
+    end
+
+    # A transfer to a third country or international organisation and its
+    # safeguard (Art. 30(1)(e), Chapter V): transfer to: "US", safeguard:
+    # :standard_contractual_clauses.
+    def transfer(to:, safeguard:)
+      (@transfers ||= []) << { to: to.to_s, safeguard: safeguard.to_s }
+      self
+    end
+
+    # Declare that the purpose involves no international transfer.
+    def no_transfers!
+      @transfers = []
+      self
+    end
+
+    def transfers_declared?
+      !@transfers.nil?
     end
 
     # Add metadata

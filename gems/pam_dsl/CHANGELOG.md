@@ -5,6 +5,16 @@ All notable changes to PAM DSL will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Article 30 register from declarations, not placeholders** — `article_30_report` printed
+  "Internal staff" as every purpose's recipients, "No international transfers", a list of
+  asserted security measures (TLS, role-based access, PaperTrail), a per-purpose retention that
+  was always the default (it passed a field where a model name belongs), and a data-subject
+  rights section of "[Configure implementation path]" that Article 30 does not ask for. Purposes
+  now declare `data_subjects`, `recipients` and `transfer to:, safeguard:` (or `no_transfers!`),
+  and policies `security_measures` (Art. 30(1)(c), (d), (e), (g)); the register prints them, a
+  retention schedule from the policy's rules (Art. 30(1)(f)), and a completeness section listing
+  each undeclared item with its clause (`Policy#article_30_gaps`). The JSON export carries the
+  same, under `not_declared` for the gaps. Durations read "1 year", not "1 years".
 - **One PII dictionary; detection fixed on a foreign codebase** — `PolicyGenerator` kept its own
   exact-name patterns and exclusions, separate from `PIIDetector`'s; on Solidus 4.7 the
   generator found 6 of 26 personal columns and flagged an order's state machine as an address.

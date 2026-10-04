@@ -199,8 +199,9 @@ module PamDsl
       return puts "No policy loaded" unless @policy
 
       print_processing_activities
-      print_data_subject_rights
+      print_retention_schedule
       print_technical_measures
+      print_article_30_gaps
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -419,38 +420,72 @@ module PamDsl
     # Article 30 Printing
     # ─────────────────────────────────────────────────────────────────────────
 
+    # The record of processing states only what the policy declares. An item
+    # the policy leaves undeclared is printed as such, with the Article 30(1)
+    # clause that asks for it. (This report used to print "Internal staff" as
+    # every purpose's recipients, "No international transfers", a security
+    # section of asserted measures, and "[Configure implementation path]"
+    # under a data-subject-rights heading Article 30 does not ask for.)
     def print_processing_activities
-      puts "\n## Processing Activities\n"
+      puts "\n## Processing Activities (Art. 30(1)(b)-(e))\n"
 
       @policy.purposes.values.each_with_index do |purpose, idx|
         puts "\n### #{idx + 1}. #{purpose.name.to_s.titleize}\n"
-        puts "  Description:      #{purpose.description || 'N/A'}"
+        puts "  Description:      #{purpose.description.presence || 'N/A'}"
         puts "  Legal Basis:      #{legal_basis_text(purpose.legal_basis)}"
+        puts "  Data Subjects:    #{declared(purpose.data_subjects, 'c')}"
         puts "  Data Categories:  #{purpose.required_fields.join(', ')}"
-        puts "  Optional Data:    #{purpose.optional_fields.join(', ')}" if purpose.respond_to?(:optional_fields) && purpose.optional_fields.any?
+        puts "  Optional Data:    #{purpose.optional_fields.join(', ')}" if purpose.optional_fields.any?
         puts "  Consent Required: #{purpose.requires_consent? ? 'Yes' : 'No'}"
-        puts "  Retention:        #{get_retention_for_purpose(purpose)}"
-        puts "  Recipients:       Internal staff"
-        puts "  Transfers:        No international transfers"
+        puts "  Recipients:       #{declared(purpose.recipients, 'd')}"
+        puts "  Transfers:        #{transfers_text(purpose)}"
       end
     end
 
-    def print_data_subject_rights
-      puts "\n## Data Subject Rights Implementation\n"
-      puts "  \u2022 Right to Access (Art. 15):       [Configure implementation path]"
-      puts "  \u2022 Right to Rectification (Art. 16): [Configure implementation path]"
-      puts "  \u2022 Right to Erasure (Art. 17):      [Configure implementation path]"
-      puts "  \u2022 Right to Portability (Art. 20):  [Configure implementation path]"
-      puts "  \u2022 Right to Object (Art. 21):       [Configure implementation path]"
+    # Art. 30(1)(f): the envisaged time limits for erasure, as the policy's
+    # retention rules state them.
+    def print_retention_schedule
+      retention = @policy.retention_policy
+      puts "\n## Retention (Art. 30(1)(f))\n"
+      puts "  Default:          #{format_duration(retention.default_duration)}"
+      retention.rules.each do |rule|
+        line = "  #{rule.model_class}: #{rule.duration ? format_duration(rule.duration) : 'default'}, then #{rule.deletion_strategy}"
+        overrides = rule.field_overrides.map { |field, duration| "#{field} #{format_duration(duration)}" }
+        line += " (#{overrides.join(', ')})" if overrides.any?
+        puts line
+      end
     end
 
     def print_technical_measures
-      puts "\n## Technical & Organizational Measures\n"
-      puts "  \u2022 Encryption:       HTTPS/TLS for data in transit"
-      puts "  \u2022 Access Control:   Role-based access control"
-      puts "  \u2022 Audit Trail:      Event store + paper_trail"
-      puts "  \u2022 Data Masking:     PAM DSL transformations for display/logs"
-      puts "  \u2022 Retention:        Automated via PAM DSL retention policies"
+      puts "\n## Technical & Organisational Measures (Art. 30(1)(g))\n"
+      measures = @policy.security_measures
+      if measures.any?
+        measures.each { |measure| puts "  • #{measure}" }
+      else
+        puts "  NOT DECLARED (Art. 30(1)(g)): declare them with security_measures in the policy"
+      end
+    end
+
+    def print_article_30_gaps
+      gaps = @policy.article_30_gaps
+      puts "\n## Completeness\n"
+      if gaps.empty?
+        puts "  Every Article 30(1) item is declared."
+      else
+        puts "  #{gaps.size} item#{'s' unless gaps.size == 1} not declared:"
+        gaps.each { |purpose, clause| puts "  • #{purpose ? "#{purpose}: " : ''}#{clause}" }
+      end
+    end
+
+    def declared(values, clause)
+      values.any? ? values.join(', ') : "NOT DECLARED (Art. 30(1)(#{clause}))"
+    end
+
+    def transfers_text(purpose)
+      return "NOT DECLARED (Art. 30(1)(e))" unless purpose.transfers_declared?
+      return "None" if purpose.transfers.empty?
+
+      purpose.transfers.map { |t| "#{t[:to]} (safeguard: #{t[:safeguard]})" }.join(', ')
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -617,15 +652,6 @@ module PamDsl
       end
     end
 
-    def get_retention_for_purpose(purpose)
-      if purpose.required_fields.any? && @policy&.retention_policy
-        field = purpose.required_fields.first
-        format_duration(@policy.retention_policy.duration_for(field.to_s) || 7.years)
-      else
-        "7 years (default)"
-      end
-    end
-
     def calculate_age_distribution(events)
       ranges = {
         "< 1 day" => 0,
@@ -666,21 +692,19 @@ module PamDsl
 
       case duration
       when DURATION_CLASS
-        if duration >= 1.year
-          "#{(duration / 1.year).to_i} years"
-        elsif duration >= 1.month
-          "#{(duration / 1.month).to_i} months"
-        elsif duration >= 1.day
-          "#{(duration / 1.day).to_i} days"
-        else
-          "#{duration.to_i} seconds"
+        if duration >= 1.year then count((duration / 1.year).to_i, "year")
+        elsif duration >= 1.month then count((duration / 1.month).to_i, "month")
+        elsif duration >= 1.day then count((duration / 1.day).to_i, "day")
+        else count(duration.to_i, "second")
         end
       when Numeric
-        "#{(duration / 1.year.to_i)} years"
+        count(duration / 1.year.to_i, "year")
       else
         duration.to_s
       end
     end
+
+    def count(n, unit) = "#{n} #{n == 1 ? unit : "#{unit}s"}"
 
     def legal_basis_text(basis)
       case basis&.to_sym
@@ -779,10 +803,22 @@ module PamDsl
             name: p.name.to_s,
             description: p.description,
             legal_basis: p.legal_basis.to_s,
+            data_subjects: p.data_subjects,
             data_categories: p.required_fields.map(&:to_s),
-            requires_consent: p.requires_consent?
+            requires_consent: p.requires_consent?,
+            recipients: p.recipients,
+            transfers: p.transfers # nil when not declared
           }
-        end
+        end,
+        retention: {
+          default: @policy.retention_policy.default_duration.to_i,
+          rules: @policy.retention_policy.rules.map do |rule|
+            { model: rule.model_class, seconds: rule.duration&.to_i, on_expiry: rule.deletion_strategy.to_s,
+              fields: rule.field_overrides.transform_values(&:to_i) }
+          end
+        },
+        security_measures: @policy.security_measures,
+        not_declared: @policy.article_30_gaps.map { |purpose, clause| { purpose: purpose&.to_s, item: clause } }
       }
     end
   end

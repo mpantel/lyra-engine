@@ -148,20 +148,45 @@ module PamDsl
       assert_includes output, "GDPR Art. 6(1)(c)"  # Legal obligation
     end
 
-    def test_article_30_includes_data_subject_rights
+    # The register states only what the policy declares; it used to print
+    # "Internal staff", "No international transfers", a list of asserted
+    # security measures and "[Configure implementation path]".
+    def test_article_30_reports_what_the_policy_does_not_declare
       output = capture_output { |out| Reporter.new(:test_policy, output: out).article_30_report }
 
-      assert_includes output, "Data Subject Rights"
-      assert_includes output, "Right to Access"
-      assert_includes output, "Right to Erasure"
+      assert_includes output, "Data Subjects:    NOT DECLARED (Art. 30(1)(c))"
+      assert_includes output, "Recipients:       NOT DECLARED (Art. 30(1)(d))"
+      assert_includes output, "Transfers:        NOT DECLARED (Art. 30(1)(e))"
+      assert_includes output, "NOT DECLARED (Art. 30(1)(g))"
+      refute_includes output, "Internal staff"
+      refute_includes output, "Configure implementation path"
+      assert_match(/\d+ items not declared/, output)
     end
 
-    def test_article_30_includes_technical_measures
-      output = capture_output { |out| Reporter.new(:test_policy, output: out).article_30_report }
+    def test_article_30_states_what_the_policy_declares
+      define_declared_policy
+      output = capture_output { |out| Reporter.new(:declared_policy, output: out).article_30_report }
 
-      assert_includes output, "Technical & Organizational Measures"
-      assert_includes output, "Encryption"
-      assert_includes output, "Access Control"
+      assert_includes output, "Data Subjects:    customers"
+      assert_includes output, "Recipients:       card payment processor, tax authority"
+      assert_includes output, "Transfers:        US (safeguard: standard_contractual_clauses)"
+      assert_includes output, "Transfers:        None"
+      assert_includes output, "• TLS in transit"
+      assert_includes output, "Order: 10 years, then anonymize (ip_address 1 year)"
+      assert_includes output, "Every Article 30(1) item is declared."
+      assert_empty PamDsl.policy(:declared_policy).article_30_gaps
+    end
+
+    def test_the_export_carries_the_declarations_and_the_gaps
+      define_declared_policy
+      data = Reporter.new(:declared_policy).to_h[:article_30]
+
+      payment = data[:processing_activities].find { _1[:name] == "payment" }
+      assert_equal ["customers"], payment[:data_subjects]
+      assert_equal [{ to: "US", safeguard: "standard_contractual_clauses" }], payment[:transfers]
+      assert_equal ["TLS in transit", "role-based access"], data[:security_measures]
+      assert_empty data[:not_declared]
+      refute_empty Reporter.new(:test_policy).to_h[:article_30][:not_declared]
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -419,6 +444,35 @@ module PamDsl
     end
 
     private
+
+    def define_declared_policy
+      PamDsl.define_policy :declared_policy do
+        field :email, type: :email
+        field :ip_address, type: :ip_address
+        security_measures "TLS in transit", "role-based access"
+        purpose :payment do
+          basis :contract
+          requires :email
+          data_subjects "customers"
+          recipients "card payment processor", "tax authority"
+          transfer to: "US", safeguard: :standard_contractual_clauses
+        end
+        purpose :support do
+          basis :contract
+          requires :email
+          data_subjects "customers"
+          recipients "support staff"
+          no_transfers!
+        end
+        retention do
+          for_model "Order" do
+            keep_for 10.years
+            field :ip_address, duration: 1.year
+            on_expiry :anonymize
+          end
+        end
+      end
+    end
 
     def define_test_policy
       PamDsl.define_policy(:test_policy) do
