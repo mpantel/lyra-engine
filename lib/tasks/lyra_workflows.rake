@@ -14,7 +14,8 @@ namespace :lyra do
 
       require "lyra/verification/workflow_generator"
 
-      # Parse mode argument: MODE=monitor or MODE=all (default)
+      # Parse mode argument: MODE=monitor or MODE=all (default).
+      # OUTPUT_DIR=path writes the workflow files there; REPORTS_DIR=path the reports.
       requested_mode = ENV["MODE"]&.to_sym
       if requested_mode && requested_mode != :all
         unless Lyra::Verification::WorkflowGenerator::AVAILABLE_MODES.include?(requested_mode)
@@ -46,7 +47,10 @@ namespace :lyra do
         File.exist?(File.join(Rails.root, 'lyra.gemspec'))
       )
 
-      if is_lyra_context && lyra_gem_root
+      if ENV["OUTPUT_DIR"].present?
+        # Explicit destination (a scratch directory, say)
+        workflows_dir = File.expand_path(ENV["OUTPUT_DIR"])
+      elsif is_lyra_context && lyra_gem_root
         # Lyra gem context - use app/workflows in the gem root
         workflows_dir = File.join(lyra_gem_root, 'app', 'workflows')
       else
@@ -57,7 +61,7 @@ namespace :lyra do
       # Always use top-level constants for Zeitwerk compatibility
       @use_lyra_namespace = false
 
-      reports_dir = Rails.root.join('reports')
+      reports_dir = Pathname.new(ENV["REPORTS_DIR"].presence || Rails.root.join('reports')).expand_path
 
       FileUtils.mkdir_p(workflows_dir)
       FileUtils.mkdir_p(reports_dir)
@@ -164,23 +168,23 @@ namespace :lyra do
       end
 
       # Generate individual mode workflow files
-      if result[:mode_workflow]
-        # Single mode requested
-        mode_name = result[:mode_workflow][:name].downcase.gsub(/\s+/, '_').gsub(/[^a-z0-9_]/, '')
-        mode_file = File.join(workflows_dir, "#{mode_name}.rb")
-        class_name = workflow_class_name(result[:mode_workflow][:name])
-        File.write(mode_file, generate_workflow_file(result[:mode_workflow], class_name, use_lyra_namespace: @use_lyra_namespace))
+      # One mode (MODE=x) or all of them. Either way a mode's file and class are
+      # named alike (es_sync_mode_workflow.rb defines EsSyncModeWorkflow), the
+      # constant Zeitwerk expects from the file's path.
+      mode_workflows = if result[:mode_workflow]
+                         { requested_mode => result[:mode_workflow] }
+                       else
+                         result[:mode_workflows] || {}
+                       end
+      mode_workflows.each do |mode, workflow|
+        next unless workflow
+
+        generator_class = Lyra::Verification::WorkflowGenerator
+        mode_file = File.join(workflows_dir, "#{generator_class.workflow_file_basename(mode)}.rb")
+        class_name = generator_class.workflow_class_name(mode)
+        File.write(mode_file, generate_workflow_file(workflow, class_name, use_lyra_namespace: @use_lyra_namespace))
         generated_files << mode_file
         puts "Generated: #{mode_file}"
-      elsif result[:mode_workflows]
-        # All modes - generate separate files for each
-        result[:mode_workflows].each do |mode, workflow|
-          mode_file = File.join(workflows_dir, "#{mode}_mode_workflow.rb")
-          class_name = "#{mode.to_s.split('_').map(&:capitalize).join}ModeWorkflow"
-          File.write(mode_file, generate_workflow_file(workflow, class_name, use_lyra_namespace: @use_lyra_namespace))
-          generated_files << mode_file
-          puts "Generated: #{mode_file}"
-        end
       end
 
       # Generate Markdown report
@@ -268,10 +272,6 @@ namespace :lyra do
         puts "      trigger: #{t[:trigger]}"
       end
       puts ""
-    end
-
-    def workflow_class_name(name)
-      name.to_s.gsub(/[^a-zA-Z0-9]/, ' ').split.map(&:capitalize).join + "Workflow"
     end
 
     def generate_workflow_file(workflow, class_name, use_lyra_namespace: true)

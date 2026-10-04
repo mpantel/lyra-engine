@@ -1,91 +1,137 @@
 # Lyra Monorepo Structure
 
-This repository is organized as a monorepo containing Lyra and its associated gems.
+This repository is a monorepo: the Lyra engine, its two companion gems, the
+example applications that evaluate it, the benchmark archive, and the papers
+and thesis built on it.
 
 ## Repository Structure
 
 ```
 lyra/
-├── app/                      # Lyra Rails engine
-├── lib/                      # Lyra core library
-├── config/                   # Configuration files
-│   └── privacy_policies.rb  # Privacy policy definitions
-├── examples/                 # Example applications and usage
-├── docs/                     # Documentation
-├── gems/                     # Local gems (monorepo)
-│   ├── pam_dsl/             # Privacy Attribute Matrix DSL
-│   │   ├── lib/
-│   │   ├── spec/
-│   │   ├── docs/
-│   │   └── README.md
-│   └── petri_flow/          # Petri Net verification and analysis
-│       ├── lib/
-│       ├── spec/
-│       ├── docs/
-│       └── README.md
-├── Gemfile                   # Monorepo Gemfile
-├── lyra.gemspec             # Lyra gem specification
-└── README.md                # Main README
-
+├── app/                        # Rails engine: controllers, views (dashboard), workflows (generated nets)
+├── bin/                        # test (all suites), run_benchmarks, rake
+├── config/
+│   ├── routes.rb               # engine routes
+│   └── privacy_policies.rb     # two example PAM policies (not loaded automatically)
+├── lib/
+│   ├── lyra.rb, lyra/          # Lyra core library
+│   └── tasks/                  # rake tasks
+├── test/                       # Lyra's Minitest suite
+│   └── dummy/                  # minimal Rails application the tests load
+├── gems/
+│   ├── pam_dsl/                # orfeas_pam_dsl: Privacy Attribute Matrix DSL
+│   │   ├── lib/  test/  docs/  benchmark/
+│   │   └── pam_dsl.gemspec, Rakefile, README.md, CHANGELOG.md
+│   └── petri_flow/             # orfeas_petri_flow: Petri nets and matrix analysis
+│       ├── lib/  test/  docs/  examples/
+│       └── petri_flow.gemspec, Rakefile, README.md, CHANGELOG.md
+├── examples/
+│   ├── aegean_epay_testbed/    # Rails testbed used for the multi-mode tests and benchmarks
+│   ├── bpi2017_loan_app/       # BPI Challenge 2017 loan-process replay
+│   ├── solidus_case_study/     # Solidus e-commerce case study (Olist replay)
+│   ├── blog_app/               # small example application
+│   └── privacy_examples.rb, privacy_policy_usage.rb, usage_examples.rb
+├── benchmarks/
+│   ├── baselines/m4-2026-07/   # frozen archive of the July 2026 Apple M4 runs (do not edit)
+│   └── runs/                   # output of bin/run_benchmarks (gitignored)
+├── docs/                       # documentation (this file)
+├── docs-site/                  # Jekyll documentation site
+├── papers/                     # papers, the PhD thesis (papers/thesis) and the proposal (papers/proposal)
+├── lyra-engine/                # gitignored: checkout of the separate public lyra-engine repository
+├── Gemfile, Gemfile.lock       # monorepo Gemfile
+├── lyra.gemspec                # orfeas_lyra gem specification
+├── Rakefile
+├── docker-compose.yml          # PostgreSQL container for tests and benchmarks (port 5433)
+├── README.md, CHANGELOG.md, LICENSE
+└── *.md                        # working notes (benchmarking, findings, plans)
 ```
+
+`papers/` holds `paperpci2022`, `paperegovis2022`, `paperares2024`,
+`paperoem`, `paperre`, `paperpoemconf`, `papertse`, `papertune`,
+`papercaise`, `thesis` and `proposal`.
+
+`lyra-engine/` is the public repository (github.com/mpantel/lyra-engine),
+built from a subset of this one by `rake public:build` / `rake public:sync`
+(`lib/tasks/public_release.rake`). It is ignored here and committed
+separately. It leaves out the testbed, the Solidus and BPI applications,
+`papers/`, `benchmarks/`, `docs-site/`, and several monorepo-only rake task
+files.
 
 ## Gems in this Monorepo
 
-### 1. Lyra (Main Gem)
+| Gem | Location | Entry file | Version file |
+|---|---|---|---|
+| `orfeas_lyra` | root | `lyra` | `lib/lyra/version.rb` (0.6.0) |
+| `orfeas_pam_dsl` | `gems/pam_dsl/` | `pam_dsl` | `gems/pam_dsl/lib/pam_dsl/version.rb` (0.8.0) |
+| `orfeas_petri_flow` | `gems/petri_flow/` | `petri_flow` | `gems/petri_flow/lib/petri_flow/version.rb` (0.6.0) |
 
-**Location:** Root directory
-**Purpose:** CRUD to Event Sourcing transformation engine
-**Version:** See `lib/lyra/version.rb`
+`bundle exec rake gems:version` prints the current versions.
 
-Lyra is a Rails engine that monitors CRUD operations and transforms them into event sourcing patterns.
+### 1. Lyra
+
+A Rails engine that records CRUD writes as events and can move an application,
+one checked step at a time, from plain ActiveRecord to event sourcing. See
+[ARCHITECTURE.md](ARCHITECTURE.md) and [API_REFERENCE.md](API_REFERENCE.md).
 
 ### 2. PAM DSL (Privacy Attribute Matrix DSL)
 
-**Location:** `gems/pam_dsl/`
-**Purpose:** Declarative DSL for defining privacy policies using the Privacy Attribute Matrix (PAM) model
-**Version:** 0.6.0
-
-PAM DSL provides a fluent API for defining:
+A declarative DSL for privacy policies using the Privacy Attribute Matrix
+(PAM) model:
 - PII field classifications
 - Processing purposes with GDPR legal bases
 - Retention policies with field-level granularity
-- Consent management requirements
+- Consent requirements
+
+### 3. PetriFlow
+
+Petri nets, colored Petri nets, matrix analysis, verification, simulation and
+visualization; see [PetriFlow](#petriflow-gem-gemspetri_flow) below.
 
 ## Development Setup
 
-### Installing Dependencies
+### Installing dependencies
 
 ```bash
-# Install all dependencies including local gems
 bundle install
 ```
 
-The `Gemfile` automatically references the local `pam_dsl` gem:
+The root `Gemfile` references the local gems by path:
 
 ```ruby
-gem "pam_dsl", path: "gems/pam_dsl"
+gem "orfeas_pam_dsl", path: "gems/pam_dsl"
+gem "orfeas_petri_flow", path: "gems/petri_flow"
 ```
+
+The gems have no Gemfile of their own; commands run inside `gems/pam_dsl` or
+`gems/petri_flow` use the root bundle. An application outside this repository
+names the entry files explicitly, since the gem names and entry files differ:
+
+```ruby
+gem "orfeas_pam_dsl", path: "path/to/lyra/gems/pam_dsl", require: "pam_dsl"
+gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"
+```
+
+### PAM DSL and PetriFlow are optional
+
+`lyra.gemspec` depends on neither. Lyra loads each one if it is installed
+(`Lyra.pam_dsl_available?`, `Lyra.petri_flow_available?`); without PAM DSL
+the privacy layer uses a null provider. `LYRA_DISABLE_PAM_DSL=true` loads Lyra
+without PAM DSL even when it is installed.
 
 ### Working with PAM DSL
 
-When developing PAM DSL locally:
-
 ```bash
 cd gems/pam_dsl
-
-# Install dependencies
-bundle install
-
-# Run tests
-bundle exec rspec
-
-# Build gem
-gem build pam_dsl.gemspec
+bundle exec rake test        # run its tests
+gem build pam_dsl.gemspec    # builds orfeas_pam_dsl-<version>.gem
 ```
 
-### Using PAM DSL in Lyra
+### Using PAM DSL with Lyra
 
-Lyra automatically loads PAM DSL. Define policies in `config/privacy_policies.rb`:
+Define a policy in a file the application loads at boot, such as an
+initializer (`config/privacy_policies.rb` in this repository holds two
+example policies, `:university_system` and `:ecommerce`; Lyra does not load
+it):
 
 ```ruby
 PamDsl.define_policy :my_app do
@@ -100,7 +146,7 @@ PamDsl.define_policy :my_app do
 end
 ```
 
-Then use it in your models:
+Then attach it to models:
 
 ```ruby
 class User < ApplicationRecord
@@ -108,198 +154,117 @@ class User < ApplicationRecord
 end
 ```
 
+The full DSL is in [gems/pam_dsl/README.md](../gems/pam_dsl/README.md); its
+use in Lyra is in [API_REFERENCE.md](API_REFERENCE.md#privacy).
+
 ## Testing
 
-### Running All Tests
+Every gem uses Minitest and a `Rake::TestTask` named `test`.
 
 ```bash
-# From root directory
-bundle exec rspec
-
-# Run Lyra tests only
-bundle exec rspec spec/
-
-# Run PAM DSL tests only
-cd gems/pam_dsl && bundle exec rspec
+bundle exec rake test:all                     # Lyra, PAM DSL, PetriFlow
+bundle exec rake test                         # Lyra only (needs PostgreSQL: rake docker:start)
+cd gems/pam_dsl && bundle exec rake test      # PAM DSL only
+cd gems/petri_flow && bundle exec rake test   # PetriFlow only
 ```
+
+See [TESTING.md](TESTING.md) for the database setup, the multi-configuration
+tasks and the example application suites.
 
 ## Publishing Gems
 
-### Publishing PAM DSL
+The tasks are in `lib/tasks/gems.rake`:
+
+```bash
+bundle exec rake gems:build                      # build all three
+bundle exec rake gems:build:orfeas_pam_dsl       # build one
+bundle exec rake gems:push:orfeas_pam_dsl        # push one to RubyGems
+bundle exec rake gems:release                    # build and push all three
+bundle exec rake gems:bump:orfeas_pam_dsl:patch  # bump one gem's version
+bundle exec rake gems:clean                      # remove built .gem files
+```
+
+Or by hand:
 
 ```bash
 cd gems/pam_dsl
-
-# Update version in lib/pam_dsl/version.rb
-# Update CHANGELOG.md
-
-# Build and publish
+# update lib/pam_dsl/version.rb and CHANGELOG.md
 gem build pam_dsl.gemspec
-gem push pam_dsl-0.1.0.gem
-```
+gem push orfeas_pam_dsl-X.Y.Z.gem
 
-### Publishing Lyra
-
-```bash
-# From root directory
-
-# Update version in lib/lyra/version.rb
-# Update CHANGELOG.md
-# Update pam_dsl dependency version in lyra.gemspec if needed
-
-# Build and publish
+cd ../..
+# update lib/lyra/version.rb and CHANGELOG.md
 gem build lyra.gemspec
-gem push lyra-X.Y.Z.gem
+gem push orfeas_lyra-X.Y.Z.gem
 ```
 
-## Dependency Management
-
-### Local Development
-
-During local development, the `Gemfile` uses path dependencies:
-
-```ruby
-gem "pam_dsl", path: "gems/pam_dsl"
-```
-
-### Production/Published Gems
-
-In `lyra.gemspec`, PAM DSL is referenced by version:
-
-```ruby
-spec.add_dependency "pam_dsl", "~> 0.6.0"
-```
-
-When publishing Lyra, ensure:
-1. PAM DSL is published first
-2. Lyra's gemspec references the correct PAM DSL version
-3. Update the version constraint as needed
+Since Lyra does not depend on PAM DSL or PetriFlow, the gems can be published
+in any order.
 
 ## Monorepo Benefits
 
-### Advantages
+1. **Atomic changes:** Lyra and the gems change in one commit
+2. **Simple development:** no need to publish a gem to test Lyra against it
+3. **Shared documentation and CI:** one `docs/` and one workflow
+   (`.github/workflows/test.yml` runs `bundle exec rake test:all`)
 
-1. **Atomic Changes:** Update both Lyra and PAM DSL in a single commit
-2. **Simplified Development:** No need to publish PAM DSL to test Lyra changes
-3. **Version Coordination:** Easy to keep dependencies in sync
-4. **Shared Documentation:** All docs in one place
-5. **Unified CI/CD:** Single pipeline for all gems
+### Development workflow
 
-### Development Workflow
+```bash
+# change PAM DSL
+cd gems/pam_dsl
+# edit, then
+bundle exec rake test
 
-1. **Feature Development:**
-   ```bash
-   # Make changes to PAM DSL
-   cd gems/pam_dsl
-   # Edit files...
-
-   # Make changes to Lyra to use new PAM DSL features
-   cd ../..
-   # Edit files...
-
-   # Test integration
-   bundle exec rspec
-   ```
-
-2. **Releasing:**
-   ```bash
-   # Release PAM DSL first if it has changes
-   cd gems/pam_dsl
-   # Update version, build, publish
-
-   # Then release Lyra
-   cd ../..
-   # Update pam_dsl dependency version in gemspec
-   # Update version, build, publish
-   ```
+# change Lyra to use it
+cd ../..
+# edit, then
+bundle exec rake test:all
+```
 
 ## Examples and Documentation
 
-### Privacy Policy Examples
+### Privacy policy examples
 
-See `config/privacy_policies.rb` for complete examples:
-- University system policy
-- E-commerce policy
+`config/privacy_policies.rb`: a university payment system policy and an
+e-commerce policy.
 
-### Usage Examples
+### Usage examples
 
-See `examples/privacy_policy_usage.rb` for:
-- Field access control
-- Data transformation
-- Consent management
-- Retention policies
-- Lyra integration
+`examples/privacy_policy_usage.rb`: field access control, transformations,
+consent, retention and Lyra integration.
 
 ### Documentation
 
-- **PAM DSL:** `gems/pam_dsl/README.md`
-- **PetriFlow:** `gems/petri_flow/README.md`
-- **Lyra:** `README.md`
-- **Privacy Compliance:** `PRIVACY_COMPLIANCE.md`
-- **Architecture:** `ARCHITECTURE.md`
-
-## CI/CD Considerations
-
-### Testing Strategy
-
-```yaml
-# Example .github/workflows/test.yml
-jobs:
-  test-pam-dsl:
-    steps:
-      - run: cd gems/pam_dsl && bundle exec rspec
-
-  test-lyra:
-    needs: test-pam-dsl
-    steps:
-      - run: bundle exec rspec
-```
-
-### Publishing Strategy
-
-1. Publish PAM DSL when its version changes
-2. Wait for it to be available on RubyGems
-3. Update Lyra's dependency
-4. Publish Lyra
+- **PAM DSL:** [gems/pam_dsl/README.md](../gems/pam_dsl/README.md)
+- **PetriFlow:** [gems/petri_flow/README.md](../gems/petri_flow/README.md)
+- **Lyra:** [README.md](../README.md)
+- **Privacy compliance:** [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md)
+- **Architecture:** [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## Contributing
 
-When contributing to this monorepo:
-
-1. **Make changes in appropriate gem directory**
-2. **Update relevant documentation**
-3. **Add/update tests**
-4. **Update CHANGELOG.md in affected gems**
-5. **Test integration between gems**
-6. **Submit PR with all changes together**
+1. Make changes in the appropriate gem directory
+2. Update the relevant documentation
+3. Add or update tests
+4. Update the CHANGELOG.md of each affected gem
+5. Run `bundle exec rake test:all`
+6. Submit the changes together
 
 ## Troubleshooting
 
 ### PAM DSL not loading
 
 ```bash
-# Ensure bundle install was run
 bundle install
-
-# Check Gemfile.lock references local path
-grep pam_dsl Gemfile.lock
+grep -A2 "remote: gems/pam_dsl" Gemfile.lock   # the PATH entry for orfeas_pam_dsl
 ```
 
-### Version conflicts
-
-```bash
-# Clear bundler cache
-bundle clean --force
-
-# Reinstall
-rm Gemfile.lock
-bundle install
-```
+Check also that `LYRA_DISABLE_PAM_DSL` is not set to `true`.
 
 ### Testing integration
 
 ```bash
-# From root directory
 bundle exec ruby -e "require 'lyra'; require 'pam_dsl'; puts 'Success!'"
 ```
 
@@ -309,82 +274,73 @@ All gems in this monorepo are released under the MIT License.
 
 ## Research Context
 
-This monorepo is part of the ORFEAS PhD thesis on CRUD to Event Sourcing transformations and the Privacy Attribute Matrix (PAM) for privacy-aware monitoring.
-
-## Contact
-
-For questions or issues, please open a GitHub issue or contact the research team.
+This monorepo is part of the PhD thesis on CRUD to Event Sourcing
+transformations and the Privacy Attribute Matrix (PAM) for privacy-aware
+monitoring (`papers/thesis`). See
+[ORFEAS_FRAMEWORK_OVERVIEW.md](ORFEAS_FRAMEWORK_OVERVIEW.md).
 
 ## PetriFlow Gem (`gems/petri_flow/`)
 
 ### Overview
 
-PetriFlow is a comprehensive Petri Net and Matrix Analysis gem designed for formal modeling, analysis, visualization, and verification of event sourcing systems. It implements the theoretical models described in the research documentation.
+PetriFlow is a Petri net and matrix analysis gem for modeling, analyzing,
+visualizing and verifying event sourcing systems.
 
 **Location:** `gems/petri_flow/`
 **Version:** 0.6.0
-**Purpose:** Formal verification and analysis foundation for CRUD-to-Event mapping
+**Purpose:** Formal verification and analysis of the CRUD-to-event mapping
 
 ### Key Features
 
-#### Core Petri Nets
-- Places, Transitions, Arcs, Tokens, Markings
-- Complete Petri net execution engine
-- State management and transition firing
+#### Core Petri nets
+- Places, transitions, arcs, tokens, markings
+- Transition firing and state management
 
-#### Colored Petri Nets (CPNs)
+#### Colored Petri nets
 - Typed tokens with structured data
 - Guards for conditional transitions (privacy policies)
-- Arc expressions for data transformations (CRUD-to-Event)
-- Hierarchical net composition
+- Arc expressions for data transformations (CRUD to event)
 
-#### Matrix Analysis
-- **CRUD-Event Mapping Matrix**: Track operation-to-event mappings
-- **Correlation Matrix**: Group related events by correlation ID
-- **Causation Matrix**: Event causality with transitive closure
-- **Data Lineage Matrix**: Field modification history (GDPR Article 15)
-- **Reachability Matrix**: State space analysis
+#### Matrix analysis
+- **CRUD-event mapping matrix**: operation-to-event mappings
+- **Correlation matrix**: events grouped by correlation id
+- **Causation matrix**: event causality with transitive closure
+- **Data lineage matrix**: field modification history
+- **Reachability matrix**: state space analysis
 
-#### Formal Verification
-- **Reachability Analysis**: BFS state space exploration
-- **Boundedness Checking**: Token count bounds (k-bounded, safe)
-- **Liveness Checking**: Deadlock detection, transition liveness levels
-- **Invariant Checking**: Custom property verification
+#### Verification
+- **Reachability analysis**: breadth-first state space exploration
+- **Boundedness checking**: token bounds (k-bounded, safe)
+- **Liveness checking**: deadlocks (raw, and except at terminal places), transition liveness levels
+- **Invariant checking**: custom properties
 
-#### Simulation & Visualization
-- Step-by-step and Monte Carlo simulation
-- Trace recording and analysis
-- GraphViz/DOT, Mermaid, and ASCII visualization
+#### Simulation, visualization and export
+- Step-by-step and Monte Carlo simulation, trace recording
+- GraphViz/DOT and Mermaid visualization
+- PNML, CPN Tools, JSON and YAML export
+- `PetriFlow::Workflow`, a class-level DSL for workflow nets (used by Lyra's
+  verification nets)
 
 ### Usage Example
 
 ```ruby
 require 'petri_flow'
 
-# Create Colored Petri Net
+# Colored Petri net
 net = PetriFlow.create_colored_net(name: "StudentCRUD")
 
-# Add places with token colors
 net.add_colored_place(id: :crud_initiated, color: :crud_operation)
 net.add_colored_place(id: :event_generated, color: :event)
 
-# Add transition with privacy guard
+# Transition with a privacy guard
 consent_guard = PetriFlow::Colored::Guards.has_consent(:enrollment)
-net.add_colored_transition(
-  id: :generate_event,
-  name: "Generate Event",
-  guard: consent_guard
-)
+net.add_colored_transition(id: :generate_event, name: "Generate Event", guard: consent_guard)
 
-# Add arc with CRUD-to-Event transformation
+# Arc with a CRUD-to-event transformation
 crud_to_event = PetriFlow::Colored::ArcExpressions.crud_to_event(:created)
-net.add_colored_arc(
-  source_id: :crud_initiated,
-  target_id: :generate_event,
-  expression: crud_to_event
-)
+net.add_colored_arc(source_id: :crud_initiated, target_id: :generate_event, expression: crud_to_event)
 
-# Formal verification
+# Verification
 results = PetriFlow.verify(net)
 puts "Reachable states: #{results[:reachability][:total_reachable_states]}"
 puts "Bounded: #{results[:boundedness][:is_bounded]}"
@@ -396,108 +352,66 @@ analyzer.analyze_events(events)
 report = analyzer.generate_report
 
 # Visualization
-mermaid = PetriFlow.visualize(net, format: :mermaid)
-File.write("net.md", mermaid)
+File.write("net.md", PetriFlow.visualize(net, format: :mermaid))
 ```
+
+`PetriFlow.verify(net, terminal_places: [...])` also reports
+`results[:liveness][:terminates_properly]`, deadlock-freedom except at
+markings that mark a terminal place.
 
 ### Research Foundation
 
-PetriFlow implements the formal models described in:
-- `gems/petri_flow/docs/THEORETICAL_MODEL_PETRI_NETS.md` - Colored Petri Net formalization
-- `gems/petri_flow/docs/THEORETICAL_MODEL_MATRICES.md` - Matrix analysis techniques
+PetriFlow implements the models described in:
+- [THEORETICAL_MODEL_PETRI_NETS.md](../gems/petri_flow/docs/THEORETICAL_MODEL_PETRI_NETS.md): colored Petri net formalization
+- [THEORETICAL_MODEL_MATRICES.md](../gems/petri_flow/docs/THEORETICAL_MODEL_MATRICES.md): matrix analysis
 
-It provides formal verification for the CRUD-to-Event mapping framework:
+It provides formal verification for the CRUD-to-event mapping framework:
 > Pantelelis, M., & Kalloniatis, C. (2022). "Mapping CRUD to Events: Towards an object to event-sourcing framework". PCI 2022.
 
 ### Integration with Lyra
 
-PetriFlow integrates with Lyra at multiple levels:
+Lyra's verification nets (`lib/lyra/verification/`) are PetriFlow workflows:
+the CRUD lifecycle, one net per operation across the modes, and the
+callback-bypassing writes. `Lyra.verify_mapping!` runs them, and the
+dashboard's verification page shows them. See
+[WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md).
 
-1. **CRUD-to-Event Mapping Verification**
-   - Verify mapping completeness using matrix analysis
-   - Ensure every CRUD operation generates appropriate events
-
-2. **Privacy Policy Verification**
-   - Model PAM DSL policies as Petri net guards
-   - Verify no PII is processed without consent
-   - Check retention policy compliance
-
-3. **Event Flow Analysis**
-   - Analyze event causality and correlation
-   - Track data lineage for GDPR compliance
-   - Visualize event flows
-
-4. **State Consistency Verification**
-   - Verify Event-ORM consistency in Monitor mode
-   - Detect potential deadlocks in Hijack mode
-   - Check custom invariants
-
-### Example: Privacy Policy Verification
+### Example: privacy policy invariant
 
 ```ruby
-# Model privacy policy as Petri net
 net = PetriFlow.create_colored_net(name: "PrivacyCheck")
 
-# Places
 net.add_colored_place(id: :pii_collected, color: :event)
 net.add_colored_place(id: :consent_granted, color: :consent)
 net.add_colored_place(id: :pii_processed, color: :event)
 
-# Transition with guard: only process PII if consent granted
+# Only process PII if consent was granted
 guard = PetriFlow::Colored::Guard.new do |context|
   context.dig(:consent_status) == :granted
 end
-
 net.add_colored_transition(id: :process_pii, guard: guard)
 
-# Verify invariant: PII never processed without consent
+# Invariant: PII is never processed without consent
 checker = PetriFlow::Verification::InvariantChecker.new(net)
 checker.add_invariant("No PII without consent") do |marking|
   marking.tokens_at(:pii_processed) <= marking.tokens_at(:consent_granted)
 end
 
-results = checker.report
-puts results[:summary]  # "✓ All 1 invariants hold"
+puts checker.report[:summary]
 ```
 
 ### Running Examples
 
 ```bash
-# Run CRUD mapping example
-ruby gems/petri_flow/examples/crud_mapping_example.rb
-
-# Expected output:
-# - Token color definitions
-# - Place and transition creation
-# - CRUD-Event mapping matrix
-# - ASCII and Mermaid visualizations
-# - Formal verification results
-# - Simulation traces
+bundle exec ruby gems/petri_flow/examples/crud_mapping_example.rb
+bundle exec ruby gems/petri_flow/examples/export_example.rb
 ```
 
 ### Development
 
 ```bash
 cd gems/petri_flow
-
-# Install dependencies
-bundle install
-
-# Run tests (when implemented)
-bundle exec rspec
-
-# Interactive console
-bundle exec rake console
-
-# Run examples
-bundle exec rake examples
+bundle exec rake test       # run its tests
+bundle exec rake console    # IRB with petri_flow loaded
+bundle exec rake examples   # run every file in examples/
 ```
-
-### Future Enhancements
-
-- Integration with Rails Event Store for live analysis
-- Real-time visualization dashboard
-- Performance optimizations for large state spaces
-- Extended examples for different domains
-- Benchmark suite for verification algorithms
-

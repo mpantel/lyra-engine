@@ -63,7 +63,7 @@ module Lyra
         rewritten = []
         row_erased = false
         copies = []
-        shared = []
+        shared = 0
 
         PurposeBoundReads.internal do
           model.transaction do
@@ -194,7 +194,7 @@ module Lyra
       # placeholder address took all 1,954 addresses with it). It is left,
       # and reported.
       def erase_copies(origin, origin_id, origin_stream, originals, replacements, reason, erased_by, max_copies)
-        return [[], []] if originals.empty?
+        return [[], 0] if originals.empty?
 
         policy = Lyra::Privacy.policy_for(origin)
         originals = originals.select { |_value, field| IDENTIFYING_TYPES.include?(policy.annotation(field)&.type&.to_sym) }

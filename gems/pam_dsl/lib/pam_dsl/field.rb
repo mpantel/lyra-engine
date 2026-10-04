@@ -7,7 +7,7 @@ module PamDsl
 
     PII_TYPES = [
       :email, :name, :phone, :address, :ssn, :date_of_birth,
-      :ip_address, :credit_card, :financial, :health, :biometric,
+      :ip_address, :online_identifier, :credit_card, :financial, :health, :biometric,
       :location, :identifier, :credential, :token, :payment_token, :custom
     ].freeze
 

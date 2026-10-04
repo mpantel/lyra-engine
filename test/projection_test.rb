@@ -41,6 +41,36 @@ module Lyra
       # Should not raise an error
       assert_nil projection.handle(event)
     end
+
+    # RubyEventStore 3.1 accepts only subscribers that respond to call;
+    # subscribe_to used to pass the class, which defined only handle, and
+    # raised RubyEventStore::InvalidHandler.
+    class SubscribedThingHappened < RubyEventStore::Event; end
+
+    class SubscribedProjection < Projection
+      class << self
+        attr_accessor :applied
+      end
+
+      def apply_subscribed_thing_happened(event)
+        (self.class.applied ||= []) << event.data
+      end
+    end
+
+    def test_subscribe_to_runs_apply_methods_for_published_events
+      client = RubyEventStore::Client.new(repository: RubyEventStore::InMemoryRepository.new)
+      previous = Lyra.config.event_store
+      Lyra.config.event_store = client
+      SubscribedProjection.applied = []
+
+      SubscribedProjection.subscribe_to(SubscribedThingHappened)
+      client.publish(SubscribedThingHappened.new(data: { n: 1 }))
+      client.publish(RubyEventStore::Event.new(data: { n: 2 }))
+
+      assert_equal [{ n: 1 }], SubscribedProjection.applied
+    ensure
+      Lyra.config.event_store = previous
+    end
   end
 
   class StateProjectionTest < Minitest::Test

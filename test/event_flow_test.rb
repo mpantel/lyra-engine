@@ -212,6 +212,37 @@ module Lyra
       assert recommendations.any? { |r| r.include?("approval workflows") }
     end
 
+    class FlowTestWidget; end
+
+    def test_crud_to_event_mapping_accepts_a_class_or_its_name
+      events = [
+        create_event(model_class: FlowTestWidget.name, model_id: 5),
+        create_event(model_class: FlowTestWidget.name, model_id: 6),
+        create_event(model_class: "Other", model_id: 5)
+      ]
+      @event_flow.stubs(:load_events).returns(events)
+
+      by_class = @event_flow.crud_to_event_mapping(FlowTestWidget, :created)
+      by_name = @event_flow.crud_to_event_mapping(FlowTestWidget.name, :created)
+
+      assert_equal 2, by_class[:count]
+      assert_equal 2, by_name[:count]
+      assert_equal FlowTestWidget.name, by_class[:crud_operation][:model]
+      # A request passes the id and operation as strings.
+      assert_equal 1, @event_flow.crud_to_event_mapping(FlowTestWidget, "created", "5")[:count]
+    end
+
+    def test_data_lineage_accepts_a_class
+      event = create_event_with_attributes(email: "a@example.com")
+      event.data[:model_class] = FlowTestWidget.name
+      @event_flow.stubs(:load_events).returns([event])
+
+      lineage = @event_flow.data_lineage(:email, FlowTestWidget)
+
+      assert_equal 1, lineage[:total_modifications]
+      assert_equal FlowTestWidget.name, lineage[:model_class]
+    end
+
     private
 
     def create_test_events(count)

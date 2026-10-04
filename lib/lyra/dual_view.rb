@@ -59,8 +59,17 @@ module Lyra
 
       state = StateProjection.new.rebuild_from_events(events)
 
+      # A stream whose last replayed event destroys the record describes a
+      # record that no longer exists, as Lyra::ModeTransition.compare reads
+      # it: a destroyed record whose row is gone compares clean, and one
+      # whose row survives is an existence mismatch. state keeps the last
+      # state the events gave the record.
+      replayed = events.select { |e| Lyra::Event.operation_of(e) }
+      destroyed = replayed.any? && Lyra::Event.operation_of(replayed.last) == :destroyed
+
       {
-        exists: true,
+        exists: !destroyed,
+        destroyed: destroyed,
         state: state,
         events_count: events.count,
         first_event_at: event_timestamp(events.first),

@@ -1,202 +1,254 @@
-# Testing Guide for Lyra Monorepo
+# Testing Guide for the Lyra Monorepo
 
-This document describes the automated testing setup for Lyra and its component gems using Minitest.
+This document describes how to run the test suites of Lyra and its component
+gems, and of the example applications that exercise Lyra end to end.
 
 ## Overview
 
-The monorepo contains three testable components:
+The repository holds three gems, each with its own Minitest suite:
 
-1. **Lyra** - Main Rails engine for CRUD to Event Sourcing transformation
-2. **PAM DSL** - Privacy Attribute Matrix DSL gem
-3. **PetriFlow** - Petri Net and Matrix Analysis gem
+1. **Lyra** (`orfeas_lyra`, the root): the Rails engine
+2. **PAM DSL** (`orfeas_pam_dsl`, `gems/pam_dsl/`): the privacy policy DSL
+3. **PetriFlow** (`orfeas_petri_flow`, `gems/petri_flow/`): Petri nets and matrix analysis
 
-All components use **Minitest** as the testing framework with the following gems:
-- `minitest` - Core testing framework
-- `minitest-reporters` - Beautiful test output and JUnit XML reports
-- `mocha` - Mocking and stubbing (Lyra only)
+All three use **Minitest** with:
+- `minitest-reporters`: spec-style console output and JUnit XML reports
+- `mocha`: mocking and stubbing (Lyra only)
+- `simplecov`: coverage
+
+Each gem's `Rakefile` defines `test` with `Rake::TestTask` over
+`test/**/*_test.rb`. The gems have no Gemfile of their own; they run from the
+root bundle.
+
+The example applications have their own suites: the Aegean e-Pay testbed and
+the BPI 2017 loan application (Minitest), and the Solidus case study (RSpec).
+They, `lib/tasks/testbed.rake` and the tasks it defines exist only in the
+monorepo, not in the public `lyra-engine` repository.
+
+## Prerequisites: PostgreSQL
+
+The engine's tests load the dummy application in `test/dummy` and its schema,
+so they need PostgreSQL as configured in `test/dummy/config/database.yml`:
+host `localhost`, port `5433`, user and password `postgres`, database
+`lyra_test`.
+
+```bash
+bundle exec rake docker:start    # starts the lyra_postgres container (docker-compose.yml) on port 5433
+docker exec lyra_postgres createdb -U postgres lyra_test   # once, if the database does not exist yet
+```
+
+`rake docker:status`, `docker:stop`, `docker:logs`, `docker:psql` and
+`docker:clean` manage the same container. The PAM DSL and PetriFlow suites do
+not need a database.
 
 ## Running Tests
 
-### Run All Tests
-
-To run tests for all components:
+### All three gems
 
 ```bash
-# Using rake
-rake test:all
-
-# Using the test runner script
-bin/test
+bundle exec rake test:all   # Lyra, then PAM DSL, then PetriFlow
+bin/test                    # PetriFlow, PAM DSL, then Lyra; exits non-zero if any fails
 ```
 
-### Run Tests for Individual Components
+At the time of writing the engine suite has 1112 tests, PAM DSL 445 and
+PetriFlow 406.
 
-**Lyra (main tool):**
+### One gem
+
+**Lyra:**
 ```bash
-rake test
-# or
+bundle exec rake test               # every test/**/*_test.rb
+bundle exec rake test:unit          # everything except test/controllers
+bundle exec rake test:controllers   # test/controllers only
+```
+
+**PAM DSL:**
+```bash
+cd gems/pam_dsl
+bundle exec rake test
+bundle exec rake test:polyfill   # the same suite, forcing the ActiveSupport-free polyfill
+bundle exec rake test:both       # test, then test:polyfill
+```
+
+**PetriFlow:**
+```bash
+cd gems/petri_flow
 bundle exec rake test
 ```
 
-**PAM DSL gem:**
-```bash
-cd gems/pam_dsl
-rake test
-```
+### Lyra without PAM DSL
 
-**PetriFlow gem:**
-```bash
-cd gems/petri_flow
-rake test
-```
-
-### Run Lyra 7-Configuration Test Suite
-
-Lyra has 4 modes (disabled, monitor, hijack, event sourcing); event sourcing has 4 projection modes, so 7 configurations in all. The testbed includes a comprehensive test runner that validates all modes:
+PAM DSL is optional. `LYRA_DISABLE_PAM_DSL=true` loads Lyra without it:
 
 ```bash
-cd examples/aegean_epay_testbed
-rake lyra:test:all_modes
+LYRA_DISABLE_PAM_DSL=true bundle exec rake test
+bundle exec rake test:without_pam_dsl   # monorepo only: the same run, with a pass/fail summary
 ```
 
-#### The 7 Lyra Configurations
+### Lyra without PetriFlow
 
-| Mode | LYRA_MODE | LYRA_PROJECTION_MODE | Description |
-|------|-----------|---------------------|-------------|
-| 1 | `disabled` | - | Lyra disabled, standard Rails CRUD |
-| 2 | `monitor` | - | Log events, no behavior change |
-| 3 | `hijack` | - | Route CRUD through event sourcing |
-| 4 | `event_sourcing` | `sync` | Full ES with synchronous projections |
-| 5 | `event_sourcing` | `async` | Full ES with background projections |
-| 6 | `event_sourcing` | `disabled` | Pure CQRS, reads from cache |
-| 7 | `event_sourcing` | `lazy` | Events only on write; tables brought up to date before each read |
+PetriFlow is optional too. `LYRA_DISABLE_PETRI_FLOW=true` loads Lyra as without
+the gem: the engine then neither autoloads nor eager-loads `app/workflows`, and
+formal verification is unavailable. It parallels `LYRA_DISABLE_PAM_DSL`; no
+rake task runs the suite with it. `test/integration/lyra_without_petri_flow_test.rb`
+boots the dummy app with the switch in a subprocess and eager-loads it.
 
-#### Test Output
-
-```
-================================================================================
- LYRA TEST SUITE - ALL MODES
- Started: 2025-12-31 14:30:00
-================================================================================
-
-[1/7] Running: Lyra Disabled
-------------------------------------------------------------
-✓ 523 tests, 1189 assertions, 0 failures, 0 errors, 0 skips (15.2s)
-
-[2/7] Running: Monitor Mode
-...
-
-================================================================================
- COMPREHENSIVE TEST REPORT
-================================================================================
-
-## Results by Configuration
-
-| Configuration                       | Tests  | Assert |  Fail |  Err |  Skip | Status |
-|-------------------------------------|--------|--------|-------|------|-------|--------|
-| Lyra Disabled                       |    523 |   1189 |     0 |    0 |     0 | PASS   |
-| Monitor Mode                        |    523 |   1189 |     0 |    0 |     0 | PASS   |
-| Hijack Mode                         |    523 |   1189 |     0 |    0 |     0 | PASS   |
-| Event Sourcing (Sync)               |    523 |   1189 |     0 |    0 |     0 | PASS   |
-| Event Sourcing (Async)              |    523 |   1189 |     0 |    0 |     0 | PASS   |
-| Event Sourcing (No Projections)     |    523 |   1189 |     0 |    0 |     0 | PASS   |
-
-## Summary
-
-Configurations: 6/6 passed
-Total Tests:    3138
-Total Duration: 95.3s
-
-================================================================================
- ALL CONFIGURATIONS PASSED
-================================================================================
-```
-
-### Run Specific Test Files
+### Specific files and methods
 
 ```bash
 # Lyra
-ruby -Ilib:test test/configuration_test.rb
+bundle exec ruby -Ilib:test test/configuration_test.rb
+bundle exec ruby -Ilib:test test/event_test.rb --name test_event_creation_with_data
 
 # PAM DSL
-cd gems/pam_dsl
-ruby -Ilib:test test/policy_test.rb
+cd gems/pam_dsl && bundle exec ruby -Ilib:test test/policy_test.rb
 
 # PetriFlow
-cd gems/petri_flow
-ruby -Ilib:test test/core/net_test.rb
+cd gems/petri_flow && bundle exec ruby -Ilib:test test/core/net_test.rb
 ```
 
-### Run Specific Test Methods
+## The seven configurations
+
+Lyra has four modes (disabled, monitor, hijack, event sourcing); event
+sourcing has four projection modes, so there are seven configurations. See
+[API_REFERENCE.md](API_REFERENCE.md#the-seven-configurations).
+
+| Configuration | LYRA_MODE | LYRA_PROJECTION_MODE |
+|---|---|---|
+| Disabled | `disabled` | – |
+| Monitor | `monitor` | – |
+| Hijack | `hijack` | – |
+| ES-Sync | `event_sourcing` | `sync` |
+| ES-Async | `event_sourcing` | `async` |
+| ES-NoProj | `event_sourcing` | `disabled` |
+| ES-Lazy | `event_sourcing` | `lazy` |
+
+The environment variables are read by the Aegean testbed's initializer. The
+engine's own tests do not read them: each test sets the mode it needs
+(`Lyra.config.mode = ...`), and multi-mode tests such as
+`test/multi_mode_test.rb` and `test/integration/multi_mode_integration_test.rb`
+switch between configurations themselves.
+
+### Multi-configuration tasks (monorepo only)
+
+These tasks are defined in `lib/tasks/testbed.rake` (root) and
+`examples/aegean_epay_testbed/lib/tasks/lyra_test.rake` (testbed).
+
+| Task | What it runs |
+|---|---|
+| `bundle exec rake test:all_modes` | The engine suite once, then the testbed suite in all seven configurations with `LYRA_MODE` and `LYRA_PROJECTION_MODE` set (resetting the test database between them). Prints how many of the eight runs passed. |
+| `bundle exec rake test:without_pam_dsl` | The engine suite once with `LYRA_DISABLE_PAM_DSL=true`. |
+| `bundle exec rake lyra:testbed:mode` | The testbed suite once, in `LYRA_MODE` (and `LYRA_PROJECTION_MODE` if set). |
+| `bundle exec rake lyra:testbed:integration` | The testbed's `test/integration` only. |
+| `bundle exec rake lyra:testbed:all_modes` | Installs the testbed's assets, then runs its `lyra:test:all_modes`. |
+| `cd examples/aegean_epay_testbed && bundle exec rake lyra:test:all_modes` | The testbed suite in all seven configurations: Disabled, Monitor, Hijack, ES-Sync, ES-Async, ES-NoProj and ES-Lazy (named "Lyra Disabled", "Monitor Mode", "Hijack Mode", "Event Sourcing (Sync)", "Event Sourcing (Async)", "Event Sourcing (No Projections)", "Event Sourcing (Lazy Projections)"). |
+| `bundle exec rake test:comprehensive` | Four phases: the engine suite once; PAM DSL and PetriFlow; the testbed suite in all seven configurations (resetting the test database between them); the engine suite once without PAM DSL. Writes a Markdown report to `examples/aegean_epay_testbed/reports/comprehensive_test_<timestamp>.md`. |
+
+The engine suite runs once because its tests set their own mode: run once
+per configuration, it gave the same 1174 tests each time.
+
+The testbed suite has 563 tests. For each configuration,
+`lyra:test:all_modes` prints a line with the test, assertion, failure, error
+and skip counts and the duration, then a table of the results by
+configuration, the totals, any failing configurations with their
+environment variables, and "ALL CONFIGURATIONS PASSED" or the number that
+failed. It exits non-zero if any configuration failed.
+
+The testbed runs against the same PostgreSQL container (port 5433); start it
+with `bundle exec rake docker:start` first.
+
+## Example application suites (monorepo only)
+
+**BPI 2017 loan application** (`examples/bpi2017_loan_app`, 31 tests). Its
+database is PostgreSQL on port 5435 (`config/database.yml`):
 
 ```bash
-ruby -Ilib:test test/event_test.rb --name test_event_creation
+cd examples/bpi2017_loan_app
+RAILS_ENV=test bin/rails db:prepare
+bin/rails test
 ```
 
-## Test Structure
+The tests replay `test/fixtures/files/mini_bpi2017.xes`, a hand-written
+miniature log; no real data is in the repository.
 
-### Directory Layout
+**Solidus case study** (`examples/solidus_case_study`, RSpec, 343 examples).
+Its database is PostgreSQL on port 5434. The asset pipeline needs a
+JavaScript runtime such as Node (ExecJS), and the JavaScript system specs need
+Chrome. Where a local headless Chrome cannot start, `bin/rspec-chrome-docker`
+runs the specs against Chrome in a Selenium container:
 
-```
-lyra/
-├── test/
-│   ├── test_helper.rb              # Main test configuration
-│   ├── configuration_test.rb       # Configuration tests
-│   ├── event_test.rb               # Event tests
-│   ├── event_mapper_test.rb        # Event mapping tests
-│   ├── privacy/
-│   │   └── pii_detector_test.rb    # Privacy tests
-│   ├── projections/
-│   │   └── cached_relation_test.rb # CachedRelation tests (37 tests)
-│   ├── schema/
-│   │   └── event_class_registrar_test.rb # Event class registration tests
-│   ├── interceptors/
-│   │   └── crud_interceptor_test.rb # Interceptor tests
-│   └── integration/
-│       ├── event_sourcing_mode_test.rb    # Integration tests (require full Rails)
-│       └── event_sourcing_integration_test.rb
-│
-gems/pam_dsl/
-├── test/
-│   ├── test_helper.rb              # PAM DSL test configuration
-│   ├── policy_test.rb              # Policy DSL tests
-│   ├── field_test.rb               # PII field tests
-│   ├── consent_test.rb             # Consent management tests
-│   ├── retention_test.rb           # Data retention tests
-│   └── registry_test.rb            # Policy registry tests
-│
-gems/petri_flow/
-└── test/
-    ├── test_helper.rb              # PetriFlow test configuration
-    ├── core/
-    │   ├── place_test.rb           # Place tests
-    │   ├── transition_test.rb      # Transition tests
-    │   └── net_test.rb             # Petri net tests
-    ├── matrix/
-    │   └── analyzer_test.rb        # Matrix analysis tests
-    └── simulation/
-        └── simulator_test.rb       # Simulation tests
+```bash
+cd examples/solidus_case_study
+bundle exec rspec                  # without a Selenium container
+bin/rspec-chrome-docker            # spec/system
+bin/rspec-chrome-docker spec       # the whole suite
 ```
 
-### Test Helpers
+See the README of each application for its setup.
 
-Each component has a `test_helper.rb` that:
-- Configures load paths
-- Requires the component library
-- Sets up Minitest with reporters
-- Configures test output formats
+## Test structure
 
-## Test Reports
+### Directory layout
 
-Tests generate JUnit XML reports suitable for CI/CD integration. Reports are created alongside the spec output and can be consumed by CI tools like:
-- GitHub Actions
-- Jenkins
-- CircleCI
-- GitLab CI
+```
+test/                               # Lyra
+├── test_helper.rb                  # loads test/dummy, its schema and the engine
+├── *_test.rb                       # unit tests, one file per component
+├── controllers/                    # dashboard, flow and privacy controllers
+├── integration/                    # end-to-end write paths, multi-mode, without PAM DSL
+├── interceptors/
+├── privacy/
+├── projections/
+├── schema/
+├── tasks/                          # rake tasks (erase, workflow generator)
+├── verification/                   # bypass and CRUD lifecycle nets
+├── fixtures/
+└── dummy/                          # minimal Rails application (config, db/schema.rb)
 
-## Writing Tests
+gems/pam_dsl/test/
+├── test_helper.rb
+└── *_test.rb                       # policy, field, consent, retention, registry, enforcement,
+                                    # GDPR compliance, PII detector and masker, reporter, ...
 
-### Basic Test Structure
+gems/petri_flow/test/
+├── test_helper.rb
+├── registry_test.rb, verification_runner_test.rb, workflow_test.rb
+├── colored/                        # arc expressions, colors, colored nets, guards
+├── core/                           # net_test.rb
+├── export/                         # CPN Tools, JSON, PNML, YAML exporters
+├── generators/                     # workflow_generator_test.rb
+├── matrix/                         # correlation, lineage
+├── simulation/                     # simulator, trace
+└── verification/                   # liveness checker, reachability analyzer
+```
+
+### Test helpers
+
+Each gem's `test_helper.rb` sets up SimpleCov, requires the library and
+configures Minitest reporters (`SpecReporter` and `JUnitReporter`).
+
+### Logging
+
+The test environments of `test/dummy` and of the example applications log at
+`:warn`, so test logs hold warnings and errors only.
+
+## Test reports
+
+`JUnitReporter` writes JUnit XML to each suite's `test/reports/` directory
+(`test/reports/` and `gems/*/test/reports/`), which CI tools can consume. The
+directories are gitignored.
+
+## Continuous Integration
+
+`.github/workflows/test.yml` runs on pushes and pull requests to `master`. It
+runs `bundle exec rake test:all` on Ruby 3.4 (the gemspec's floor is 3.4.5)
+and Ruby 4.0 (the project's `.ruby-version`), against a PostgreSQL 16 service
+on port 5433 with the `lyra_test` database, and uploads the JUnit XML reports
+as artifacts.
+
+## Writing tests
+
+### Basic structure
 
 ```ruby
 require "test_helper"
@@ -204,140 +256,65 @@ require "test_helper"
 module YourModule
   class YourClassTest < Minitest::Test
     def setup
-      # Setup code runs before each test
       @instance = YourClass.new
     end
 
-    def teardown
-      # Cleanup code runs after each test
-    end
-
     def test_something
-      result = @instance.do_something
-      assert_equal expected_value, result
+      assert_equal expected_value, @instance.do_something
     end
 
     def test_raises_error
-      assert_raises(SomeError) do
-        @instance.problematic_method
-      end
+      assert_raises(SomeError) { @instance.problematic_method }
     end
   end
 end
 ```
 
-### Common Assertions
-
-```ruby
-assert(condition)                    # Assert condition is truthy
-refute(condition)                    # Assert condition is falsy
-assert_equal(expected, actual)       # Assert equality
-refute_equal(expected, actual)       # Assert inequality
-assert_nil(value)                    # Assert value is nil
-refute_nil(value)                    # Assert value is not nil
-assert_includes(collection, item)    # Assert collection includes item
-assert_raises(Error) { code }        # Assert code raises error
-assert_instance_of(Class, object)    # Assert object is instance of class
-```
-
-### Using Mocks (Lyra only)
+### Mocks (Lyra only)
 
 ```ruby
 def test_with_mock
   mock_object = mock("description")
   mock_object.expects(:method_name).with(arg).returns(value)
-
-  # Test code that uses mock_object
-
-  # Mocha automatically verifies expectations
+  # Mocha verifies expectations automatically
 end
 
 def test_with_stub
   object = SomeClass.new
   object.stubs(:method).returns(stubbed_value)
-
-  # Test code
 end
 ```
 
-## Continuous Integration
+### Modes in tests
 
-The repository includes a GitHub Actions workflow (`.github/workflows/test.yml`) that:
-- Runs tests on Ruby 3.4+
-- Tests all components
-- Uploads test results as artifacts
+Switch modes with the raw setter (`Lyra.config.mode = :hijack`,
+`Lyra.config.projection_mode = :lazy`); it is ungated and records nothing.
+`Lyra.reset_config!` restores the defaults. In the test environment the
+mode-transition gate and ModeSync are off, and `:async` projections run inline
+unless `config.async_projections_inline = false`. See
+[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#testing-during-the-migration).
 
-## Best Practices
+## Adding new tests
 
-1. **Test Names**: Use descriptive test method names starting with `test_`
-2. **One Assertion Per Test**: Focus each test on a single behavior
-3. **Setup/Teardown**: Use `setup` and `teardown` for common initialization
-4. **Test Coverage**: Aim for comprehensive coverage of public APIs
-5. **Fast Tests**: Keep tests fast by avoiding I/O when possible
-6. **Independent Tests**: Tests should not depend on each other
-7. **Descriptive Failures**: Use custom failure messages when helpful
+1. Create the file under `test/` (Lyra), `gems/pam_dsl/test/` or
+   `gems/petri_flow/test/`, named `*_test.rb`.
+2. `require "test_helper"` and define a class inheriting from
+   `Minitest::Test` (or `ActiveSupport::TestCase` where the suite uses it).
+3. Run it with `bundle exec ruby -Ilib:test path/to/file_test.rb`, then the
+   whole suite with `bundle exec rake test`.
 
 ## Troubleshooting
 
-### Tests Not Found
+### Tests not found
 
-Ensure test files:
-- Are in the `test/` directory
-- End with `_test.rb`
-- Require `test_helper`
-- Define test classes inheriting from `Minitest::Test`
+Test files must be under `test/`, end in `_test.rb`, require `test_helper`,
+and define classes inheriting from a Minitest test class.
 
-### Load Errors
+### Database connection errors in the engine suite
 
-Check that:
-- Dependencies are installed: `bundle install`
-- Load paths are correct in `test_helper.rb`
-- Required files exist
+Start PostgreSQL with `bundle exec rake docker:start` and check that the
+`lyra_test` database exists on port 5433.
 
-### Permission Errors
+### Load errors
 
-Make the test script executable:
-```bash
-chmod +x bin/test
-```
-
-## Adding New Tests
-
-1. Create test file in appropriate directory:
-   - `test/` for Lyra
-   - `gems/pam_dsl/test/` for PAM DSL
-   - `gems/petri_flow/test/` for PetriFlow
-
-2. Follow naming convention: `*_test.rb`
-
-3. Require test helper:
-   ```ruby
-   require "test_helper"
-   ```
-
-4. Define test class:
-   ```ruby
-   module YourModule
-     class YourClassTest < Minitest::Test
-       # tests here
-     end
-   end
-   ```
-
-5. Run tests to verify:
-   ```bash
-   rake test
-   ```
-
-## Contributing
-
-When adding new features:
-1. Write tests first (TDD)
-2. Ensure all tests pass
-3. Maintain or improve coverage
-4. Follow existing test patterns
-
-For bug fixes:
-1. Write a failing test that demonstrates the bug
-2. Fix the bug
-3. Verify the test now passes
+Run `bundle install` at the root, and check the load paths in `test_helper.rb`.

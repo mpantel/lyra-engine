@@ -2,9 +2,13 @@ module Lyra
   class Configuration
     # Valid modes for Lyra operation
     MODES = [:disabled, :monitor, :hijack, :event_sourcing].freeze
+    # Valid projection modes (event sourcing): :disabled is ES-NoProj, :lazy
+    # is ES-Lazy (project on read).
+    PROJECTION_MODES = [:sync, :async, :disabled, :lazy].freeze
 
-    attr_accessor :mode, :event_store, :event_backend, :hijack_enabled, :retention_policy
-    attr_accessor :projection_mode, :strict_projections, :projection_error_handler, :async_projections_inline
+    attr_reader :mode, :projection_mode
+    attr_accessor :event_store, :event_backend, :hijack_enabled, :retention_policy
+    attr_accessor :strict_projections, :projection_error_handler, :async_projections_inline
     attr_accessor :strict_schema, :schema_path
     attr_accessor :strict_data_access  # Raise on callback-bypassing operations
     attr_accessor :metadata_proc  # Custom metadata proc for events
@@ -48,6 +52,13 @@ module Lyra
     # The column each model's retention period runs from, by model name;
     # created_at when not named.
     attr_accessor :retention_anchors
+    # Who may use the dashboard (Lyra::ApplicationController): a proc run
+    # before every engine action, instance_exec'd on the controller (and
+    # given it as its argument when it takes one). Truthy allows; falsy
+    # answers 403. nil (default): allowed in development and test only,
+    # refused everywhere else, since the routes expose personal data.
+    #   config.dashboard_authorization = ->(controller) { controller.current_user&.admin? }
+    attr_accessor :dashboard_authorization
 
     def initialize
       @mode = :monitor
@@ -87,6 +98,17 @@ module Lyra
       @reads_without_purpose = :allow
       @retention_executor = false
       @retention_anchors = {}
+      @dashboard_authorization = nil
+    end
+
+    # One of MODES; a string (from ENV, say) is taken as its symbol.
+    def mode=(mode)
+      @mode = validate_choice!(:mode, mode, MODES)
+    end
+
+    # One of PROJECTION_MODES; a string is taken as its symbol.
+    def projection_mode=(mode)
+      @projection_mode = validate_choice!(:projection_mode, mode, PROJECTION_MODES)
     end
 
     def reads_without_purpose=(mode)
@@ -219,6 +241,16 @@ module Lyra
     def disable!
       @mode = :disabled
       @hijack_enabled = false
+    end
+
+    private
+
+    def validate_choice!(name, value, valid)
+      choice = value.is_a?(String) ? value.strip.to_sym : value
+      return choice if valid.include?(choice)
+
+      raise ArgumentError,
+            "config.#{name} must be one of #{valid.map(&:inspect).join(', ')} (got #{value.inspect})"
     end
   end
 

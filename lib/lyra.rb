@@ -10,8 +10,15 @@ else
   Lyra::OptionalDependency.load("pam_dsl")
 end
 
-# PetriFlow is optional - required for formal verification
-PETRI_FLOW_AVAILABLE = Lyra::OptionalDependency.load("petri_flow")
+# PetriFlow is optional - required for formal verification.
+# Set LYRA_DISABLE_PETRI_FLOW=true to run Lyra as without the gem (the
+# engine then neither autoloads nor eager-loads app/workflows, see
+# Lyra::Engine).
+PETRI_FLOW_AVAILABLE = if ENV["LYRA_DISABLE_PETRI_FLOW"] == "true"
+  false
+else
+  Lyra::OptionalDependency.load("petri_flow")
+end
 
 # Only load engine when Rails is available
 if defined?(Rails)

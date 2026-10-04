@@ -194,7 +194,7 @@ Now we see OrderCreated transitively causes Shipped (through PaymentProcessed).
 
 ```ruby
 # Track causation in event metadata
-Lyra::Correlation.track_causation(cause_event_id, effect_event_id)
+Lyra::Causation.track(cause_event_id, effect_event_id)
 
 # Build causation matrix from event store
 def build_causation_matrix
@@ -662,10 +662,44 @@ Events with high centrality are "hubs" in causation graph.
 
 ## 12. Practical Implementation in Lyra
 
-### Example: Build All Matrices
+### What the gem provides
+
+PetriFlow ships `PetriFlow::Matrix::Analyzer` (also returned by
+`PetriFlow.create_analyzer`). It does not read an event store; you feed it
+event hashes and it fills the CRUD-mapping, correlation, causation and lineage
+matrices (`PetriFlow::Matrix::CrudEventMapping`, `Correlation`, `Causation`,
+`Lineage`), plus a reachability matrix computed from a net:
 
 ```ruby
-class Lyra::MatrixAnalyzer
+analyzer = PetriFlow::Matrix::Analyzer.new
+analyzer.analyze_events([
+  { event_id: "e1", operation: :create, event_type: "StudentCreated",
+    changes: { "email" => [nil, "a@example.org"] }, timestamp: t1 },
+  { event_id: "e2", operation: :update, event_type: "StudentUpdated",
+    caused_by_event_id: "e1",
+    changes: { "email" => ["a@example.org", "b@example.org"] }, timestamp: t2 }
+])
+
+analyzer.find_causation_chain("e1", "e2")  # => ["e1", "e2"]
+analyzer.field_history("email")            # => [{event_id: "e1", old_value: nil, ...}, ...]
+analyzer.flow_completeness                 # => {crud_operations: 2, events_generated: 2, ...}
+analyzer.privacy_impact_analysis           # => {fields_tracked: 1, ...}
+analyzer.compute_reachability(net, net.current_marking)
+analyzer.generate_report                   # => {crud_mapping:, correlation:, causation:, lineage:, reachability:}
+```
+
+`generate_report` omits `reachability` until `compute_reachability` has been called.
+
+### Illustrative sketch: matrices straight from the event store
+
+The class below is a hypothetical sketch, not part of PetriFlow or Lyra. It
+shows how the matrices of this document could be built directly from Rails
+Event Store events. Its `pii_exposure_matrix` assumes a per-event
+`metadata[:pii_detected]` hash that Lyra does not write; Lyra's opt-in privacy
+stamp is `metadata[:privacy]`.
+
+```ruby
+class MatrixAnalyzerSketch  # hypothetical
   def initialize(model_class = nil, time_range = nil)
     @model_class = model_class
     @time_range = time_range
@@ -778,10 +812,10 @@ class Lyra::MatrixAnalyzer
 end
 ```
 
-### Usage:
+### Usage of the sketch:
 
 ```ruby
-analyzer = Lyra::MatrixAnalyzer.new('Student', 1.week.ago..Time.current)
+analyzer = MatrixAnalyzerSketch.new('Student', 1.week.ago..Time.current)
 
 # Generate all matrices
 report = analyzer.generate_report

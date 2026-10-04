@@ -1,943 +1,559 @@
-# Projections for Data Access Monitoring in Lyra
+# Projections and Data Access Monitoring in Lyra
 
 ## Overview
 
-Lyra implements a sophisticated projection system for monitoring data access through event sourcing. Projections are "read models" that reconstruct application state from immutable events, providing complete audit trails and privacy compliance capabilities.
+A projection is a read model built from events. Lyra uses projections in
+three ways:
+
+- **Replay**: rebuild one record's state from its stream (`StateProjection`),
+  or list what happened to it (`AuditProjection`).
+- **Table projections**: in the event-sourcing configurations the events are
+  authoritative and the model's table is a projection of them, kept up to
+  date synchronously, by a background job, lazily before each read, or not at
+  all (reads then come from the events themselves).
+- **Analysis**: event flows and data lineage (`EventFlow`), row-versus-events
+  comparison (`DualView`), and GDPR reports (`GDPRCompliance`).
+
+Data access monitoring has a write side and a read side. Every write to a
+monitored model is recorded as an event with who made it and in which causal
+chain. Reads of models covered by a privacy policy can be bound to a declared
+purpose, checked against the policy, and recorded in an access log.
+
+This document explains how these parts work. The exact API is in
+[API_REFERENCE.md](API_REFERENCE.md); the layers are described in
+[ARCHITECTURE.md](ARCHITECTURE.md); GDPR workflows are in
+[PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md).
 
 ---
 
-## 1. Core Projection Architecture
+## 1. Streams and Replay
 
-### Base Projection Class
+Each record has one stream, `"#{Model.name}$#{id}"` (`"Student$1"`,
+`"Spree::Price$7"`). Its events carry a data envelope with `model_class`,
+`model_id`, `operation`, `attributes`, `changes` and `timestamp` (see
+[API_REFERENCE.md](API_REFERENCE.md#lyraevent)).
 
-**Location:** `/lib/lyra/projection.rb`
+Replay dispatches on the operation each event recorded, read by
+`Lyra::Event.operation_of(event)`:
 
-```ruby
-module Lyra
-  class Projection
-    def self.handle(event)
-      new.handle(event)
-    end
+| Operation | Effect on the replayed state |
+|---|---|
+| `:created` | the event's attributes become the state |
+| `:imported` | the same; written by Genesis for a row that predates Lyra, and by repair |
+| `:updated` | the new value of each change is applied |
+| `:destroyed` | the record is marked destroyed |
+| `nil` | not replayed (an additional domain event declared with `also: true`, for example) |
 
-    def self.subscribe_to(*event_types)
-      event_types.each do |event_type|
-        Lyra.config.event_store.subscribe(self, to: [event_type])
-      end
-    end
-
-    def handle(event)
-      method_name = "apply_#{event.class.name.demodulize.underscore}"
-      send(method_name, event) if respond_to?(method_name, true)
-    end
-  end
-end
-```
-
-**Key Features:**
-- Projections subscribe to specific event types
-- Event handlers use convention-based method dispatch (`apply_*`)
-- Non-intrusive event processing
-- Composable read model system
+`operation_of` reads the operation from the event's data and falls back to the
+event name's suffix only for events that carry none, so a domain event that
+replaces a CRUD event (`PaymentCompleted` for an update) replays as the
+operation it stands for. The same rule is used by every replay in Lyra:
+`StateProjection`, the ES-NoProj reader, rebuilds, DualView and the mode
+check.
 
 ---
 
-## 2. Projection Types
+## 2. Projection Classes
 
-### StateProjection - Current State Reconstruction
+**Location:** `lib/lyra/projection.rb`
 
-Rebuilds the current state of an entity from its complete event stream:
+### `Lyra::Projection`
 
-```ruby
-class StateProjection < Projection
-  def self.rebuild_state(model_class, model_id)
-    stream_name = "#{model_class.name}-#{model_id}"
-    events = Lyra.config.event_store.read.stream(stream_name).to_a
-    new.rebuild_from_events(events)
-  end
+The base class for custom read models. `handle(event)` calls
+`apply_<event class name, demodulized and underscored>` if the projection
+defines it, so `Lyra::Events::StudentCreated` goes to `apply_student_created`.
+`Projection.handle(event)` does the same on a new instance.
 
-  def rebuild_from_events(events)
-    state = {}
-    events.each do |event|
-      case event.operation
-      when :created
-        state = event.attributes
-      when :updated
-        state.merge!(event.changes.transform_values { |v| v.last })
-      when :destroyed
-        state[:deleted] = true
-        state[:deleted_at] = event.timestamp
-      end
-    end
-    state
-  end
-end
-```
-
-**Use Cases:**
-- Verify current record state matches database
-- State validation in dual-view comparisons
-- Aggregate reconstruction
-
-### AuditProjection - Complete Access History
-
-Provides complete audit trail of all CRUD operations:
+`Projection.subscribe_to(*event_types)` passes the class to the event store's
+`subscribe`. RubyEventStore 3 accepts only handlers that respond to `call`,
+and `Lyra::Projection` defines `handle`, not `call`, so a subclass that
+subscribes this way needs a class-level `call`:
 
 ```ruby
-class AuditProjection < Projection
-  def self.audit_trail(model_class, model_id)
-    stream_name = "#{model_class.name}-#{model_id}"
-    events = Lyra.config.event_store.read.stream(stream_name).to_a
+class EnrollmentStats < Lyra::Projection
+  def self.call(event) = handle(event)
 
-    events.map do |event|
-      {
-        operation: event.operation,
-        timestamp: event.timestamp,
-        user_id: event.metadata[:user_id],
-        changes: event.changes,
-        attributes: event.attributes
-      }
-    end
+  private
+
+  def apply_student_created(event)
+    # update your read model
   end
 end
+
+EnrollmentStats.subscribe_to(Lyra::Events::StudentCreated)
 ```
 
-**Provides:**
-- Complete who-what-when audit logs
-- Field-level change tracking
-- User action attribution
-- Temporal data lineage
+### `Lyra::StateProjection`
+
+`StateProjection.rebuild_state(model_class, id)` reads the record's stream and
+returns the replayed attributes, following the table in section 1. A destroyed
+record's state keeps its last attributes and gains `deleted: true` and
+`deleted_at`.
+
+### `Lyra::AuditProjection`
+
+`AuditProjection.audit_trail(model_class, id)` returns one hash per event of
+the record's stream: `operation`, `timestamp`, `user_id` (from the event's
+metadata), `changes` and `attributes`. Which write paths record a `user_id`
+is listed under [Metadata](API_REFERENCE.md#metadata).
 
 ---
 
-## 3. Data Access Monitoring Integration
+## 3. Write-Side Monitoring
 
-### CrudInterceptor
+**Location:** `lib/lyra/interceptors/crud_interceptor.rb`
 
-**Location:** `/lib/lyra/interceptors/crud_interceptor.rb:171-196`
+The engine includes `Lyra::Interceptors::CrudInterceptor` in every
+ActiveRecord model; `monitor_with_lyra` (or `config.models`) turns it on for a
+model. What a write does depends on the configuration:
 
-The interception layer monitors all CRUD operations:
+- **Monitor**: the row is written, then `build_event_data` assembles the
+  envelope (attributes without `created_at` and `updated_at`, the write's
+  `previous_changes`, a timestamp) and the event is appended to the record's
+  stream in the same transaction.
+- **Hijack and event sourcing**: the write becomes a command
+  (`Lyra::Commands::CreateCommand`, `UpdateCommand`, `DestroyCommand`) run by
+  `Lyra::CommandHandler`; the event is stored first, and then the row is
+  written, projected, or skipped, as section 4 describes.
 
-```ruby
-module Lyra::Interceptors::CrudInterceptor
-  # Monitor mode: after callbacks that log events
-  def lyra_intercept_create
-    event_data = build_event_data(:created)
-    publish_event(:created, event_data)
-  end
+Both paths attach attribution metadata to the event: the correlation and
+causation ids in scope (`Lyra::Correlation.with_id`,
+`Lyra::Causation.with_id`), and on the Monitor path the user, the request and
+the user action in scope (`Lyra::UserActionContext`). The keys each path
+writes are listed under [Metadata](API_REFERENCE.md#metadata).
 
-  def build_event_data(operation)
-    {
-      model_class: self.class.name,
-      model_id: id,
-      operation: operation,
-      attributes: attributes.except("created_at", "updated_at"),
-      changes: previous_changes,
-      timestamp: Time.current,
-      metadata: {
-        user_id: lyra_current_user_id,
-        request_id: lyra_current_request_id,
-        correlation_id: Lyra::Correlation.current_id,
-        action_id: lyra_current_action_id,
-        user_action: lyra_current_user_action
-      }
-    }
-  end
-end
-```
+Writes that skip callbacks (`update_all`, `delete_all`, `update_columns`,
+`insert_all`, ...) are recorded as bypass events, one per affected record;
+with `config.strict_data_access` they raise
+`Lyra::StrictDataAccessViolation` instead (see
+[API_REFERENCE.md](API_REFERENCE.md#callback-bypassing-writes)). Raw SQL,
+triggers and other applications writing the same tables are not seen.
 
-**Tracking Includes:**
-- User ID and request context
-- Request correlation IDs
-- User actions and controller context
-- Complete attribute snapshots
-- Before/after changes
+### Privacy stamps (opt-in)
+
+With `config.annotate_privacy = true`, each event of a model whose policy is
+loaded carries `metadata[:privacy]`: the policy name and, for every declared
+attribute the event touches, its type, sensitivity, purposes, retention and
+transformations, as the policy stood when the data was written. Values are
+never copied into the stamp. `Lyra::Privacy.stamp_of(event)` reads it back
+(`nil` for an unstamped event).
 
 ---
 
-## 4. Privacy-Aware Data Access Monitoring
+## 4. Table Projections in Each Configuration
 
-### PolicyIntegration
+Event sourcing (`config.mode = :event_sourcing`) has four projection modes.
+Together with Disabled, Monitor and Hijack they make seven configurations;
+the full table is in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#the-modes-at-a-glance).
 
-**Location:** `/lib/lyra/privacy/policy_integration.rb:37-62`
+| Configuration | `projection_mode` | How the table follows the events |
+|---|---|---|
+| ES-Sync | `:sync` (default) | `Lyra::Projections::ModelProjection` writes the row in the write's transaction |
+| ES-Async | `:async` | `Lyra::Projections::AsyncProjectionJob` (queue `lyra_projections`, enqueued after commit) replays the record's stream onto the row |
+| ES-NoProj | `:disabled` | no row is written; reads are answered from the events |
+| ES-Lazy | `:lazy` | no row at write time; pending events are applied before each read |
 
-Integrates PAM DSL privacy policies with projection system:
+In ES-Sync and ES-Async a failed projection is logged and passed to
+`config.projection_error_handler`, or re-raised with
+`config.strict_projections = true`.
+
+### ES-NoProj: reads from the event store
+
+**Locations:** `lib/lyra/projections/event_store_reader.rb`,
+`cached_projection.rb`, `cached_relation.rb`,
+`lib/lyra/interceptors/association_interceptor.rb`
 
 ```ruby
-class Lyra::Privacy::PolicyIntegration
-  def validate_access!(field_names, purpose, consent_status = {})
-    @policy.validate_access!(
-      field_names,
-      purpose,
-      consent_granted: consent_status[:granted] || false,
-      consent_granted_at: consent_status[:granted_at]
-    )
-  end
-
-  def detect_pii(attributes)
-    pii_fields = {}
-    attributes.each do |key, value|
-      field_name = key.to_sym
-      begin
-        field = @policy.get_field(field_name)
-        pii_fields[key] = {
-          type: field.type,
-          value: value,
-          sensitive: field.sensitive?,
-          sensitivity: field.sensitivity
-        }
-      rescue PamDsl::InvalidFieldError
-        # Fallback to PIIDetector
-      end
-    end
-    pii_fields
-  end
-
-  def mask_pii(field_name, value, context = :display)
-    field = @policy.get_field(field_name)
-    field.apply_transformation(context, value)
-  end
+Lyra.configure do |config|
+  config.mode = :event_sourcing
+  config.projection_mode = :disabled
 end
 ```
 
-**Key Capabilities:**
-- Purpose-based access validation
-- Field-level sensitivity classification
-- Context-aware PII masking (display, logging, API)
-- Consent requirement checking
-- Retention duration enforcement
+**Write path.** The command stores the event, the record's cache entry is
+rebuilt (or dropped, for a destroy), and the SQL statement is skipped.
+
+**Read path.** On a monitored model, `find`, `find_by`, `find_by!`,
+`exists?` with an id, `where`, `all`, `first` and `last` go to
+`Lyra::Projections::EventStoreReader`. It rebuilds each record by replaying
+its stream, through `Lyra::Projections::CachedProjection`:
+
+- One `Rails.cache` entry per record, under
+  `lyra_projections/<Model>/records/<id>/v2`, holding the attributes and the
+  id of the last event they were built from. An entry is used only while that
+  is still the stream's last event, so a stale entry is detected rather than
+  served. Entries expire after an hour. There is no cache entry for a whole
+  collection.
+- A collection (`all`, `where`, `count`, `find_by` on other attributes) is
+  assembled from the record entries: one query for the last event of every
+  stream of the model, one bulk cache read, and a replay of the streams whose
+  entry is missing or out of date.
+
+Collections are `Lyra::Projections::CachedRelation` objects, evaluated in
+Ruby. They support hash conditions (values, arrays, ranges, `nil`, records),
+`where.not`, `or`, simple SQL fragments of `"column OP ?"` terms, ordering,
+`limit`/`offset`, `page`/`per`, `joins` on direct associations (evaluated in
+memory), `count`, `sum`, `average`, `minimum`, `maximum`, `group`, `pluck`,
+batches, and scopes that reduce to hash conditions; the complete list is in
+[API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled).
+Query values are compared as controller parameters arrive: the string `"2"`
+matches the integer `2`, and `"true"`/`"false"` match booleans.
+
+Anything it cannot answer exactly raises
+`Lyra::Projections::UnsupportedQuery` rather than returning an unfiltered or
+partly filtered answer: other SQL fragments, string, nested, `:through`,
+polymorphic or scoped joins, conditions on tables not joined, and scopes it
+cannot reduce. Use ES-Lazy or a projected configuration for such queries.
+
+**Associations.** The engine installs
+`Lyra::Interceptors::AssociationInterceptor`, so `belongs_to`, `has_one` and
+`has_many` associations whose target is a monitored model are read the same
+way; a `has_many` returns a `CachedRelation`, and a polymorphic `belongs_to`
+resolves its class from the type column.
+
+**Genesis.** In ES-NoProj a model's first read in a process, as well as its
+first write, imports rows that predate Lyra, so they have streams to read.
+
+### ES-Lazy: tables brought up to date before each read
+
+**Location:** `lib/lyra/projections/lazy_projection.rb`
+
+Writes store events only. Before any ActiveRecord read on any model (record
+loads, associations, calculations, `pluck`, `exists?`),
+`Lyra::Projections::LazyProjection` applies the events not yet in the tables,
+in the log's global order, under a PostgreSQL advisory lock; the read then runs
+as real SQL. The checkpoint is kept in `lyra_projection_checkpoints`. SQL sent
+directly through the connection does not trigger a catch-up. Because event ids
+are assigned before commit, ES-Lazy tracks gaps in the log; a gap still empty
+after `LazyProjection::GAP_TTL` (300 seconds) is treated as a rollback, so a
+single transaction open longer than that has its events skipped by the tables.
+
+### Rebuild
+
+**Location:** `lib/lyra/projections/rebuild.rb`
+
+`Lyra::Projections::Rebuild.rebuild(Model)` clears the table (unless
+`truncate: false`) and replays every stream through the same projection code
+live writes use; `rebuild_all` does every monitored model, and
+`replay_record(Model, id)` one record. `bin/rails lyra:projections:rebuild
+[MODEL=A,B] [TRUNCATE=false]` runs it from the command line. Rows without a
+stream are lost by a truncating rebuild, so run Genesis first; see
+[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#recovery).
 
 ---
 
-## 5. Privacy Policies Configuration
+## 5. Read-Side Monitoring
 
-### Policy Definition
+### Purpose-bound reads
 
-**Location:** `/config/privacy_policies.rb`
+**Location:** `lib/lyra/purpose_bound_reads.rb`
 
-Example: University System Policy with PAM DSL:
+A read of a monitored model whose privacy policy is loaded, made within a
+declared purpose, is checked with the policy's
+`validate_access!(field_names, purpose, subject:)`: every declared attribute
+the query loaded must be allowed for the purpose, with the record as the
+subject. No setting turns this on; declaring a purpose does:
+
+```ruby
+Lyra.with_purpose(:enrollment) { Student.select(:id, :email, :name).find(id) }
+
+class EnrollmentsController < ApplicationController
+  lyra_purpose :enrollment                      # around every action
+  lyra_purpose :payment_processing, only: :pay  # around_action options
+end
+
+class ExportJob < ApplicationJob
+  lyra_purpose :legal_compliance
+end
+```
+
+- Loading a declared attribute the purpose does not allow is a violation, so
+  select what the purpose needs.
+- `pluck` and `pick` are checked by the declared attributes they name, with
+  `"Model$*"` as the subject. Under a purpose whose consent the policy
+  requires they are refused, since no single person's consent can be checked.
+- In ES-NoProj the check is made on the records a query returns.
+- The policy's enforcement mode decides a violation: strict raises the PAM
+  error from the read, audit logs it and lets the read through.
+- A read with no purpose follows `config.reads_without_purpose`: `:allow`
+  (default), `:audit` (logged, and recorded when the access log is on), or
+  `:deny` (raises `Lyra::PurposeBoundReads::PurposeRequiredError`).
+- Not checked: Lyra's own reads (projections, Genesis, DualView, mode checks,
+  repair, erasure), Disabled mode, and SQL sent through the connection.
+
+### The access log (opt-in, needs pam_dsl)
+
+**Location:** `lib/lyra/access_log.rb`
+
+With `config.record_access_events = true`, `Lyra::AccessLog` records every
+call of a policy's `validate_access!` (from purpose-bound reads or from your
+own code) as an event:
+
+- `Lyra::Events::DataAccessed`, outcome `granted`, or `audited` when audit
+  mode let the access through despite violations;
+- `Lyra::Events::DataAccessDenied` when strict mode refused it.
+
+Each goes to the subject's access stream, `"Lyra::DataAccess$<subject>"`
+(`"Lyra::DataAccess$Student$1"` for a record), never to the record's own
+stream, so replay, DualView and mode checks do not see it. The data holds the
+policy, purpose, legal basis, field names (never values), subject, outcome,
+time and any violations. The metadata holds `user_id` and `ip_address` when
+the application keeps them in `Current`, the request, correlation and
+causation ids, and the hash returned by `config.access_metadata_proc`
+(`->(access) { Hash }`). An access that cannot be recorded does not go ahead.
+Nothing is recorded in Disabled mode.
+
+```ruby
+config.record_access_events = true
+config.access_metadata_proc = ->(access) { { api_token: Current.api_token&.id } }
+
+Lyra::AccessLog.for(student)   # its recorded accesses, oldest first
+```
+
+---
+
+## 6. Privacy Policy Integration
+
+### Policies
+
+Policies are written in the PAM DSL (`gems/pam_dsl`). `config/privacy_policies.rb`
+holds two example policies, `:university_system` and `:ecommerce`. An excerpt:
 
 ```ruby
 PamDsl.define_policy :university_system do
-  # Field definitions
   field :email, type: :email, sensitivity: :internal do
     allow_for :authentication, :communication, :enrollment, :payment_processing
     transform :display do |value|
       local, domain = value.split('@')
       "#{local[0]}***@#{domain}"
     end
-    transform :log do |value|
-      "***EMAIL***"
-    end
   end
 
-  field :ssn, type: :ssn, sensitivity: :restricted do
-    allow_for :legal_compliance, :financial_aid
-    transform :display do |value|
-      "***-**-#{value[-4..]}"
-    end
-  end
-
-  # Purpose definitions
   purpose :enrollment do
     describe "Student enrollment and registration"
     basis :contract
-    requires :email, :name, :student_id
+    requires :email, :name, :student_id, :date_of_birth
     optionally :phone, :address
   end
 
-  # Retention policies
   retention do
     for_model 'Student' do
       keep_for 10.years
       field :email, duration: 2.years
-      field :academic_records, duration: 50.years
       on_expiry :archive
     end
   end
-
-  # Consent requirements
-  consent do
-    for_purpose :marketing do
-      required!
-      granular!
-      expires_in 2.years
-    end
-  end
-end
-```
-
-**Policy Components:**
-- **Fields**: PII classification with sensitivity levels (public, internal, confidential, restricted)
-- **Purposes**: Data processing reasons with GDPR legal bases
-- **Retention**: Duration rules per model/field with expiry strategies
-- **Consent**: Requirements, granularity, and withdrawal management
-
----
-
-## 6. Event Flow Analysis
-
-### EventFlow Class
-
-**Location:** `/lib/lyra/event_flow.rb`
-
-Advanced projection system for analyzing data access patterns:
-
-```ruby
-class Lyra::EventFlow
-  def flow_data
-    events = load_events
-    grouped = group_by_correlation(events)
-    {
-      timeline: build_timeline(events),
-      flows: build_flows(grouped),
-      statistics: calculate_statistics(events),
-      privacy_impact: analyze_privacy_impact(events)
-    }
-  end
-
-  def data_lineage(field_name, model_class = nil)
-    lineage = []
-    events.each do |event|
-      if event.attributes.key?(field_name) || event.changes.key?(field_name)
-        lineage << {
-          timestamp: event.timestamp,
-          event_id: event.event_id,
-          model: event.model_class,
-          record_id: event.model_id,
-          operation: event.operation,
-          old_value: event.changes.dig(field_name, 0),
-          new_value: event.changes.dig(field_name, 1),
-          user_id: event.metadata[:user_id],
-          action: event.metadata[:user_action]
-        }
-      end
-    end
-    lineage
-  end
-
-  def privacy_impact_analysis
-    pii_inventory = Lyra::Privacy::PIIDetector.extract_from_event_stream(events)
-    {
-      total_events: events.count,
-      events_with_pii: events.count { |e| has_pii?(e) },
-      pii_categories: pii_inventory.keys,
-      sensitive_data_present: pii_inventory.keys.any? { |k|
-        [:ssn, :credit_card, :health, :biometric].include?(k)
-      }
-    }
-  end
-end
-```
-
-**Provides:**
-- Complete event chains with correlation IDs
-- Data lineage tracking (field-level history)
-- Privacy impact assessment
-- Risk calculation (sensitive data exposure)
-
----
-
-## 7. Dual-View Comparison System
-
-### DualView
-
-**Location:** `/lib/lyra/dual_view.rb`
-
-Compares database state with event-sourced projections:
-
-```ruby
-class Lyra::DualView
-  def compare
-    {
-      crud_view: crud_state,
-      event_sourced_view: event_sourced_state,
-      differences: calculate_differences,
-      metadata: {
-        model_class: model_class.name,
-        model_id: model_id,
-        timestamp: Time.current,
-        mode: Lyra.config.mode
-      }
-    }
-  end
-
-  def event_sourced_state
-    stream_name = "#{model_class.name}-#{model_id}"
-    events = Lyra.config.event_store.read.stream(stream_name).to_a
-    state = StateProjection.new.rebuild_from_events(events)
-    {
-      exists: true,
-      state: state,
-      events_count: events.count,
-      events_summary: events.map { |e|
-        { type: e.class.name, operation: e.operation, timestamp: e.timestamp }
-      }
-    }
-  end
-
-  def audit_trail
-    AuditProjection.audit_trail(model_class, model_id)
-  end
-end
-```
-
-**Validation Features:**
-- State consistency verification
-- Access pattern auditing
-- Discrepancy detection
-- Migration safety verification
-
----
-
-## 8. PII Detection and Masking
-
-### PIIDetector
-
-**Location:** `/lib/lyra/privacy/pii_detector.rb`
-
-Pattern-based PII detection with masking:
-
-```ruby
-class Lyra::Privacy::PIIDetector
-  PII_PATTERNS = {
-    email: /email/i,
-    phone: /\b(phone|telephone|mobile|cell)\b/i,
-    ssn: /\b(ssn|social_security|national_id)\b/i,
-    credit_card: /\b(credit_card|card_number|ccn)\b/i,
-    health: /\b(medical|health|diagnosis|prescription)\b/i,
-    # ... more patterns
-  }
-
-  def self.detect(attributes)
-    pii_fields = {}
-    attributes.each do |key, value|
-      pii_type = detect_field_type(key.to_s)
-      if pii_type
-        pii_fields[key] = {
-          type: pii_type,
-          value: value,
-          sensitive: sensitive?(pii_type)
-        }
-      end
-    end
-    pii_fields
-  end
-
-  def self.mask(value, pii_type)
-    case pii_type
-    when :email
-      mask_email(value)          # "u***@example.com"
-    when :phone
-      "***-***-#{value[-4..]}"  # "***-***-1234"
-    when :ssn, :credit_card
-      "***REDACTED***"
-    when :name
-      mask_name(value)           # "John ***"
-    end
-  end
-
-  def self.extract_from_event_stream(events)
-    pii_inventory = Hash.new { |h, k| h[k] = [] }
-    events.each do |event|
-      pii_fields = detect(event.attributes)
-      pii_fields.each do |field, info|
-        pii_inventory[info[:type]] << {
-          event_id: event.event_id,
-          field: field,
-          timestamp: event.timestamp,
-          model_class: event.model_class
-        }
-      end
-    end
-    pii_inventory
-  end
-end
-```
-
-**Capabilities:**
-- Field pattern matching for automatic PII detection
-- Fallback detection when policy not defined
-- Context-aware masking
-- Event stream PII inventory extraction
-
----
-
-## 9. GDPR Compliance Projections
-
-### GDPRCompliance
-
-**Location:** `/lib/lyra/privacy/gdpr_compliance.rb`
-
-Projections for GDPR rights implementation:
-
-```ruby
-class Lyra::Privacy::GDPRCompliance
-  def data_export
-    # Article 15: Right to Access
-    {
-      subject: { id: subject_id, type: subject_type },
-      generated_at: Time.current,
-      events: collect_all_events,
-      pii_inventory: collect_pii_inventory,
-      data_lineage: trace_data_lineage,
-      processing_activities: collect_processing_activities
-    }
-  end
-
-  def right_to_be_forgotten_report
-    # Article 17: Right to be Forgotten
-    events = collect_all_events
-    {
-      subject: { id: subject_id, type: subject_type },
-      total_events: events.count,
-      affected_streams: affected_streams(events),
-      affected_models: affected_models(events),
-      deletion_strategy: recommend_deletion_strategy(events),
-      dependencies: find_dependencies(events)
-    }
-  end
-
-  def rectification_history
-    # Article 16: Track corrections
-    corrections = events.select do |event|
-      event.operation == :updated && has_subject_pii?(event)
-    end
-    corrections.map do |event|
-      {
-        timestamp: event.timestamp,
-        model: event.model_class,
-        changes: event.changes,
-        corrected_fields: identify_pii_changes(event.changes)
-      }
-    end
-  end
-end
-```
-
-**GDPR Support:**
-- Article 15: Right to Access (complete data export)
-- Article 16: Rectification tracking
-- Article 17: Right to be Forgotten analysis
-- Article 20: Data portability
-- Article 30: Processing activities record
-
----
-
-## 10. Configuration and Integration
-
-### Model Configuration
-
-**Location:** `/lib/lyra/configuration.rb`
-
-```ruby
-class Lyra::ModelConfiguration
-  attr_accessor :event_prefix, :aggregate_class, :privacy_policy
-
-  def initialize(model_class, options = {})
-    @model_class = model_class
-    @privacy_policy = options[:privacy_policy]  # Privacy policy integration
-    @aggregate_class = options[:aggregate_class]  # Custom aggregates
-  end
 end
 
-# Usage in models:
 class Student < ApplicationRecord
   monitor_with_lyra privacy_policy: :university_system
 end
 ```
 
----
+A model's policy is its `privacy_policy` option, else `config.privacy_policy`
+(`Lyra::Privacy.policy_for(Student)`). The DSL is summarised in
+[API_REFERENCE.md](API_REFERENCE.md#pam-dsl-essentials) and documented in
+[gems/pam_dsl/README.md](../gems/pam_dsl/README.md).
 
-## 11. Event Sourcing with Disabled Projections (Sixth Mode)
+### `Lyra::Privacy::PolicyIntegration`
 
-### Overview
+**Location:** `lib/lyra/privacy/policy_integration.rb`
 
-The **sixth mode** (`event_sourcing` + `projection_mode: :disabled`) implements pure CQRS where:
-- **Writes**: Events stored to event store, no database writes
-- **Reads**: State reconstructed from events, cached in Rails.cache/Solid Cache
+Combines a named policy with the provider's PII detector, through the
+`Lyra::Privacy` provider interface:
 
-This mode is useful for:
-- Pure event sourcing without relational database dependency
-- High-read scenarios where cache serves most queries
-- Systems where eventual consistency is acceptable
+| Method | Description |
+|---|---|
+| `new(policy_name, use_detector: true)` | Wrap the named policy. |
+| `validate_access!(field_names, purpose, subject:)` | The policy's access check: `true`, or the first violation raised (strict) / `false` (audit). |
+| `detect_pii(attributes)` | Declared fields first (`source: :policy`), then fields the detector finds (`source: :detector`) when `use_detector`. |
+| `mask_pii(field, value, context = :display)` | The policy's transformation for a declared field, else the detector's masking, else the value unchanged. |
+| `allowed?(field, purpose)`, `allowed_purposes(field)`, `consent_required?(purpose)` | Policy queries. |
+| `retention_duration(model_class, field_name: nil)` | Retention from the policy; `nil` without one. |
+| `sensitive_fields`, `restricted_fields`, `metadata`, `to_h` | Policy information. |
 
-### Configuration
+PAM's errors are defined in `gems/pam_dsl/lib/pam_dsl.rb`, all subclasses of
+`PamDsl::Error`: `PolicyNotFoundError`, `InvalidFieldError`,
+`UndeclaredPurposeError`, `PurposeFieldMismatchError`, `ConsentRequiredError`
+and `SensitivityViolationError`.
 
-```ruby
-Lyra.configure do |config|
-  config.mode = :event_sourcing
-  config.projection_mode = :disabled  # No database writes
-end
-```
+### PII detection and masking
 
-### CachedRelation
+**Locations:** `lib/lyra/privacy/pii_detector.rb`, `pii_masker.rb`
 
-**Location:** `/lib/lyra/projections/cached_relation.rb`
+`Lyra::Privacy::PIIDetector` has no patterns of its own: `detect`,
+`contains_pii?`, `mask`, `sensitive?` and `extract_from_event_stream` delegate
+to the provider's detector. With PAM that is `PamDsl::PIIDetector`, which
+classifies a field by its name (partial matching by default, so
+`billing_phone` is a phone; names that look like timestamps, counters, flags
+or amounts are excluded first). Without PAM nothing is detected. The detected
+types are listed in [API_REFERENCE.md](API_REFERENCE.md#pii-detection-and-masking).
 
-An ActiveRecord::Relation-like wrapper that operates on in-memory cached data:
-
-```ruby
-# Returns CachedRelation instead of AR::Relation
-users = User.where(status: "active")
-
-# Full query interface
-users.where(role: "admin")
-     .order(created_at: :desc)
-     .limit(10)
-     .offset(5)
-
-# Finders
-User.find(123)                    # By ID
-User.find_by(email: "foo@bar.com") # By attributes
-User.first                        # Ordered by primary key ASC
-User.last                         # Ordered by primary key DESC
-
-# Aggregations
-User.where(active: true).count
-User.sum(:balance)
-User.average(:age)
-User.pluck(:email, :name)
-
-# Pagination (Kaminari-compatible)
-User.page(2).per(25)
-```
-
-#### Type Coercion
-
-CachedRelation automatically handles type mismatches common with controller params:
-
-```ruby
-# String "2" matches integer 2
-User.where(id: "2")         # Works!
-User.where(id: ["1", "3"])  # Works!
-
-# String "true"/"false" matches booleans
-User.where(active: "true")  # Works!
-User.where(active: "false") # Works!
-```
-
-### EventStoreReader
-
-**Location:** `/lib/lyra/projections/event_store_reader.rb`
-
-Reconstructs entity state from event streams with caching:
-
-```ruby
-# Find by ID (checks cache, falls back to event replay)
-user = Lyra::Projections::EventStoreReader.find(User, 123)
-
-# Find by attributes
-user = Lyra::Projections::EventStoreReader.find_by(User, email: "foo@bar.com")
-
-# Get relation for queries
-relation = Lyra::Projections::EventStoreReader.relation(User)
-relation.where(status: "active").order(:name).to_a
-
-# Cache operations
-Lyra::Projections::EventStoreReader.warm(User, 123)      # Pre-load into cache
-Lyra::Projections::EventStoreReader.invalidate(User, 123) # Remove from cache
-```
-
-### AssociationInterceptor
-
-**Location:** `/lib/lyra/interceptors/association_interceptor.rb`
-
-Patches ActiveRecord associations to load from cache when in sixth mode:
-
-```ruby
-# These work transparently with cached data:
-order.customer          # belongs_to - loads from cache
-user.profile            # has_one - loads from cache
-user.orders             # has_many - returns CachedRelation
-user.orders.count       # Count without loading all records
-user.orders.empty?      # Check existence efficiently
-
-# Polymorphic associations supported
-comment.commentable     # Resolves type from cache
-```
-
-#### Installation
-
-Installed automatically by Lyra engine:
-
-```ruby
-# In lib/lyra/engine.rb
-initializer "lyra.install_association_interceptor" do
-  ActiveSupport.on_load(:active_record) do
-    Lyra::Interceptors::AssociationInterceptor.install!
-  end
-end
-```
-
-### Data Flow in Sixth Mode
-
-```
-Write Path:
-  User.create! → before_create → CreateCommand → Event stored
-                                              ↓
-                               Cache warmed with new data
-                                              ↓
-                               SQL INSERT skipped (projection_mode: :disabled)
-
-Read Path:
-  User.find(id) → Check cache → Hit? Return cached record
-                            ↓
-                     Miss? Replay events → Build state → Cache it → Return
-```
-
-### Cache Strategy
-
-Uses Rails.cache (Solid Cache in Rails 8):
-
-```ruby
-# Cache keys follow pattern:
-"lyra/User/123"           # Individual record
-"lyra/User/all"           # All records for Model.all
-
-# Cache is warmed on writes
-def lyra_warm_cache(operation, result)
-  case operation
-  when :create, :update
-    EventStoreReader.warm(self.class, model_id)
-  when :destroy
-    EventStoreReader.invalidate(self.class, model_id)
-  end
-end
-```
+Name-based detection is a fallback. Purpose-bound reads, the access log,
+privacy stamps and erasure use the attributes the policy declares.
 
 ---
 
-## 12. Data Access Monitoring Flow
+## 7. Analysis Projections
 
-### Flow Diagram
+### `Lyra::EventFlow`
 
-```
-User Action → CRUD Operation → CrudInterceptor
-                                      ↓
-                            (Monitor/Hijack Mode)
-                                      ↓
-                    ┌──────────────────┼──────────────────┐
-                    ↓                  ↓                  ↓
-              Event Creation    Policy Integration    Privacy Check
-                    ↓                  ↓                  ↓
-            Event Enrichment   PII Detection/Masking  Consent Validation
-                    ↓                  ↓                  ↓
-              Event Store Publishing & Logging
-                    ↓
-        ┌───────────────────────────────────────┐
-        ↓           ↓           ↓           ↓    ↓
-    Projections:
-    - StateProjection (current state)
-    - AuditProjection (access history)
-    - EventFlow (correlations & lineage)
-    - DualView (verification)
-    - GDPRCompliance (rights)
-```
+**Location:** `lib/lyra/event_flow.rb`
+
+`Lyra::EventFlow.new(subject_id: nil, subject_type: nil, time_range: nil)`
+reads events from the whole store, keeps those of the subject (by `user_id` in
+the metadata, or by model and id) when both subject arguments are given, and
+those in the time range (default: the last 30 days).
+
+| Method | Returns |
+|---|---|
+| `flow_data` | `{ timeline:, flows:, statistics:, privacy_impact: }`, events grouped by correlation id |
+| `data_lineage(field_name, model_name = nil)` | `{ field:, model_class:, total_modifications:, first_seen:, last_modified:, lineage: }`; each lineage entry has `timestamp`, `event_id`, `model`, `record_id`, `operation`, `old_value`, `new_value`, `source`, `user_id`, `action` |
+| `privacy_impact_analysis` | `{ total_events:, events_with_pii:, pii_categories:, pii_fields_count:, sensitive_operations:, data_flows:, risk_assessment: }` |
+| `crud_to_event_mapping(model_name, operation, model_id = nil)` | the events of one operation |
+| `reconstruct_state_chain(model, id)` | the state after each event of a record's stream |
+
+### `Lyra::DualView`
+
+**Location:** `lib/lyra/dual_view.rb`
+
+Compares a record's row with the state replayed from its stream.
+`DualView.new(model, id).compare` returns `crud_view`, `event_sourced_view`,
+`differences` and `metadata`; `differences` is `{ no_differences: true }`,
+`{ exists_mismatch: true }`, or one entry per differing column
+(`{ "name" => { crud: ..., event_sourced: ... } }`). `created_at` and
+`updated_at` are not compared. `DualView.find_discrepancies(model)` runs the
+comparison for every row; `config.dual_view_sample_rate` compares a share of
+committed writes after commit. Details:
+[API_REFERENCE.md](API_REFERENCE.md#dualview-and-verification).
+
+### `Lyra::Privacy::GDPRCompliance` (needs pam_dsl)
+
+**Location:** `lib/lyra/privacy/gdpr_compliance.rb`
+
+`GDPRCompliance.new(subject_id:, subject_type: "User")` wraps PAM's report
+builder (`PamDsl::GDPRCompliance`) over Lyra's event store. It selects the
+events whose metadata or data name the subject as `user_id`, or whose
+`model_class` and `model_id` are the subject. Reports: `data_export`
+(Art. 15), `rectification_history` (Art. 16), `right_to_be_forgotten_report`
+(Art. 17, a plan of affected streams and models; it deletes nothing),
+`portable_export(format: :json)` (Art. 20), `processing_activities`,
+`retention_compliance_check`, `consent_audit` and `full_report`. See
+[PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md).
 
 ---
 
-## 13. Working Examples
+## 8. Working Examples
 
-### Example 1: Creating an Audit Trail
+The examples assume the `:university_system` policy and the `Student` model
+above, in Monitor mode.
+
+### Audit trail
 
 ```ruby
-# Model setup
-class Student < ApplicationRecord
-  monitor_with_lyra privacy_policy: :university_system
-end
+student = Student.create!(name: "John Doe", email: "john@example.com", student_id: "S1")
+student.update!(email: "john.doe@university.edu")
 
-# Creating a student triggers event creation
-student = Student.create!(
-  name: "John Doe",
-  email: "john@example.com",
-  ssn: "123-45-6789"
-)
-
-# Get complete audit trail
-audit = AuditProjection.audit_trail(Student, student.id)
-# Returns:
-# [
-#   {
-#     operation: :created,
-#     timestamp: "2025-11-05 10:30:00",
-#     user_id: 123,
-#     changes: {},
-#     attributes: {
-#       name: "John Doe",
-#       email: "john@example.com",
-#       ssn: "123-45-6789"
-#     }
-#   }
-# ]
+Lyra::AuditProjection.audit_trail(Student, student.id).map { _1[:operation] }
+# => [:created, :updated]
 ```
 
-### Example 2: Data Lineage Tracking
+### Data lineage
 
 ```ruby
-# Track how an email address changed over time
-flow = Lyra::EventFlow.new(model_class: Student, model_id: student.id)
-lineage = flow.data_lineage(:email)
-
-# Returns:
-# [
-#   {
-#     timestamp: "2025-11-05 10:30:00",
-#     event_id: "abc123",
-#     model: "Student",
-#     record_id: 1,
-#     operation: :created,
-#     old_value: nil,
-#     new_value: "john@example.com",
-#     user_id: 123,
-#     action: "students#create"
-#   },
-#   {
-#     timestamp: "2025-11-05 14:20:00",
-#     event_id: "def456",
-#     model: "Student",
-#     record_id: 1,
-#     operation: :updated,
-#     old_value: "john@example.com",
-#     new_value: "john.doe@university.edu",
-#     user_id: 123,
-#     action: "students#update"
-#   }
-# ]
+flow = Lyra::EventFlow.new(subject_type: "Student", subject_id: student.id)
+lineage = flow.data_lineage(:email, "Student")
+lineage[:total_modifications]                    # => 2
+lineage[:lineage].map { _1[:new_value] }         # => ["john@example.com", "john.doe@university.edu"]
 ```
 
-### Example 3: Privacy Impact Analysis
+### Row versus events
 
 ```ruby
-# Analyze privacy impact of events
-flow = Lyra::EventFlow.new(model_class: Student, model_id: student.id)
-impact = flow.privacy_impact_analysis
-
-# Returns:
-# {
-#   total_events: 5,
-#   events_with_pii: 4,
-#   pii_categories: [:email, :ssn, :name, :address],
-#   sensitive_data_present: true  # SSN is considered sensitive
-# }
+Lyra::DualView.new(Student, student.id).compare[:differences]
+# => { no_differences: true }
 ```
 
-### Example 4: Dual-View Verification
+### A purpose-bound read, recorded
 
 ```ruby
-# Compare database state with event-sourced state
-dual_view = Lyra::DualView.new(Student, student.id)
-comparison = dual_view.compare
+Lyra.config.record_access_events = true
 
-# Returns:
-# {
-#   crud_view: {
-#     exists: true,
-#     state: { id: 1, name: "John Doe", email: "john@example.com", ... }
-#   },
-#   event_sourced_view: {
-#     exists: true,
-#     state: { id: 1, name: "John Doe", email: "john@example.com", ... },
-#     events_count: 5,
-#     events_summary: [...]
-#   },
-#   differences: [],
-#   metadata: { ... }
-# }
+Lyra.with_purpose(:enrollment) { Student.select(:id, :email, :name).find(student.id) }
+Lyra::AccessLog.for(student).last.event_type   # => "Lyra::Events::DataAccessed"
 ```
 
-### Example 5: GDPR Data Export
+### Checking access and masking in your own code
 
 ```ruby
-# Exercise GDPR Article 15: Right to Access
-gdpr = Lyra::Privacy::GDPRCompliance.new(subject_type: 'Student', subject_id: student.id)
-export = gdpr.data_export
+integration = Lyra::Privacy::PolicyIntegration.new(:university_system)
 
-# Returns comprehensive data package:
-# {
-#   subject: { id: 1, type: "Student" },
-#   generated_at: "2025-11-05 15:00:00",
-#   events: [...],  # All events involving this student
-#   pii_inventory: { ... },  # All PII fields collected
-#   data_lineage: { ... },  # How data changed over time
-#   processing_activities: [ ... ]  # What processing occurred
-# }
-```
-
-### Example 6: Privacy Policy Integration
-
-```ruby
-# Validate access before operation
-policy_integration = Lyra::Privacy::PolicyIntegration.new(:university_system)
-
-# Check if we can access email for marketing
 begin
-  policy_integration.validate_access!(
-    [:email],
-    :marketing,
-    { granted: true, granted_at: 1.year.ago }
-  )
-  # Access granted
-rescue PamDsl::PolicyViolationError => e
-  # Access denied - consent expired or not granted
-  puts e.message
+  integration.validate_access!([:email], :marketing, subject: student)
+rescue PamDsl::Error => e
+  e.class   # e.g. PamDsl::ConsentRequiredError while no consent is recorded (strict mode)
 end
 
-# Mask PII for display
-masked_ssn = policy_integration.mask_pii(:ssn, "123-45-6789", :display)
-# Returns: "***-**-6789"
+integration.mask_pii(:email, "john@example.com", :display)   # => "j***@example.com"
+```
 
-masked_email = policy_integration.mask_pii(:email, "john@example.com", :display)
-# Returns: "j***@example.com"
+### GDPR data export
+
+```ruby
+gdpr = Lyra::Privacy::GDPRCompliance.new(subject_type: "Student", subject_id: student.id)
+gdpr.data_export.keys
+# => [:subject, :generated_at, :events, :pii_inventory, :data_lineage, :processing_activities]
 ```
 
 ---
 
-## 14. File Locations Summary
+## 9. File Locations
 
-| Component | File Path |
-|-----------|-----------|
-| Base Projection | `/lib/lyra/projection.rb` |
-| CRUD Interception | `/lib/lyra/interceptors/crud_interceptor.rb` |
-| Association Interception | `/lib/lyra/interceptors/association_interceptor.rb` |
-| CachedRelation | `/lib/lyra/projections/cached_relation.rb` |
-| EventStoreReader | `/lib/lyra/projections/event_store_reader.rb` |
-| Model Projection | `/lib/lyra/projections/model_projection.rb` |
-| Event Flow Analysis | `/lib/lyra/event_flow.rb` |
-| Dual-View Comparison | `/lib/lyra/dual_view.rb` |
-| Privacy Integration | `/lib/lyra/privacy/policy_integration.rb` |
-| PII Detection | `/lib/lyra/privacy/pii_detector.rb` |
-| GDPR Compliance | `/lib/lyra/privacy/gdpr_compliance.rb` |
-| PAM DSL Core | `/gems/pam_dsl/lib/pam_dsl/policy.rb` |
-| Field Definition | `/gems/pam_dsl/lib/pam_dsl/field.rb` |
-| Configuration | `/lib/lyra/configuration.rb` |
-| Privacy Policies | `/config/privacy_policies.rb` |
-| Event Class Registrar | `/lib/lyra/schema/event_class_registrar.rb` |
-| Integration Guide | `/gems/pam_dsl/docs/PAM_DSL_INTEGRATION.md` |
-
----
-
-## 15. Key Takeaways
-
-1. **Projections are Read Models**: Reconstruct state from immutable events for auditing and compliance
-2. **Privacy-First Design**: All projections integrate with PAM DSL for field-level privacy policies
-3. **Comprehensive Monitoring**: Every CRUD operation tracked with user, request, and correlation context
-4. **Dual Verification**: Compare database state vs. event-sourced projections to ensure consistency
-5. **GDPR Ready**: Complete support for Articles 15-20 with data lineage and processing activities
-6. **Flexible Masking**: Context-aware PII transformation for display, logging, and API usage
-7. **Access Control**: Purpose-based validation with consent and retention enforcement
-8. **Audit Trails**: Complete who-what-when-why tracking for all data operations
-9. **Immutable History**: Append-only event store prevents tampering with audit records
-10. **Data Lineage**: Track complete history of field changes across all operations
+| Component | File |
+|---|---|
+| Projection, StateProjection, AuditProjection | `lib/lyra/projection.rb` |
+| Event envelope, `operation_of` | `lib/lyra/event.rb` |
+| CRUD interception | `lib/lyra/interceptors/crud_interceptor.rb` |
+| Association interception (ES-NoProj) | `lib/lyra/interceptors/association_interceptor.rb` |
+| Read hooks (ES-Lazy) | `lib/lyra/interceptors/lazy_reads.rb` |
+| Table projection (ES-Sync) | `lib/lyra/projections/model_projection.rb` |
+| Async projection job (ES-Async) | `lib/lyra/projections/async_projection_job.rb` |
+| EventStoreReader, CachedProjection, CachedRelation (ES-NoProj) | `lib/lyra/projections/event_store_reader.rb`, `cached_projection.rb`, `cached_relation.rb` |
+| LazyProjection (ES-Lazy) | `lib/lyra/projections/lazy_projection.rb` |
+| Rebuild | `lib/lyra/projections/rebuild.rb` |
+| Purpose-bound reads | `lib/lyra/purpose_bound_reads.rb` |
+| Access log | `lib/lyra/access_log.rb` |
+| Privacy provider interface, stamps | `lib/lyra/privacy/interface.rb` |
+| PolicyIntegration | `lib/lyra/privacy/policy_integration.rb` |
+| PII detection and masking | `lib/lyra/privacy/pii_detector.rb`, `pii_masker.rb` |
+| GDPR reports | `lib/lyra/privacy/gdpr_compliance.rb` |
+| Event flow analysis | `lib/lyra/event_flow.rb` |
+| DualView | `lib/lyra/dual_view.rb` |
+| Erasure | `lib/lyra/erasure.rb` |
+| Configuration | `lib/lyra/configuration.rb` |
+| Example policies | `config/privacy_policies.rb` |
+| PAM DSL core and errors | `gems/pam_dsl/lib/pam_dsl.rb`, `gems/pam_dsl/lib/pam_dsl/policy.rb` |
+| PAM integration guide | `gems/pam_dsl/docs/PAM_DSL_INTEGRATION.md` |
 
 ---
 
-## 16. Benefits
+## 10. Scope and Limits
 
-✓ **Complete audit trails** - Every data access tracked with full context
-✓ **GDPR compliance** - Built-in support for right to access, rectification, erasure
-✓ **Privacy-first** - Field-level policies integrated at projection level
-✓ **Data lineage** - Track how data flows and changes over time
-✓ **Dual verification** - Ensure database consistency with event-sourced state
-✓ **Purpose validation** - Enforce that data access matches declared purposes
-✓ **Tamper-proof** - Immutable, append-only monitoring that can't be altered
-✓ **Accountability** - Complete who-what-when-why for all data operations
+- **What is recorded.** Writes through ActiveRecord to monitored models, in
+  every mode but Disabled; reads only when a purpose is declared (or
+  `reads_without_purpose` is `:audit` or `:deny`), and recorded only with
+  `config.record_access_events`. Raw SQL, triggers and other applications are
+  not seen.
+- **The log is append-only, with one exception.** `Lyra::Erasure.erase!`
+  (Art. 17) overwrites a record's events in place (same event id, position
+  and time) to remove personal values, and records an
+  `Lyra::Events::ErasureApplied` event naming the fields, the reason and who
+  erased them. The event log therefore is not tamper-evident by itself:
+  anyone with write access to the event store tables can change it.
+- **Monitor can lose events.** In Monitor a failed append is logged and the
+  write stands; `bin/rails lyra:repair` brings the streams back in line, but
+  the detail of the lost changes is not recovered. Hijack and the
+  event-sourcing modes fail the write instead.
+- **Privacy features need PAM.** Without the pam_dsl gem no policy loads,
+  nothing is detected as PII, and purpose checks and the access log do
+  nothing.

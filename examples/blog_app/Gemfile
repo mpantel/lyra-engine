@@ -1,23 +1,30 @@
 source "https://rubygems.org"
 
-ruby ">= 3.0.0"
+ruby ">= 3.4.5"
 
-# Rails
-gem "rails", "~> 7.1"
-gem "sqlite3", "~> 1.4"
-gem "puma", "~> 6.0"
+gem "rails", "8.1.3.1" # the version the engine is tested with
+gem "pg", "~> 1.1"
 
-# Lyra - Event Sourcing with Privacy
-gem "orfeas_lyra", path: "../.."
+# PetriFlow (optional for Lyra, verification). Lyra's rake tasks eager load the
+# engine, whose app/workflows need it, so lyra:repair and lyra:genesis fail
+# without it. Listed before Lyra so Lyra finds it loaded.
+gem "orfeas_petri_flow", path: "../../gems/petri_flow", require: "petri_flow"
+gem "rexml" # petri_flow needs it but does not declare it (not a default gem since Ruby 3.4)
 
-# RailsEventStore for event storage
-gem "rails_event_store", "~> 2.14"
+# Lyra, from this checkout (the gem is orfeas_lyra, its entry file lyra.rb).
+# glob: in the monorepo ../.. also holds lyra-engine/, a checkout of the
+# public engine repository with its own lyra.gemspec. Bundler's default
+# search ({,*,*/*}.gemspec) evaluates both, loading two lib/lyra/version.rb
+# files ("already initialized constant Lyra::VERSION"). Only the root's.
+gem "orfeas_lyra", path: "../..", glob: "lyra.gemspec", require: "lyra"
+
+# RailsEventStore 3 stores Lyra's events.
+gem "rails_event_store", "~> 3.1.0" # Lyra needs ~> 3.0; 3.1 is what the engine is tested with
+
+# Rails 8.1 still calls JSON.parse(source, options) with a positional options
+# hash, which json 3 removed. Stay on json 2 until Rails supports 3.
+gem "json", "< 3"
 
 group :development, :test do
-  gem "debug"
-  gem "faker"
-end
-
-group :development do
-  gem "annotate"
+  gem "debug", platforms: %i[mri windows], require: "debug/prelude"
 end

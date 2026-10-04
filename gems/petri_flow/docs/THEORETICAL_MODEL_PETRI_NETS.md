@@ -884,29 +884,35 @@ trans T_CREATE
 
 | Code Element | CPN Element | Description |
 |--------------|-------------|-------------|
-| `Lyra::CrudInterceptor#lyra_intercept_*` | Transition T_CREATE/UPDATE/DELETE | CRUD operation detection |
+| `Lyra::Interceptors::CrudInterceptor#lyra_intercept_*` | Transition T_CREATE/UPDATE/DELETE | CRUD operation detection |
 | `Lyra::EventMapper.map_operation` | Arc expression | CRUD → Event transformation |
 | `Lyra::Event` | Token color EventToken | Event data structure |
 | `Lyra::Privacy::PIIDetector.detect` | Transition T_DETECT | PII identification |
 | `Lyra::Privacy::PolicyIntegration` | Guard on T_ENFORCE | Privacy policy application |
 | `Lyra::Aggregate#apply` | Transition T_APPLY | Event → State transformation |
-| `Lyra::CommandHandler#handle` | Place P₁ → T_CMD → P₂ | Hijack mode command flow |
+| `Lyra::CommandHandler.handle` | Place P₁ → T_CMD → P₂ | Hijack mode command flow |
 | `Lyra::Correlation.with_id` | Token color CorrelationToken | Event grouping |
 | `PamDsl::Field` | PolicyToken.fields[field] | Field-level policy |
 | `PamDsl::Purpose` | PolicyToken.purposes[purpose] | Purpose definition |
-| `PamDsl::Consent` | Guard on T_ACCESS | Consent requirement |
+| `PamDsl::ConsentPolicy`, `ConsentRequirement`, `ConsentStore`, `ConsentRecord` | Guard on T_ACCESS | Consent requirement and per-subject consent state |
 
 ### Validation Strategy
 
-```ruby
-# Test that CPN model matches actual behavior
+The sketch below is illustrative pseudocode. `Lyra::ExecutionTrace` and
+`CPNSimulator` are hypothetical names that exist in neither Lyra nor
+PetriFlow; the closest real pieces are the events Lyra publishes to Rails
+Event Store and `PetriFlow::Simulation::Simulator`, whose `Trace` records the
+firing sequence.
 
-# 1. Record actual execution trace
+```ruby
+# Illustrative pseudocode: test that the CPN model matches actual behavior
+
+# 1. Record actual execution trace (hypothetical API)
 trace = Lyra::ExecutionTrace.record do
   student = Student.create!(name: "Alice", email: "alice@example.com")
 end
 
-# 2. Simulate in CPN model
+# 2. Simulate in CPN model (hypothetical API)
 cpn_trace = CPNSimulator.simulate(
   initial_token: CrudToken{CREATE, "Student", ...}
 )

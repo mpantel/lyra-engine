@@ -115,8 +115,9 @@ Lyra::DualView.new(Order, order.id).compare
 ```
 
 `differences` is `{ no_differences: true }` when the row and the state replayed
-from the stream agree, `{ exists_mismatch: true }` when only one of them has
-the record, and otherwise one entry per differing column,
+from the stream agree (a destroyed record whose row is gone agrees too),
+`{ exists_mismatch: true }` when only one of them has the record, and
+otherwise one entry per differing column,
 `{ total: { crud: ..., event_sourced: ... } }`. `created_at` and `updated_at`
 are not compared. `Lyra::DualView.find_discrepancies(Order)` runs the
 comparison for every row.
@@ -159,11 +160,16 @@ It runs only in Monitor or Disabled, where the tables are authoritative. See
 mount Lyra::Engine => "/lyra"
 ```
 
-The dashboard is at `/lyra/dashboard` (the engine's root redirects to that
-path, so mount it at `/lyra`), with record comparisons, audit trails, event
-flow views and privacy pages. The engine's controllers do no authentication of
-their own: mount it inside your application's authentication, for example a
-route constraint that admits only administrators.
+The dashboard is at `/lyra/dashboard` (the engine's root redirects to
+`dashboard` under wherever you mount it), with record comparisons, audit
+trails, event flow views and privacy pages. It is open in development and
+test; elsewhere it answers 403 until you say who may use it, because its
+privacy pages show personal data:
+
+```ruby
+# config/initializers/lyra.rb
+config.dashboard_authorization = ->(controller) { controller.current_user&.admin? }
+```
 
 ## Do not just change the mode in the initializer
 

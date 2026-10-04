@@ -1,4 +1,4 @@
-class CreateComments < ActiveRecord::Migration[7.1]
+class CreateComments < ActiveRecord::Migration[8.1]
   def change
     create_table :comments do |t|
       t.references :user, null: false, foreign_key: true
@@ -7,7 +7,5 @@ class CreateComments < ActiveRecord::Migration[7.1]
 
       t.timestamps
     end
-
-    add_index :comments, :created_at
   end
 end

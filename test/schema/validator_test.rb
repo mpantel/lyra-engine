@@ -160,6 +160,65 @@ module Lyra
         refute validator.enforce!  # Returns false, doesn't raise
       end
 
+      def test_strict_enforce_boots_on_info_only_drift
+        Store.save(Generator.generate)
+
+        # column_added is :info
+        @mock_model.define_singleton_method(:column_names) { %w[id email name] }
+        @mock_model.define_singleton_method(:columns) do
+          [
+            OpenStruct.new(name: "id", type: :integer, null: false, limit: nil, default: nil),
+            OpenStruct.new(name: "email", type: :string, null: false, limit: 255, default: nil),
+            OpenStruct.new(name: "name", type: :string, null: true, limit: 100, default: nil)
+          ]
+        end
+        Lyra.config.strict_schema = true
+
+        validator = Validator.new
+        log = capture_schema_log { refute validator.enforce! }
+
+        assert_equal [:info], validator.differences.map { |d| d[:severity] }.uniq
+        assert_includes log, "Schema drift detected"
+      end
+
+      def test_strict_enforce_boots_on_warning_drift_and_logs
+        Store.save(Generator.generate)
+
+        # column_nullable_changed is :warning
+        @mock_model.define_singleton_method(:columns) do
+          [
+            OpenStruct.new(name: "id", type: :integer, null: false, limit: nil, default: nil),
+            OpenStruct.new(name: "email", type: :string, null: true, limit: 255, default: nil)
+          ]
+        end
+        Lyra.config.strict_schema = true
+
+        validator = Validator.new
+        log = capture_schema_log { refute validator.enforce! }
+
+        assert_includes validator.differences.map { |d| d[:severity] }, :warning
+        refute validator.breaking_changes?
+        assert_includes log, "Schema drift detected"
+        assert_includes log, "email"
+      end
+
+      def test_strict_enforce_raises_when_breaking_mixed_with_info
+        Store.save(Generator.generate)
+
+        # email removed (:breaking), name added (:info)
+        @mock_model.define_singleton_method(:column_names) { %w[id name] }
+        @mock_model.define_singleton_method(:columns) do
+          [
+            OpenStruct.new(name: "id", type: :integer, null: false, limit: nil, default: nil),
+            OpenStruct.new(name: "name", type: :string, null: true, limit: 100, default: nil)
+          ]
+        end
+        Lyra.config.strict_schema = true
+
+        error = assert_raises(SchemaValidationError) { Validator.new.enforce! }
+        assert(error.differences.any? { |d| d[:severity] == :breaking })
+      end
+
       def test_enforce_returns_true_when_valid
         schema = Generator.generate
         Store.save(schema)
@@ -167,6 +226,26 @@ module Lyra
         validator = Validator.new
 
         assert validator.enforce!
+      end
+
+      private
+
+      # Capture what Validator#log_warning writes, whichever sink it uses.
+      def capture_schema_log
+        if defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+          io = StringIO.new
+          original = Rails.logger
+          Rails.logger = Logger.new(io)
+          begin
+            yield
+          ensure
+            Rails.logger = original
+          end
+          io.string
+        else
+          _out, err = capture_io { yield }
+          err
+        end
       end
     end
 

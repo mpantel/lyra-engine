@@ -1,6 +1,8 @@
 Lyra::Engine.routes.draw do
-  # Root redirect to dashboard
-  root to: redirect('/lyra/dashboard')
+  # Root redirect to dashboard, relative to wherever the engine is mounted:
+  # Rails prefixes a relative redirect path with the request's script name
+  # (the mount point), so /admin/lyra goes to /admin/lyra/dashboard.
+  root to: redirect('dashboard')
 
   # Dashboard routes
   get 'dashboard', to: 'dashboard#index'

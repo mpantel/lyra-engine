@@ -83,7 +83,90 @@ module Lyra
   end
 
   module Events
-    # Dynamically created events will be placed here
+    # Dynamically created events will be placed here: the interceptor,
+    # CommandHandler, BypassEvents and Genesis create Lyra::Events::<Name>
+    # when they first write one, and Lyra::Schema::EventClassRegistrar creates
+    # them at boot for the models monitored by then.
+    #
+    # A process that only reads may never get there: in a lazily loaded
+    # process (development, console, rake) no model has declared
+    # monitor_with_lyra at boot, so nothing is registered, and RubyEventStore's
+    # DomainEvent mapper (Object.const_get(record.event_type), falling back to
+    # a plain RubyEventStore::Event on NameError) returned events without
+    # Lyra's readers (operation, attributes, changes, ...).
+    #
+    # const_missing closes that gap, for Lyra's own event names only: a name
+    # one of the monitored models (or the stored schema) writes, after
+    # loading the model the name's stem names if it has not been loaded yet
+    # (PostCreated -> Post, SpreeOrderCreated -> Spree::Order). Any other
+    # name raises NameError as before.
+    CRUD_SUFFIX = /(Created|Updated|Destroyed|Imported)\z/
+
+    class << self
+      def const_missing(name)
+        return super unless lyra_event_name?(name.to_s)
+
+        # Loading the model may have defined it meanwhile.
+        return const_get(name, false) if const_defined?(name, false)
+
+        const_set(name, Class.new(Lyra::Event))
+      end
+
+      # Whether +name+ (sanitized, no "::") is an event name Lyra writes.
+      def lyra_event_name?(name)
+        return true if known_event_names.include?(name)
+
+        stem = name.sub(CRUD_SUFFIX, "")
+        return false if stem == name || stem.empty?
+
+        model_candidates(stem).map { |candidate| loads_model?(candidate) }.any? &&
+          known_event_names.include?(name)
+      end
+
+      private
+
+      # The sanitized event names the monitored models and the stored schema
+      # use.
+      def known_event_names
+        names = Lyra.config.monitored_models.flat_map do |model|
+          config = model.respond_to?(:lyra_config) && model.lyra_config
+          config ||= Lyra.config.model_config(model)
+          ops = %i[created updated destroyed imported].map { |op| config.event_name_for(op) }
+          ops + (defined?(Lyra::DomainEvents) ? Lyra::DomainEvents.generated_names(model) : [])
+        rescue StandardError
+          []
+        end
+        (names + schema_event_names).map { |n| n.to_s.gsub("::", "") }
+      end
+
+      def loads_model?(candidate)
+        !candidate.safe_constantize.nil?
+      rescue StandardError, LoadError
+        false
+      end
+
+      def schema_event_names
+        return [] unless defined?(Lyra::Schema::Store) && Lyra::Schema::Store.exists?
+
+        models = (Lyra::Schema::Store.load_current || {})[:models] || {}
+        models.each_value.flat_map { |m| (m[:events] || m["events"] || {}).keys.map(&:to_s) }
+      rescue StandardError
+        []
+      end
+
+      # Model names the stem may stand for: "SpreeOrder" -> SpreeOrder,
+      # Spree::Order. Names of up to five words are split every way.
+      def model_candidates(stem)
+        words = stem.scan(/[A-Z][a-z0-9]*|[a-z0-9]+/)
+        return [stem] if words.size < 2 || words.size > 5 || words.join != stem
+
+        (0...(1 << (words.size - 1))).map do |mask|
+          words.each_with_index.map do |word, i|
+            i.zero? || mask[i - 1].zero? ? word : "::#{word}"
+          end.join
+        end
+      end
+    end
   end
 
   class EventRegistry

@@ -5,6 +5,14 @@ All notable changes to PAM DSL will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **`online_identifier` is a declarable field type** — the detector had a pattern by that name
+  but `Field::PII_TYPES` lacked it, so a policy could not declare such a field. It is a
+  non-special, non-sensitive type. (The detector still reports login-name columns as
+  `identifier`.)
+- **The policy generators keep an existing policy file** — `generate:policy` and
+  `generate:from_models` raise `PolicyGenerator::FileExistsError` instead of overwriting
+  `config/initializers/pam_dsl_policy.rb`; `FORCE=1` on the rake tasks (`force: true` in Ruby)
+  replaces it.
 - **Article 30 register from declarations, not placeholders** — `article_30_report` printed
   "Internal staff" as every purpose's recipients, "No international transfers", a list of
   asserted security measures (TLS, role-based access, PaperTrail), a per-purpose retention that

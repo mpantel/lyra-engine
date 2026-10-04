@@ -125,8 +125,15 @@ It runs the PetriFlow nets for the CRUD-to-event mapping and checks that each
 monitored model has a table and a primary key; a failure stops the boot.
 
 **6. Optional: mount the dashboard.** `mount Lyra::Engine => "/lyra"` serves a
-dashboard and privacy pages (subject data, exports). The engine's controllers
-do no authentication of their own, so mount it behind yours.
+dashboard and privacy pages (subject data, exports). Outside development and
+test it answers 403 until you say who may use it:
+
+```ruby
+config.dashboard_authorization = ->(controller) { controller.current_user&.admin? }
+```
+
+The proc runs on the engine's controller before every action; see
+[API_REFERENCE.md](API_REFERENCE.md#dashboard).
 
 ## Phase 1: Monitor
 
@@ -387,8 +394,8 @@ models. Everything here is opt-in except what the policy itself declares.
 
 - **Draft a policy** from your models:
   `bin/rails "pam_dsl:generate:from_models[shop]"`. It writes
-  `config/initializers/pam_dsl_policy.rb`, replacing any file already there,
-  from column names. Treat it as a draft: review every field, purpose
+  `config/initializers/pam_dsl_policy.rb` from column names, and refuses to
+  replace an existing file unless you add `FORCE=1`. Treat it as a draft: review every field, purpose
   (`basis`, `requires`) and retention rule before relying on it.
 - **Attach it**: `config.privacy_policy = :shop` for every monitored model, or
   `monitor_with_lyra privacy_policy: :shop` (also as a `config.models` option)
@@ -508,7 +515,8 @@ when you accept that the stores may disagree.
   stream before comparing, whether or not the check passes.
 - **Per-model modes.** There are none; a `mode:` option to
   `monitor_with_lyra` is ignored.
-- **Overwriting a reviewed policy.** `pam_dsl:generate:from_models` replaces
-  `config/initializers/pam_dsl_policy.rb` without asking.
-- **The dashboard is unauthenticated.** Mount `Lyra::Engine` only behind your
-  own authentication.
+- **Regenerating a reviewed policy.** `FORCE=1` on
+  `pam_dsl:generate:from_models` replaces `config/initializers/pam_dsl_policy.rb`,
+  review and all; generate to a scratch app or compare by hand instead.
+- **The dashboard answers 403 in production.** That is the default until
+  `config.dashboard_authorization` says who may use it.

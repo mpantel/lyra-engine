@@ -13,6 +13,11 @@ PetriFlow is a Ruby-based Colored Petri Net (CPN) library that provides:
 
 ## Prerequisites
 
+The two verification scripts live in the Lyra monorepo under papers/papertse
+(they are not part of the public lyra-engine repository). Run them from that
+directory: `formal_crud_to_event_model.rb` writes its DOT files to `figures/`
+relative to the current directory.
+
 ```bash
 cd /path/to/lyra
 bundle install  # Ensures PetriFlow gem is available
@@ -25,37 +30,59 @@ bundle install  # Ensures PetriFlow gem is available
 Run the formal CPN model verification:
 
 ```bash
-ruby papertse/formal_crud_to_event_model.rb
+cd papers/papertse && ruby formal_crud_to_event_model.rb
 ```
 
 This script:
 1. **Creates the formal CPN model** matching the paper's Definitions 1-6
-2. **Verifies structural properties**:
+   (five places, including P_orm, and five transitions)
+2. **Verifies structural properties** on a simplified verification net:
    - Reachable states (expected: 4)
    - Boundedness (expected: 1-bounded/safe)
    - Terminal states (expected: 1 - intentional completion)
 3. **Simulates token flow**: P_crud → P_event → P_published → P_aggregate
+4. **Writes** `figures/formal_crud_to_event_model.dot` and `figures/crud_to_event_petri.dot`
 
-Expected output:
+Output (trimmed):
 ```
-==== CPN STRUCTURE ====
-Places: 4
-Transitions: 5
+📋 Creating Colored Petri Net Model...
+  ✓ Token colors defined (Definitions 1-3)
+  ✓ Places defined: P_crud, P_event, P_published, P_aggregate, P_orm
+  ✓ Guards defined: G(T_create), G(T_update), G(T_delete)
+  ✓ Transitions defined: T_create, T_update, T_delete, T_publish, T_apply
+  ✓ Arcs connected with expressions
 
-==== VERIFICATION RESULTS ====
-Reachability:
-  Total reachable states: 4
-  Terminal states: 1
+📊 Structural Verification Results:
+  Reachable states: 4
+  Terminal states:  1
+  Is bounded:       true
+  Is safe (1-bound):true
+  Max tokens/place: 1
+  Deadlock-free:    false
 
-Boundedness:
-  Is bounded: true
-  Is safe (1-bounded): true
+Property 2: Deterministic Mapping
+  Verified by construction: each T_create/T_update/T_delete has exactly one output
+  Guards are mutually exclusive (operation ∈ {CREATE, UPDATE, DELETE})
 
-Property Verification:
-  Property 1: true (Operation Completeness)
-  Property 2: true (Deterministic Mapping)
-  Property 3: true (State Consistency)
-  Property 4: true (Reachability and Termination)
+Property 4: Liveness
+  "All transitions can eventually fire (no deadlock)"
+  ⚠ Terminal state exists (expected: aggregate updated is final state)
+
+Invariant Check Summary
+  Total invariants: 2
+  Passed: 2
+  Failed: 0
+
+📊 Simulation Results:
+  Steps executed:    3
+  Firing sequence:   t_map → t_publish → t_apply
+  States visited:    4
+
+Properties Verified:
+  ✓ Property 1 (Completeness): Every CRUD generates an event
+  ✓ Property 2 (Determinism): Each CRUD maps to exactly one event type
+  ✓ Property 3 (Consistency): Token conservation holds
+  ✓ Property 4 (Liveness): No unintended deadlocks
 ```
 
 ### 2. Model-Implementation Correspondence Verification
@@ -63,7 +90,7 @@ Property Verification:
 Run the correspondence verification:
 
 ```bash
-ruby papertse/verify_model_correspondence.rb
+cd papers/papertse && ruby verify_model_correspondence.rb
 ```
 
 This script:
@@ -80,22 +107,37 @@ This script:
    - Arc expressions → EventMapper
 4. **Verifies structural isomorphism**
 
-Expected output:
+Output (trimmed):
 ```
-Correspondence Table:
+📋 Loading Formal CPN Model...
+  ✓ Formal model: 4 places, 3 transitions
+
+📊 Correspondence Table:
 ----------------------------------------------------------------------
-| Formal (CPN)                   | Lyra Implementation           | Status   |
+| Formal (CPN)                   | Lyra Implementation       | Status   |
 ----------------------------------------------------------------------
-| p_crud                         | CrudInterceptor callbacks     | MATCH    |
-| T_map (T_create ∪ T_update ∪ T_delete) | handle_create/update/destroy | MATCH |
-| t_publish                      | event_store.publish()         | MATCH    |
-| t_apply                        | aggregate.apply()             | MATCH    |
-| Guards G(T_x)                  | Commands::*Command matching   | MATCH    |
-| Arc expression E(T_x)          | EventMapper.to_event          | MATCH    |
+| p_crud                         | CrudInterceptor callbacks | ✓ MATCH  |
+| p_aggregate                    | Aggregate state           | ✓ MATCH  |
+| T_map (T_create ∪ T_update ∪ T_delete) | handle_create/update/destroy | ✓ MATCH  |
+| t_apply                        | aggregate.apply()         | ✓ MATCH  |
+| Guards G(T_x)                  | Commands::*Command pattern matching | ✓ MATCH  |
+| Arc expression E(T_x)          | EventMapper.to_event      | ✓ MATCH  |
 ----------------------------------------------------------------------
 
-Result: 12/12 checks pass - STRUCTURALLY ISOMORPHIC
+⚠ Mismatches found:
+  p_event: ✗ NOT FOUND
+  p_published: ✗ NOT FOUND
+
+  Total checks:  9
+  Passed:        9
+  Failed:        0
+
+  🎉 FORMAL MODEL AND IMPLEMENTATION ARE STRUCTURALLY ISOMORPHIC
 ```
+
+The script's text matching does not locate `p_event` or `p_published` in the
+parsed files and reports them as mismatches; these two are not among the nine
+counted checks, so the summary still reads 9/9.
 
 ## Understanding the Formal Model
 
@@ -139,11 +181,22 @@ Result: 12/12 checks pass - STRUCTURALLY ISOMORPHIC
 
 ### "Deadlock-free: false" - Is This a Problem?
 
-No. The verifier reports `deadlock-free: false` because there is a **terminal state** (P_aggregate with 1 token). This is intentional:
-- Terminal state = successful completion of CRUD-to-event flow
-- Not a deadlock = no pathological state where progress is blocked
+Not by itself. `liveness[:deadlock_free]` counts every reachable dead marking
+as a deadlock, including the intended end of the net (here, P_aggregate with
+one token), so it is false for any net with a defined endpoint. The
+formal-model script prints this raw value.
 
-This is correct behavior for a workflow that has a defined endpoint.
+To check deadlock-freedom except at the intended end, pass the terminal
+places to `PetriFlow.verify`:
+
+```ruby
+results = PetriFlow.verify(net, terminal_places: [:p_aggregate])
+results[:liveness][:terminates_properly]     # true when every dead marking marks a terminal place
+results[:liveness][:improper_dead_markings]  # number of dead markings that mark none
+```
+
+`PetriFlow::Workflow#verify!` passes the workflow's `terminal_places` for you,
+so a workflow's results always carry `terminates_properly`.
 
 ### Boundedness and Safety
 
@@ -172,16 +225,22 @@ net.add_transition(id: :t_process)
 net.add_arc(source_id: :p_start, target_id: :t_process)
 net.add_arc(source_id: :t_process, target_id: :p_end)
 
-# Verify
-results = PetriFlow.verify(net)
+# Verify (p_end is the intended end, not a deadlock)
+initial = net.current_marking
+results = PetriFlow.verify(net, terminal_places: [:p_end])
 puts results
 ```
 
 ### Simulate Execution
 
+`PetriFlow.verify` explores the state space on the net itself and leaves it in
+the last marking it visited, so restore the initial marking before firing:
+
 ```ruby
+net.set_marking(initial)
+
 # Fire transitions manually
-net.fire(:t_process)
+net.fire_transition(:t_process)
 
 # Check marking
 puts net.places[:p_end].tokens  # => 1
@@ -256,27 +315,30 @@ This correctly handles fork patterns where multiple places have tokens simultane
 
 ## Integration with Lyra Tests
 
-The verification scripts can be integrated into the test suite:
+The verification scripts could be wired into the monorepo's test suite (no such
+test exists today). A sketch, running each script from papers/papertse:
 
 ```ruby
-# test/verification/petriflow_verification_test.rb
+# test/verification/petriflow_verification_test.rb (sketch)
 require 'test_helper'
 
 class PetriFlowVerificationTest < ActiveSupport::TestCase
+  PAPER_DIR = File.expand_path("../../papers/papertse", __dir__)
+
   test "formal model verifies successfully" do
-    output = `ruby papertse/formal_crud_to_event_model.rb`
-    assert_match(/All 4 properties verified/, output)
+    output = Dir.chdir(PAPER_DIR) { `ruby formal_crud_to_event_model.rb` }
+    assert_match(/Property 4 \(Liveness\): No unintended deadlocks/, output)
   end
 
   test "model-implementation correspondence" do
-    output = `ruby papertse/verify_model_correspondence.rb`
-    assert_match(/12\/12 checks pass/, output)
+    output = Dir.chdir(PAPER_DIR) { `ruby verify_model_correspondence.rb` }
+    assert_match(/Total checks:\s+9\s+Passed:\s+9/, output)
   end
 end
 ```
 
 ## References
 
-- [PetriFlow Gem](gems/petri_flow/README.md)
-- [Theoretical Model: Colored Petri Nets](docs/THEORETICAL_MODEL_PETRI_NETS.md)
-- [IEEE TSE Paper](papertse/orfeas_tse.tex) - Section 3: Formal Model
+- [PetriFlow Gem](../README.md)
+- [Theoretical Model: Colored Petri Nets](THEORETICAL_MODEL_PETRI_NETS.md)
+- IEEE TSE paper, papers/papertse/orfeas_tse.tex in the Lyra monorepo - Section 3: Formal Model

@@ -83,18 +83,19 @@ Beyond the modes above (see the [API Reference](docs/API_REFERENCE.md) for each)
   rules (`rake lyra:retention:apply`).
 - **Formal verification** (needs petri_flow): generate Petri net workflows
   from Lyra's model mapping and verify them.
-- **Dashboard**: `mount Lyra::Engine, at: "/lyra"`. The engine adds no
-  authentication; wrap the mount in your own constraint.
+- **Dashboard**: `mount Lyra::Engine, at: "/lyra"`. Outside development and
+  test it answers 403 until `config.dashboard_authorization` (a proc run on the
+  controller, e.g. `->(controller) { controller.current_user&.admin? }`) says
+  who may use it.
 
 ---
 
 ## Example application
 
-`examples/blog_app/` is a small blog (users, posts, comments) using
-`monitor_with_lyra`; see its [README](examples/blog_app/README.md). Its
-`Gemfile` has not been updated for the current requirements (it pins Rails 7.1
-and `rails_event_store` 2.14, which Lyra no longer accepts), so it does not
-install as is; read it as an illustration. The files
+`examples/blog_app/` is a small blog (users, posts, comments) in Monitor, on
+Rails 8.1, RailsEventStore 3 and the repository's PostgreSQL
+(`docker compose up -d db`, then `bin/setup` and `bin/rails test` in the app);
+see its [README](examples/blog_app/README.md). The files
 [`examples/usage_examples.rb`](examples/usage_examples.rb),
 [`examples/privacy_examples.rb`](examples/privacy_examples.rb) and
 [`examples/privacy_policy_usage.rb`](examples/privacy_policy_usage.rb) show

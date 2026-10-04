@@ -10,10 +10,12 @@ module Lyra
       @state = {}
     end
 
-    # Load aggregate from event stream
-    def self.load(id, event_store = nil)
+    # Load aggregate from event stream. Extra arguments go to the
+    # initializer: GenericAggregate.load(id, store, Order) needs the model
+    # class for its stream name.
+    def self.load(id, event_store = nil, *init_args)
       event_store ||= Lyra.config.event_store
-      aggregate = new(id)
+      aggregate = new(id, *init_args)
 
       stream_name = aggregate.stream_name
       events = event_store.read.stream(stream_name).to_a
@@ -21,7 +23,7 @@ module Lyra
       events.each { |event| aggregate.apply(event, persisted: true) }
       aggregate
     rescue RubyEventStore::EventNotFound
-      new(id)
+      new(id, *init_args)
     end
 
     # Apply an event to the aggregate
@@ -70,6 +72,14 @@ module Lyra
     def initialize(id = nil, model_class = nil)
       super(id)
       @model_class = model_class
+    end
+
+    # The model class is required: it names the stream. (load used to build
+    # the aggregate without it, and stream_name failed on nil.)
+    def self.load(id, event_store = nil, model_class = nil)
+      raise ArgumentError, "GenericAggregate.load needs the model class" unless model_class
+
+      super(id, event_store, model_class)
     end
 
     def stream_name

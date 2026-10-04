@@ -64,7 +64,9 @@ monitored (`monitor_with_lyra`, or `config.models=`).
 | ES-NoProj | `:event_sourcing` | `:disabled` |
 | ES-Lazy | `:event_sourcing` | `:lazy` |
 
-Neither `mode=` nor `projection_mode=` validates its value. Predicates:
+`mode=` accepts one of `Lyra::Configuration::MODES` and `projection_mode=` one
+of `Lyra::Configuration::PROJECTION_MODES`; a string (from ENV, say) is taken
+as its symbol, and anything else raises `ArgumentError`. Predicates:
 `Lyra.monitor_mode?`, `Lyra.hijack_mode?`, `Lyra.event_sourcing_mode?`,
 `Lyra.disabled_mode?` (the same methods exist on `Lyra.config`).
 
@@ -79,11 +81,11 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `event_store` | `nil` | The RailsEventStore client. Set by the engine at boot if still `nil`. Also `Lyra.event_store` / `Lyra.event_store=`. |
 | `event_backend` | `:rails_event_store` | Read only by `Lyra::EventStoreAdapter.build`; the engine does not use it. |
 | `hijack_enabled` | `false` | Set by the mode helpers. When true, `hijack_mode?` is true whatever `mode` says. |
-| `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of Monitor-mode events. A proc that raises is logged and skipped. |
+| `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of every event a monitored record's write produces, in every mode. A proc that raises is logged and skipped. |
 | `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. |
 | `projection_error_handler` | `nil` | `->(error, record, operation)`, called when a projection fails and `strict_projections` is off. |
 | `async_projections_inline` | `nil` | ES-Async: `nil` projects inline in the test environment only; `true` always; `false` never. |
-| `strict_schema` | `false` | Enforce the stored event schema at boot (raises `Lyra::Schema::SchemaValidationError` on drift). |
+| `strict_schema` | `false` | Enforce the stored event schema at boot: raises `Lyra::Schema::SchemaValidationError` when the drift includes a breaking change (model or column removed, column type or event name changed); warning- and info-level drift is logged. |
 | `schema_path` | `nil` | Where schema versions are stored; `nil` means `db/lyra_schemas`. |
 | `strict_data_access` | `false` | Raise `Lyra::StrictDataAccessViolation` on callback-bypassing writes to monitored models. |
 | `genesis` | `:auto` | Import rows that predate Lyra: `:auto` in event-sourcing mode only, `true` in every event-producing mode, `false` never. See [Genesis](#genesis). |
@@ -101,6 +103,7 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `reads_without_purpose` | `:allow` | Reads of a policy-covered model with no declared purpose: `:allow`, `:audit` or `:deny`. Validated on assignment. |
 | `retention_executor` | `false` | Allow `Lyra::Retention.apply!` to change data (opt-in). |
 | `retention_anchors` | `{}` | Column each model's retention period runs from, keyed by model name (a String); `created_at` when absent. |
+| `dashboard_authorization` | `nil` | Who may use the engine's dashboard: a proc run on the controller before each action; truthy allows, falsy answers 403. `nil` allows development and test only. See [Dashboard](#dashboard). |
 
 Configuration methods:
 
@@ -202,9 +205,11 @@ end
 
 ### Who wrote it
 
-Monitor-mode events take `user_id` from `Current.user` and `request_id` from
-`Current.request_id` when the application defines them. A model may override
-the private hooks `lyra_current_user_id` and `lyra_current_request_id`.
+Events take `user_id` from `Current.user` and `request_id` from
+`Current.request_id` when the application defines them, in every mode. A model
+may override the private hooks `lyra_current_user_id` and
+`lyra_current_request_id`. `record.lyra_event_metadata(operation)` returns the
+attribution metadata a write by that record would carry.
 
 ---
 
@@ -335,18 +340,26 @@ back to the name's suffix only for events that carry none.
 `Lyra::EventRegistry.all` lists the registered `Lyra::Event` subclasses;
 `find_by_name(name)` finds one.
 
+`Lyra::Events` defines an event class on first reference when the name is one
+a monitored model or the stored schema writes, loading the model from the
+name's stem first if needed (`PostCreated` → `Post`, `SpreeOrderCreated` →
+`Spree::Order`). A process that only reads therefore gets `Lyra::Event`s with
+the readers above, not plain `RubyEventStore::Event`s. Any other name raises
+`NameError`. A model with a custom `event_prefix` or `event_mapping` that is
+not loaded yet resolves only through the schema store.
+
 ### Metadata
 
 | Written by | Metadata keys |
 |---|---|
 | Monitor (interceptor) | `user_id`, `request_id`, `correlation_id`, `causation_id`, `action_id`, `user_action`, plus `metadata_proc`'s hash |
-| Hijack and event sourcing (command handler) | `source: "lyra_command_handler"`, `correlation_id`, `causation_id` |
+| Hijack and event sourcing (command handler) | the same keys as Monitor, plus `source: "lyra_command_handler"`; a command without a record (direct `CommandHandler` use) carries `correlation_id`, `causation_id`, `action_id` and `user_action` |
 | Genesis | `genesis: true` |
 | Repair | `source: "lyra_repair"`, `repaired`, `correlation_id` |
 | Erasure | `source: "lyra_erasure"`, `erased_by`, `correlation_id` (on `ErasureApplied`) |
 | any, with `annotate_privacy` | `privacy` (see [Privacy stamps](#privacy-stamps)) |
 
-`metadata_proc` applies only to the Monitor path.
+`metadata_proc` applies to every mode's events.
 
 ---
 
@@ -385,9 +398,13 @@ changes), `stream_name` (`"#{class.name.demodulize}$#{id}"`), and
 `Aggregate.load(id, event_store = nil)`. State helpers `set_state`,
 `get_state` and `state` are protected.
 
-The command handler instantiates the model's `aggregate_class` as
-`new(id, model_class)` and uses its stream, so a custom aggregate should
-subclass `Lyra::GenericAggregate`, whose stream is the model's
+For an update or destroy, a model's own `aggregate_class` is loaded with its
+stream's history first (`load(id, store, model_class)`), so domain checks can
+use it; the default `GenericAggregate` starts empty, since nothing in it
+depends on history, and its writes read no stream. The command handler
+instantiates the aggregate as `new(id, model_class)` and uses its stream, so a
+custom aggregate should subclass `Lyra::GenericAggregate`, whose stream is the
+model's
 (`"#{model_class.name}$#{id}"`) and which dispatches by operation to private
 `apply_created`, `apply_updated` and `apply_destroyed`:
 
@@ -417,12 +434,23 @@ ES-Async enqueues `Lyra::Projections::AsyncProjectionJob` (queue
 `:lyra_projections`, enqueued after commit, up to 5 attempts), which
 replays the record's whole stream so out-of-order jobs converge.
 
-Read-your-writes: `Lyra::Consistency::ReadYourWrites.with_guaranteed_read`
-(and its `ControllerConcern`, which wraps actions in ES-Async) is meant to
-project a block's writes before the block returns. Only the ES-Sync path
-records writes for it, so under ES-Async it currently has no effect: a record
-created in the block is still projected by the job. Until that is fixed, use
-ES-Sync or ES-Lazy for flows that read their own writes.
+Read-your-writes under ES-Async: the block's writes are projected before it
+returns (the job is still enqueued and converges on the same row). Blocks
+nest: an inner block projects its own writes when it ends and restores the
+outer block's list; if the inner block raises, its unprojected writes pass to
+the outer block. Every write is projected by the time the outermost block
+returns.
+
+```ruby
+Lyra::Consistency::ReadYourWrites.with_guaranteed_read do
+  @registration = Registration.create!(params)
+end
+Registration.find(@registration.id)   # projected
+
+class RegistrationsController < ApplicationController
+  include Lyra::Consistency::ReadYourWrites::ControllerConcern   # wraps actions in ES-Async
+end
+```
 
 ### ES-NoProj (`projection_mode :disabled`)
 
@@ -495,8 +523,13 @@ through the same projection code as live projection.
 
 ### Custom projections
 
-`Lyra::Projection` subclasses handle events with `apply_<event_name>` methods;
-`subscribe_to(*event_types)` subscribes the class to the event store.
+`Lyra::Projection` subclasses handle events with `apply_<event_name>` methods.
+`handle(event)` takes the name from `event.event_type`, demodulized and
+underscored (`Lyra::Events::PostCreated` → `apply_post_created`), so an event
+read back as a plain `RubyEventStore::Event` still reaches its handler.
+`subscribe_to(*event_types)` subscribes the class to the event store and
+returns RubyEventStore's unsubscribe procs; the class is the subscriber, and
+its `call(event)` passes each event to a new instance's `handle`.
 `Lyra::StateProjection.rebuild_state(model, id)` returns the replayed
 attributes of one record; `Lyra::AuditProjection.audit_trail(model, id)`
 returns one hash per event (`operation`, `timestamp`, `user_id`, `changes`,
@@ -537,9 +570,9 @@ view.compare
 
 | Method | Description |
 |---|---|
-| `compare` | Both views and the differences (`{ no_differences: true }`, `{ exists_mismatch: true }`, or `{ attr: { crud:, event_sourced: } }`). `created_at`/`updated_at` are ignored; times compare at microseconds. |
+| `compare` | Both views and the differences (`{ no_differences: true }`, `{ exists_mismatch: true }`, or `{ attr: { crud:, event_sourced: } }`). A destroyed record whose row is gone compares clean; one whose row remains is an `exists_mismatch`. `created_at`/`updated_at` are ignored; times compare at microseconds. |
 | `crud_state` | `{ exists:, attributes:, timestamps: }` |
-| `event_sourced_state` | `{ exists:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }` |
+| `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. |
 | `audit_trail` | `AuditProjection.audit_trail` for the record. |
 | `DualView.compare_all(model)` | `compare` for every existing row. |
 | `DualView.find_discrepancies(model)` | Those with differences. |
@@ -567,7 +600,10 @@ and checks that each monitored model has a table and a primary key; it raises
 `Lyra::MappingVerificationError` naming every failed check, or returns the
 report. `Lyra.verify_crud_mapping` returns the raw report.
 `Lyra.verification_available?` / `Lyra.petri_flow_available?` say whether the
-gem is loaded.
+gem is loaded. Set `LYRA_DISABLE_PETRI_FLOW=true` to run as without it.
+Without petri_flow the engine neither autoloads nor eager-loads its
+`app/workflows`, so production boot and the `lyra` rake tasks that eager-load
+the application work without the gem.
 
 ---
 
@@ -624,7 +660,9 @@ PAM detects these types: `email`, `name`, `phone`, `ip_address`, `address`,
 
 With PAM, `Lyra::Privacy::PIIMasker.mask(attributes, strategy: :partial)`
 (`:partial`, `:full`, `:redact_sensitive`) and `mask_field(value, field_name)`
-mask attribute hashes.
+mask attribute hashes; `mask_events(events, strategy: :partial)` returns masked
+copies of events (same class, id and metadata; attributes and the old and new
+values in `changes` masked).
 
 ### Privacy stamps (opt-in)
 
@@ -717,8 +755,8 @@ result = Lyra::Erasure.erase!(Registration, 5, reason: "...", fields: %w[email p
 | `max_copies:` | With `everywhere`, a value held by more than this many other records (default 10) is treated as shared and left. |
 
 `Result` fields: `model`, `id`, `fields`, `events_rewritten`, `row_erased`,
-`copies` (records whose copies were erased), `shared_values` (count of values
-left as shared). The replacement is `nil` where the column allows it,
+`copies` (records whose copies were erased), `shared_values` (an Integer: the
+count of values left as shared, 0 when none). The replacement is `nil` where the column allows it,
 `"erased:<id>"` for a NOT NULL string column, else the column default; a NOT
 NULL column with neither raises `Lyra::Erasure::Unsupported`, as does a record
 with no personal fields.
@@ -813,7 +851,9 @@ end
 
 - Field types: `email`, `name`, `phone`, `address`, `ssn`, `date_of_birth`,
   `ip_address`, `credit_card`, `financial`, `health`, `biometric`, `location`,
-  `identifier`, `credential`, `token`, `payment_token`, `custom`. Sensitivity:
+  `identifier`, `online_identifier`, `credential`, `token`, `payment_token`,
+  `custom` (the detector reports login-name columns as `identifier`; declare
+  `online_identifier` yourself where it fits). Sensitivity:
   `public`, `internal` (default), `confidential`, `restricted`.
 - `basis`: `consent` (default), `contract`, `legal_obligation`,
   `vital_interests`, `public_task`, `legitimate_interests`. Special-category
@@ -868,7 +908,7 @@ model and id) and the time range (default the last 30 days).
 | Method | Description |
 |---|---|
 | `flow_data` | `{ timeline:, flows:, statistics:, privacy_impact: }` |
-| `crud_to_event_mapping(model_name, operation, model_id = nil)` | Events for one operation; `model_name` is a String, `operation` a Symbol such as `:created`. |
+| `crud_to_event_mapping(model, operation, model_id = nil)` | Events for one operation; `model` is a class or its name, `operation` such as `:created` (a String works too). |
 | `reconstruct_state_chain(model, id)` | State after each event of the record's stream. |
 | `data_lineage(field_name, model_name = nil)` | Every event that set or changed a field. |
 | `privacy_impact_analysis` | PII inventory and risk assessment over the selected events. |
@@ -885,7 +925,21 @@ and privacy summaries for a list of events.
 mount Lyra::Engine, at: "/lyra"
 ```
 
-The engine adds no authentication; wrap the mount in your own constraint.
+Every engine action is authorized by `config.dashboard_authorization`, a proc
+run on the controller before the action (`instance_exec`, and given the
+controller when it takes an argument): truthy allows, falsy answers 403. Unset,
+the dashboard is open in the development and test environments only and
+refused (403, with a log line) everywhere else, since its privacy pages show a
+data subject's personal data. The engine controller inherits
+`ActionController::Base`, not the host's `ApplicationController`, so helpers
+defined only there are not reachable (Devise's `current_user` is).
+
+```ruby
+config.dashboard_authorization = ->(controller) { controller.current_user&.admin? }
+config.dashboard_authorization = -> { session[:lyra_admin] == true }
+```
+
+The engine's root redirects to `dashboard` relative to the mount point.
 Routes (relative to the mount): `dashboard`, `dashboard/model/:model_class`,
 `dashboard/compare/:model_class/:id`, `dashboard/discrepancies/:model_class`,
 `dashboard/audit_trail[/:model_class/:id]`, `dashboard/schema[/history|/:version]`,
@@ -908,14 +962,14 @@ loaded by PAM's Railtie when the pam_dsl gem is in the application's bundle.
 | `lyra:mode:check TO=... [PROJECTION=sync\|async\|disabled\|lazy] [FROM=...] [REBUILD=1]` | Check a switch and certify it when clean; exits 1 otherwise. |
 | `lyra:mode:status` | Configured mode, last applied mode, whether the gate is on. |
 | `lyra:repair [DRY_RUN=1] [MODELS=User,Order]` | Bring the event log back in line with the tables (Monitor/Disabled only). |
-| `lyra:erase MODEL=... ID=... REASON=... [FIELDS=a,b] [EVERYWHERE=1]` | `Lyra::Erasure.erase!` for one record. |
+| `lyra:erase MODEL=... ID=... REASON=... [FIELDS=a,b] [EVERYWHERE=1] [MAX_COPIES=n]` | `Lyra::Erasure.erase!` for one record; `MAX_COPIES` is passed as `max_copies:` (a positive integer). |
 | `lyra:retention:apply [DRY_RUN=1] [MODELS=...]` | `Lyra::Retention.apply!`. |
 | `lyra:genesis [MODEL=A,B]` | Import pre-Lyra rows now. |
 | `lyra:projections:rebuild [MODEL=A,B] [TRUNCATE=false]` | Rebuild tables from the event log. |
 | `lyra:schema:create`, `update`, `verify`, `report`, `history`, `diff[v1,v2]` | Event schema versions in `schema_path`. |
-| `lyra:workflows:generate [MODE=...]`, `lyra:workflows:verify`, `lyra:generate_workflows` | Generate and verify PetriFlow workflows (needs petri_flow). See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
+| `lyra:workflows:generate [MODE=...] [OUTPUT_DIR=...] [REPORTS_DIR=...]`, `lyra:workflows:verify`, `lyra:generate_workflows` | Generate and verify PetriFlow workflows (needs petri_flow). See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
 | `pam_dsl:report:full`, `policy`, `pii`, `retention`, `access_patterns`, `article_30`, `export[path]`, `compare[p1,p2,path]` | PAM reports. |
-| `pam_dsl:generate:policy[name]`, `pam_dsl:generate:from_models[name]` | Generate a policy file. |
+| `pam_dsl:generate:policy[name]`, `pam_dsl:generate:from_models[name]` | Generate a policy file; an existing `config/initializers/pam_dsl_policy.rb` is kept unless `FORCE=1`. |
 | `privacy:report`, `privacy:policy`, `privacy:retention`, `privacy:article_30`, `privacy:export[path]` | Aliases of the `pam_dsl:report:*` tasks. |
 
 Without `MODEL`/`MODELS`, tasks eager-load the application and use every
@@ -937,7 +991,7 @@ monitored model.
 | `Lyra::Erasure::Unsupported` | No personal fields to erase, or a NOT NULL column with no replacement. |
 | `Lyra::Retention::Disabled` | `Retention.apply!` without `retention_executor` (and not a dry run). |
 | `Lyra::MappingVerificationError` | `verify_mapping!` failed, or petri_flow is missing. |
-| `Lyra::Schema::SchemaValidationError` | `strict_schema` found schema drift at boot. |
+| `Lyra::Schema::SchemaValidationError` | `strict_schema` found a breaking schema change at boot. |
 | `ArgumentError` | Unknown `reads_without_purpose` value, bad `domain_events` rule, or an unresolvable name in `config.models`. |
 | `PamDsl::PolicyNotFoundError`, `InvalidFieldError`, `UndeclaredPurposeError`, `PurposeFieldMismatchError`, `ConsentRequiredError`, `SensitivityViolationError` | PAM validation (all subclasses of `PamDsl::Error`). |
 

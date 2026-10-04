@@ -1,4 +1,5 @@
 require "test_helper"
+require "stringio"
 
 module PamDsl
   class PolicyTest < Minitest::Test
@@ -126,6 +127,26 @@ module PamDsl
       assert_raises(PurposeFieldMismatchError) do
         policy.validate_access!([:ssn], :marketing, subject: 1)
       end
+    end
+
+    # The detector reports logins/usernames as online identifiers (Art. 4(1));
+    # a policy must be able to declare that type too.
+    def test_policy_can_declare_online_identifier_field
+      PamDsl.define_policy :accounts do
+        field :username, type: :online_identifier, sensitivity: :internal
+        purpose(:authentication) { requires :username }
+      end
+      policy = PamDsl.registry.get(:accounts)
+      field = policy.get_field(:username)
+
+      assert_equal :online_identifier, field.type
+      refute field.special_category?
+      refute field.sensitive?
+      assert policy.validate_access!([:username], :authentication, subject: 1)
+
+      output = StringIO.new
+      PamDsl::Reporter.new(:accounts, output: output).full_report
+      assert_includes output.string, "username"
     end
 
     def test_undeclared_field_still_raises_invalid_field_error

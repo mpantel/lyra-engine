@@ -136,6 +136,82 @@ class WorkflowGeneratorTaskTest < Minitest::Test
     end
   end
 
+  # The generator names each mode's file and class alike, the way Zeitwerk
+  # maps one to the other. MODE=monitor once named the class
+  # MonitorModeWorkflowWorkflow, in a file Zeitwerk expects to define
+  # MonitorModeWorkflow.
+  def test_class_name_follows_file_name_for_every_mode
+    Lyra::Verification::WorkflowGenerator::AVAILABLE_MODES.each do |mode|
+      basename = Lyra::Verification::WorkflowGenerator.workflow_file_basename(mode)
+      assert_equal "#{mode}_mode_workflow", basename
+      assert_equal basename.camelize, Lyra::Verification::WorkflowGenerator.workflow_class_name(mode)
+    end
+  end
+
+  def test_generate_for_one_mode_writes_a_file_zeitwerk_can_load
+    skip "PetriFlow not available" unless Lyra.petri_flow_available?
+
+    run_generate(mode: "monitor")
+
+    assert_equal %w[lifecycle_workflow.rb monitor_mode_workflow.rb], generated_files
+    assert_match(/^class MonitorModeWorkflow < PetriFlow::Workflow$/,
+                 File.read(File.join(@temp_dir, "monitor_mode_workflow.rb")))
+    assert_loads_under_zeitwerk(%w[LifecycleWorkflow MonitorModeWorkflow])
+  end
+
+  def test_generate_for_one_mode_and_for_all_modes_name_files_alike
+    skip "PetriFlow not available" unless Lyra.petri_flow_available?
+
+    run_generate(mode: "es_sync")
+    assert_equal %w[es_sync_mode_workflow.rb lifecycle_workflow.rb], generated_files
+
+    run_generate(mode: nil)
+    assert_equal %w[es_async_mode_workflow.rb es_sync_mode_workflow.rb hijack_mode_workflow.rb
+                    lifecycle_workflow.rb monitor_mode_workflow.rb], generated_files
+    assert_loads_under_zeitwerk(%w[EsAsyncModeWorkflow EsSyncModeWorkflow HijackModeWorkflow
+                                   LifecycleWorkflow MonitorModeWorkflow])
+  end
+
+  private
+
+  def run_generate(mode:)
+    saved = ENV.to_h.slice("MODE", "OUTPUT_DIR", "REPORTS_DIR")
+    # rake_require in setup loads the file only once per process
+    load File.expand_path("../../lib/tasks/lyra_workflows.rake", __dir__) unless Rake::Task.task_defined?("lyra:workflows:generate")
+    Rake::Task.define_task(:environment) unless Rake::Task.task_defined?(:environment)
+    task = Rake::Task["lyra:workflows:generate"]
+    task.reenable
+    ENV["MODE"] = mode
+    ENV["OUTPUT_DIR"] = @temp_dir
+    ENV["REPORTS_DIR"] = File.join(@temp_dir, "reports")
+    capture_io { task.invoke }
+  ensure
+    %w[MODE OUTPUT_DIR REPORTS_DIR].each { |key| ENV[key] = saved[key] }
+  end
+
+  def generated_files
+    Dir.children(@temp_dir).grep(/\.rb\z/).sort
+  end
+
+  # Each generated file must define the constant Zeitwerk's inflector derives
+  # from its name (Zeitwerk raises Zeitwerk::NameError otherwise). The files
+  # define top-level classes, which may already be loaded from app/workflows,
+  # so each is evaluated in a scratch module rather than at the top level.
+  def assert_loads_under_zeitwerk(expected_constants)
+    inflector = Zeitwerk::Inflector.new
+    defined = Dir.glob(File.join(@temp_dir, "*.rb")).sort.map do |path|
+      constant = inflector.camelize(File.basename(path, ".rb"), path)
+      scratch = Module.new
+      scratch.module_eval(File.read(path), path)
+      assert scratch.const_defined?(constant, false),
+             "#{File.basename(path)} should define #{constant}, the constant Zeitwerk expects"
+      assert_kind_of PetriFlow::Workflow, scratch.const_get(constant, false).new
+      constant
+    end
+
+    assert_equal expected_constants, defined
+  end
+
   # Note: State machine workflow generator tests are in PetriFlow gem
   # See: gems/petri_flow/test/generators/workflow_generator_test.rb
 end

@@ -441,6 +441,29 @@ module PamDsl
       assert_equal :my_special_app, generator.name
     end
 
+    def test_generate_refuses_to_overwrite_an_existing_file
+      output_path = File.join(@tmp_dir, "pam_dsl_policy.rb")
+      File.write(output_path, "# reviewed policy\n")
+
+      [:generate, :generate_from_models].each do |method|
+        error = assert_raises(PolicyGenerator::FileExistsError) do
+          capture_output { PolicyGenerator.new(:test_app, output_path: output_path).public_send(method) }
+        end
+        assert_includes error.message, output_path
+        assert_includes error.message, "FORCE=1"
+      end
+      assert_equal "# reviewed policy\n", File.read(output_path)
+    end
+
+    def test_generate_overwrites_with_force
+      output_path = File.join(@tmp_dir, "pam_dsl_policy.rb")
+      File.write(output_path, "# reviewed policy\n")
+
+      capture_output { PolicyGenerator.new(:test_app, output_path: output_path, force: true).generate }
+
+      assert_includes File.read(output_path), "define_policy"
+    end
+
     def test_creates_output_directory_if_missing
       nested_path = File.join(@tmp_dir, "nested", "dir", "policy.rb")
       generator = PolicyGenerator.new(:test_app, output_path: nested_path)

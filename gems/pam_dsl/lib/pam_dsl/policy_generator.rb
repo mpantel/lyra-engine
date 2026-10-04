@@ -71,15 +71,23 @@ module PamDsl
       }
     }.freeze
 
+    # Raised instead of overwriting an existing policy file (a policy the
+    # team has reviewed and edited) unless the generator was told to force.
+    class FileExistsError < StandardError; end
+
     attr_reader :name, :output_path
 
-    def initialize(name, output_path: nil)
+    # +force+: overwrite +output_path+ if it already exists. Without it the
+    # generator refuses, before scanning anything.
+    def initialize(name, output_path: nil, force: false)
       @name = name.to_s.underscore.to_sym
       @output_path = output_path || default_output_path
+      @force = force
     end
 
     # Generate a basic policy template
     def generate
+      refuse_overwrite!
       content = generate_basic_policy
       write_file(content)
       print_summary
@@ -87,6 +95,7 @@ module PamDsl
 
     # Generate policy by scanning ActiveRecord models
     def generate_from_models
+      refuse_overwrite!
       detected_fields = scan_models
       content = generate_policy_from_fields(detected_fields)
       write_file(content)
@@ -94,6 +103,13 @@ module PamDsl
     end
 
     private
+
+    def refuse_overwrite!
+      return if @force || !File.exist?(@output_path)
+
+      raise FileExistsError, "#{@output_path} already exists; not overwriting it. " \
+                             "Rerun with FORCE=1 to replace it (or move the file aside)."
+    end
 
     def default_output_path
       if defined?(Rails)

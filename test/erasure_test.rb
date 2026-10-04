@@ -47,6 +47,7 @@ class ErasureTest < Minitest::Test
     result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "Art. 17 request #12")
 
     assert_equal %w[email name], result.fields.sort
+    assert_equal 0, result.shared_values, "an Integer count even without everywhere"
     assert_equal 2, result.events_rewritten
     assert_equal ["erased:#{user.id}"] * 2, raw("SELECT email, name FROM users WHERE id = #{user.id}", :rows).first
     assert_match(/erased:#{user.id}/, log_text, "the scan reads the stored data")
@@ -104,6 +105,7 @@ class ErasureTest < Minitest::Test
     result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", everywhere: true)
 
     assert_equal ["EraseNote #{note.id}"], result.copies
+    assert_equal 0, result.shared_values, "an Integer count, 0 when none"
     assert_nil raw("SELECT body FROM articles WHERE id = #{note.id}"), "nullable column: nil"
     assert_equal "bob@example.com", raw("SELECT body FROM articles WHERE id = #{unrelated.id}")
     refute_match(/ann@example/, log_text)

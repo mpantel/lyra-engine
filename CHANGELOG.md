@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`LYRA_DISABLE_PETRI_FLOW=true`** — runs Lyra as without petri_flow, as
+  `LYRA_DISABLE_PAM_DSL=true` does for PAM DSL.
+- **`lyra:workflows:generate OUTPUT_DIR=... REPORTS_DIR=...`** — write the workflow files and
+  the reports to other directories than `app/workflows/` and `reports/`.
+- **Dashboard authorization** (`config.dashboard_authorization`) — a proc run on the engine's
+  controller before every action (`instance_exec`, and given the controller when it takes an
+  argument); truthy allows, falsy answers 403. Unset, the dashboard is open in development and
+  test only and refused everywhere else with a log line, since its privacy pages show a data
+  subject's personal data. Example: `->(controller) { controller.current_user&.admin? }`.
+- **`mode=` and `projection_mode=` validate** — one of `Configuration::MODES` and the new
+  `Configuration::PROJECTION_MODES`; a string is taken as its symbol, anything else raises
+  `ArgumentError` naming the valid values.
+- **`lyra:erase MAX_COPIES=n`** — passed to `Lyra::Erasure.erase!` as `max_copies:`; the task
+  also prints how many values were left as shared.
+- **The blog example runs again** (`examples/blog_app`) — rebuilt for Rails 8.1,
+  RailsEventStore 3 and PostgreSQL, with `bin/setup` and a passing test suite.
 - **ES-NoProj runs Solidus** — the Olist replay passes under `projection_mode :disabled`
   (6 of 6 orders end as Olist records them). Association queries (`variant.prices.find_by`,
   `.where`, `.find_or_create_by!`) run on the records the event store holds for the owner, and
@@ -337,6 +353,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs per ID.
 
 ### Fixed
+- **`Lyra::Projection.subscribe_to` raised `RubyEventStore::InvalidHandler`** — RailsEventStore
+  3.1 subscribers must respond to `call`. A projection class now does (`call(event)` hands the
+  event to a new instance's `handle`), and `subscribe_to` returns the unsubscribe procs.
+  `handle` takes the `apply_<name>` method from `event.event_type`, so an event read back as a
+  plain `RubyEventStore::Event` reaches its handler too.
+- **Nested `with_guaranteed_read` lost the outer block's writes** — the inner block reset the
+  list of pending writes, then cleared it. An inner block now projects its own writes when it
+  ends and restores the outer list; if it raises, its unprojected writes pass to the outer
+  block. Every write is projected by the time the outermost block ends.
+- **A process that only reads got plain `RubyEventStore::Event`s** — in a lazily loaded process
+  (console, rake, development) no event class was registered, so events came back without
+  Lyra's readers (`operation`, `attributes`, `changes`, ...). `Lyra::Events` now defines the
+  class on first reference for a name a monitored model or the stored schema writes, loading
+  the model from the name's stem (`PostCreated` → `Post`, `SpreeOrderCreated` →
+  `Spree::Order`); other names still raise `NameError`. A model with a custom `event_prefix` or
+  `event_mapping` that is not loaded resolves only through the schema store.
+- **petri_flow was not optional** — `app/workflows/*.rb` subclass `PetriFlow::Workflow`, so
+  without the gem eager loading (production boot, `lyra:mode:*`, `lyra:repair`,
+  `lyra:schema:*`) raised `NameError`. Without petri_flow the engine neither autoloads nor
+  eager-loads `app/workflows`.
+- **`lyra:workflows:generate MODE=...` wrote a class its file did not name** — `MODE=monitor`
+  defined `MonitorModeWorkflowWorkflow`, which Zeitwerk could not load. A mode's file and class
+  are now the same whether one mode or all are generated (`monitor_mode_workflow.rb` defines
+  `MonitorModeWorkflow`, `es_sync_mode_workflow.rb` `EsSyncModeWorkflow`;
+  `WorkflowGenerator.workflow_file_basename(mode)`, `.workflow_class_name(mode)`).
+- **`already initialized constant Lyra::VERSION` in the monorepo** — Bundler's default gemspec
+  search also loaded the nested `lyra-engine/` checkout's `lyra.gemspec`. The root `Gemfile`
+  uses `gemspec glob: "lyra.gemspec"`, and the example apps' Gemfiles `glob: "lyra.gemspec"`.
+- **Hijack and event-sourcing events lost who wrote them** — the command handler wrote only
+  the causal chain, so `user_id`, `request_id`, the user action and `config.metadata_proc`
+  reached Monitor events alone. Every mode now carries the same attribution metadata
+  (`record.lyra_event_metadata(operation)`), plus `source: "lyra_command_handler"`.
+- **`ReadYourWrites` had no effect under ES-Async** — only the ES-Sync path recorded writes
+  for it. Writes inside `with_guaranteed_read` are now projected when the block ends; the job
+  is still enqueued and converges on the same row.
+- **Aggregates never loaded their history** — `GenericAggregate.load` raised `NoMethodError`
+  (no model class for its stream name) and the command handler swallowed it. A model's own
+  `aggregate_class` is now loaded with its stream's history for updates and destroys; the
+  default `GenericAggregate`, which decides nothing from history, starts empty and reads no
+  stream, so its writes issue no extra SQL. A programming error while loading now fails the
+  command instead of being swallowed.
+- **`AuditProjection.audit_trail` always gave `user_id: nil`** — it read the user from the
+  event data, which no longer holds the metadata; it reads the event's metadata now.
+- **DualView reported every destroyed record as `exists_mismatch`** — a destroyed record
+  whose row is gone now compares clean (`event_sourced_state` gains `destroyed:`).
+- **The engine's root redirect was hard-coded to `/lyra/dashboard`** — it is now relative
+  to wherever the engine is mounted.
+- **`strict_schema` stopped the boot on any schema drift** — including info-level changes
+  such as an added column. It now refuses to boot only on a breaking change (model or column
+  removed, column type or event name changed) and logs the rest.
+- **`PIIMasker.mask_events` was broken** — it built events with keywords
+  `RubyEventStore::Event` does not accept. It returns masked copies now (same class, id and
+  metadata; attributes and changes masked).
+- **`Erasure::Result#shared_values` was sometimes `[]`, sometimes an Integer** — always an
+  Integer count now.
+- **`EventFlow#crud_to_event_mapping` found nothing for a class** — it accepts a class or its
+  name, and string operations and ids (as the dashboard passes them); `data_lineage` likewise.
 - **A test left a guard on `Article#body=`** (`multi_mode_integration_test`), failing 11 later
   tests under some seeds; it now removes it.
 - **ES-NoProj answers more queries exactly instead of refusing them** — scopes with `order` or

@@ -48,16 +48,25 @@ module Lyra
         @differences.empty?
       end
 
-      # Validate and enforce strict mode if configured
+      # Validate and enforce strict mode if configured.
+      #
+      # Severity model (see Diff::SEVERITIES): only BREAKING differences
+      # require a new schema version; WARNING means review recommended and
+      # INFO a documentation update. With strict_schema, enforce! therefore
+      # raises only when at least one breaking difference exists; warning-
+      # and info-level drift is logged and the boot continues. Without
+      # strict_schema any drift is logged.
+      #
+      # Returns true when there is no drift, false when drift was logged.
       def enforce!
         return true if valid?
 
-        if Lyra.config.strict_schema
+        if Lyra.config.strict_schema && breaking_changes?
           raise SchemaValidationError.new(report, @differences)
-        else
-          log_warning
-          false
         end
+
+        log_warning
+        false
       end
 
       private

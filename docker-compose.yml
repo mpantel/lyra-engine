@@ -8,13 +8,29 @@
 
 services:
   db:
-    image: postgres:16-alpine
+    # Pinned to the exact minor version the published M4 benchmarks ran on
+    # (16.11). The floating 16-alpine tag drifts: it resolved to 16.14 in
+    # September 2026, which would make later runs incomparable with those.
+    # LYRA_PG_IMAGE picks another exact tag for a new baseline (e.g.
+    # LYRA_PG_IMAGE=18.6-alpine); bin/run_benchmarks records the image used.
+    image: postgres:${LYRA_PG_IMAGE:-16.11-alpine}
     container_name: lyra_postgres
+    # Raise max_connections above Postgres's default of 100. The concurrent
+    # benchmark sizes its pool to (max_threads + 2) = 66 at 64 threads, and
+    # ES-NoProj's read-replay path opens further connections on top of that,
+    # which exhausted the default limit and produced "too many clients already"
+    # failures in that one cell. 200 leaves comfortable headroom.
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       # Multiple databases will be created by Rails apps as needed
       POSTGRES_DB: postgres
+      # The data directory, explicit: PostgreSQL 18 images moved the default to
+      # /var/lib/postgresql/18/docker. Under LYRA_PG_IMAGE=18.x the volume below
+      # still holds the data. A volume made by another major version cannot be
+      # opened (the server refuses to start): docker compose down -v first.
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "5433:5432"
     volumes:

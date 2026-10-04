@@ -6,15 +6,31 @@ module Lyra
         new.handle(event)
       end
 
+      # RubyEventStore dispatches to a subscriber through #call (its
+      # SyncScheduler accepts any object that responds to call), so the
+      # projection class itself is the handler: each event goes to a fresh
+      # instance's #handle. Without it, subscribe_to raised
+      # RubyEventStore::InvalidHandler.
+      def call(event)
+        handle(event)
+      end
+
+      # Subscribe the projection to the given event classes (or event type
+      # names) on Lyra's event store. Returns RES's unsubscribe procs.
       def subscribe_to(*event_types)
-        event_types.each do |event_type|
+        event_types.flatten.map do |event_type|
           Lyra.config.event_store.subscribe(self, to: [event_type])
         end
       end
     end
 
+    # Dispatch to apply_<event name>, e.g. apply_post_created for
+    # Lyra::Events::PostCreated. The name comes from the event's type, so an
+    # event read back as a plain RubyEventStore::Event (its class not loaded)
+    # still reaches its handler.
     def handle(event)
-      method_name = "apply_#{event.class.name.demodulize.underscore}"
+      type = event.respond_to?(:event_type) ? event.event_type : event.class.name
+      method_name = "apply_#{type.to_s.demodulize.underscore}"
       send(method_name, event) if respond_to?(method_name, true)
     end
   end
@@ -81,12 +97,17 @@ module Lyra
       events.map do |event|
         # Access data with both symbol and string keys (JSON serializer uses strings)
         data = event.data
+        # The writer's user_id is in the event's metadata (publish_event and
+        # the CommandHandler pass it there). Events stored before that kept
+        # it nested in data[:metadata]: the fallback reads those.
         nested_metadata = data[:metadata] || data["metadata"] || {}
+        metadata = event.metadata.to_h
 
         {
           operation: data[:operation] || data["operation"],
-          timestamp: data[:timestamp] || data["timestamp"] || event.metadata[:timestamp],
-          user_id: nested_metadata[:user_id] || nested_metadata["user_id"],
+          timestamp: data[:timestamp] || data["timestamp"] || metadata[:timestamp],
+          user_id: metadata[:user_id] || metadata["user_id"] ||
+                   nested_metadata[:user_id] || nested_metadata["user_id"],
           changes: data[:changes] || data["changes"] || {},
           attributes: data[:attributes] || data["attributes"] || {}
         }

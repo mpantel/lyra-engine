@@ -59,16 +59,20 @@ module Lyra
     end
 
     # Show how a single CRUD operation maps to events
+    # +model_class+ may be a class or its name; +operation+ a symbol or
+    # string; +model_id+ an id or its string form (as a request passes it).
     def crud_to_event_mapping(model_class, operation, model_id = nil)
+      model_name = model_name_of(model_class)
+      operation = operation&.to_sym
       events = load_events.select do |event|
-        matches = event_model_class(event) == model_class && event_operation(event) == operation
-        matches &&= event_model_id(event) == model_id if model_id
+        matches = event_model_class(event).to_s == model_name && event_operation(event) == operation
+        matches &&= event_model_id(event).to_s == model_id.to_s if model_id
         matches
       end
 
       {
         crud_operation: {
-          model: model_class,
+          model: model_name,
           operation: operation,
           record_id: model_id
         },
@@ -132,7 +136,8 @@ module Lyra
       events = load_events
 
       if model_class
-        events = events.select { |e| event_model_class(e) == model_class }
+        model_name = model_name_of(model_class)
+        events = events.select { |e| event_model_class(e).to_s == model_name }
       end
 
       lineage = []
@@ -158,7 +163,7 @@ module Lyra
 
       {
         field: field_name,
-        model_class: model_class,
+        model_class: model_class && model_name_of(model_class),
         total_modifications: lineage.count,
         first_seen: lineage.min_by { |l| l[:timestamp] }&.dig(:timestamp),
         last_modified: lineage.max_by { |l| l[:timestamp] }&.dig(:timestamp),
@@ -189,6 +194,11 @@ module Lyra
       return event.operation if event.respond_to?(:operation)
       op = event.data[:operation] || event.data["operation"]
       op.is_a?(String) ? op.to_sym : op
+    end
+
+    # A model class or its name, as the name events record.
+    def model_name_of(model_class)
+      model_class.is_a?(Module) ? model_class.name : model_class.to_s
     end
 
     def event_model_class(event)

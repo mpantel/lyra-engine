@@ -13,6 +13,30 @@ module Lyra
         Lyra.event_store ||= RailsEventStore::Client.new
       end
 
+      # PetriFlow is optional, but app/workflows/*.rb subclass
+      # PetriFlow::Workflow: without the gem, eager loading them (production
+      # boot, and the lyra:mode:*, lyra:repair, lyra:schema:* tasks, which
+      # eager-load the application) raised NameError. Without PetriFlow the
+      # directory is neither autoloaded nor eager-loaded; the workflows are
+      # used only by Lyra::Verification, which is loaded only with the gem,
+      # and the dashboard checks Lyra.petri_flow_available? before
+      # verifying. Runs before the Finisher's :setup_main_autoloader.
+      initializer "lyra.optional_workflows", before: :set_autoload_paths do
+        Lyra::Engine.ignore_workflows! unless Lyra::Engine.workflows_loadable?
+      end
+
+      def self.workflows_loadable?
+        Lyra.petri_flow_available? && !!defined?(::PetriFlow::Workflow)
+      end
+
+      def self.workflows_path
+        root.join("app", "workflows").to_s
+      end
+
+      def self.ignore_workflows!
+        Rails.autoloaders.main.ignore(workflows_path)
+      end
+
       initializer "lyra.inject_interceptors", after: :load_config_initializers do
         ActiveSupport.on_load(:active_record) do
           require "lyra/interceptors/crud_interceptor"

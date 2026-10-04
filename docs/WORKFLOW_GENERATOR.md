@@ -1,6 +1,7 @@
 # Lyra Workflow Generator
 
-Automatic Petri net workflow generation from Lyra implementation via metaprogramming introspection.
+Petri net workflow models generated from the Lyra implementation, and the
+other verification nets that ship with Lyra.
 
 ## Table of Contents
 
@@ -11,83 +12,116 @@ Automatic Petri net workflow generation from Lyra implementation via metaprogram
 - [Output Files](#output-files)
 - [API Reference](#api-reference)
 - [Integration with PetriFlow](#integration-with-petriflow)
+- [Other Verification Nets](#other-verification-nets)
+- [Verification View](#verification-view)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Overview
 
-The Workflow Generator uses Ruby metaprogramming to analyze Lyra's implementation and automatically generate Petri net workflow models. These models can be used for:
+`Lyra::Verification::WorkflowGenerator` (`lib/lyra/verification/workflow_generator.rb`)
+builds PetriFlow workflow models of Lyra's write paths. They can be used for:
 
-- **Formal verification** of CRUD→Event mapping correctness
-- **Documentation** of system behavior
-- **Analysis** using PetriFlow verification tools
-- **Visualization** with Mermaid diagrams
+- **Formal verification** with PetriFlow (reachability, boundedness, liveness)
+- **Documentation** of how each mode handles a write
+- **Visualization** as Mermaid diagrams
 
-The generator introspects:
-- Available Lyra modes (monitor, hijack, es_sync, es_async)
-- ActiveRecord callbacks registered by Lyra::Monitorable
-- Monitored models and their configurations
-- Event types published by the system
+The generator covers four modes, `WorkflowGenerator::AVAILABLE_MODES`:
+Monitor, Hijack, ES-Sync and ES-Async. It has no nets for ES-NoProj or
+ES-Lazy, and none for Disabled. Lyra's seven configurations are described in
+[API_REFERENCE.md](API_REFERENCE.md#the-seven-configurations).
+
+The mode nets themselves are written into the generator by hand. What it
+reads from the running application is:
+- the current mode (`Lyra.config.mode`)
+- the monitored models (`Lyra.config.monitored_models`), with their table,
+  event prefix and ActiveRecord callback chains
+- the event classes defined under `Lyra::Events`
+- callback names for the lifecycle net, which it looks for in a
+  `Lyra::Monitorable` module and a `lib/lyra/monitorable.rb` file. Neither
+  exists in the current code (the callbacks are registered by
+  `monitor_with_lyra`), so this step finds nothing and the lifecycle
+  transitions use the default triggers `after_create`, `after_update` and
+  `after_destroy`.
+
+For the CRUD-to-event mapping check that runs the full set of nets, see
+[Other Verification Nets](#other-verification-nets).
 
 ---
 
 ## Prerequisites
 
-### Required Dependencies
-
-1. **PetriFlow gem** - Required for workflow generation and verification
+1. **PetriFlow** (the `orfeas_petri_flow` gem, whose entry file is `petri_flow`):
 
 ```ruby
 # Gemfile
-gem 'petri_flow', path: 'gems/petri_flow'
+gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"
 ```
 
-2. **Rails environment** - The generator runs as a rake task
-
-### Checking Availability
+2. **A Rails application that loads Lyra.** The rake tasks depend on
+   `:environment`, so run them from the application, not from the Lyra
+   repository root (which has no Rails application of its own).
 
 ```ruby
-# In Rails console or code
-Lyra.petri_flow_available?  # => true/false
-Lyra.verification_available?  # => true/false (alias)
+Lyra.petri_flow_available?    # => true/false
+Lyra.verification_available?  # => the same
 ```
 
 ---
 
 ## Usage
 
-### Generate All Workflows
+The tasks are defined in `lib/tasks/lyra_workflows.rake`.
 
-Generate workflows for all Lyra modes:
-
-```bash
-bundle exec rake lyra:generate_verification_model
-```
-
-This generates separate files for:
-- Lifecycle workflow (CRUD entity states)
-- Monitor mode workflow
-- Hijack mode workflow
-- ES Sync mode workflow
-- ES Async mode workflow
-
-### Generate Specific Mode
-
-Generate workflow for a single mode:
+### Generate all workflows
 
 ```bash
-# Monitor mode only
-MODE=monitor bundle exec rake lyra:generate_verification_model
-
-# Hijack mode only
-MODE=hijack bundle exec rake lyra:generate_verification_model
-
-# Event Sourcing Sync mode
-MODE=es_sync bundle exec rake lyra:generate_verification_model
-
-# Event Sourcing Async mode
-MODE=es_async bundle exec rake lyra:generate_verification_model
+bin/rails lyra:workflows:generate
+bin/rails lyra:generate_workflows      # alias
 ```
+
+This prints the analysis and writes one file for the lifecycle net and one per
+mode (Monitor, Hijack, ES-Sync, ES-Async), plus a Markdown report.
+
+### Generate one mode
+
+```bash
+MODE=monitor  bin/rails lyra:workflows:generate
+MODE=hijack   bin/rails lyra:workflows:generate
+MODE=es_sync  bin/rails lyra:workflows:generate
+MODE=es_async bin/rails lyra:workflows:generate
+MODE=all      bin/rails lyra:workflows:generate   # same as no MODE
+```
+
+With a single mode only that mode's file is written, alongside
+`lifecycle_workflow.rb`. It has the same name and class as in a full run
+(`MODE=monitor` writes `monitor_mode_workflow.rb` defining `MonitorModeWorkflow`;
+`MODE=es_sync` writes `es_sync_mode_workflow.rb` defining `EsSyncModeWorkflow`),
+so it replaces the file a full run wrote. See [Output Files](#output-files).
+
+### Output locations
+
+```bash
+OUTPUT_DIR=tmp/workflows  bin/rails lyra:workflows:generate   # workflow files
+REPORTS_DIR=tmp/reports   bin/rails lyra:workflows:generate   # reports
+```
+
+`OUTPUT_DIR` and `REPORTS_DIR` override the default directories (relative paths
+are expanded against the current directory).
+
+### Verify
+
+```bash
+bin/rails lyra:workflows:verify
+```
+
+Generates the four mode nets in memory, runs PetriFlow's verification on each,
+and prints for each: reachable states, terminal states, whether it is safe
+(1-bounded) and bounded, the maximum token count, whether it terminates
+properly (deadlock-free except at terminal places), the raw deadlock-free
+result (which counts the terminal marking as a deadlock), and a liveness
+score. It writes no files.
 
 ---
 
@@ -95,7 +129,7 @@ MODE=es_async bundle exec rake lyra:generate_verification_model
 
 ### 1. Lifecycle Workflow
 
-Models the CRUD entity lifecycle:
+The CRUD entity lifecycle:
 
 ```
 States: nonexistent → created → persisted → updated → destroyed → deleted
@@ -103,43 +137,35 @@ States: nonexistent → created → persisted → updated → destroyed → dele
 
 | Transition | From | To | Trigger |
 |------------|------|-----|---------|
-| create | nonexistent | created | after_create callback |
+| create | nonexistent | created | after_create |
 | emit_created_event | created | persisted | publish Created event |
-| update | persisted | updated | after_update callback |
+| update | persisted | updated | after_update |
 | emit_updated_event | updated | persisted | publish Updated event |
-| destroy | persisted | destroyed | after_destroy callback |
+| destroy | persisted | destroyed | after_destroy |
 | emit_destroyed_event | destroyed | deleted | publish Destroyed event |
 
-**Note:** The `persisted ↔ updated` cycle is intentional - entities can be updated multiple times.
+The `persisted ↔ updated` cycle is intentional: a record can be updated any
+number of times. The terminal place is `deleted`.
 
 ### 2. Monitor Mode Workflow
-
-Passive observation of CRUD operations:
 
 ```
 idle → crud_executing → crud_completed → event_building → event_publishing → completed
 ```
 
-- CRUD operations execute normally
-- Events are published after the fact
-- No modification to original operation
+The write runs as usual; the event is built and stored after it.
 
 ### 3. Hijack Mode Workflow
-
-Intercepts CRUD operations:
 
 ```
 idle → crud_intercepted → command_created → command_validating →
 command_valid → event_created → event_stored → projecting → completed
 ```
 
-- CRUD intercepted before execution
-- Converted to Command/Event pattern
-- State projected from events
+The write is turned into a command, its event is stored first, and the row is
+written from it.
 
 ### 4. ES Sync Mode Workflow
-
-Full event sourcing with synchronous projection:
 
 ```
 idle → command_received → aggregate_loading → aggregate_loaded →
@@ -147,13 +173,11 @@ command_applying → events_generated → events_storing → events_stored →
 projecting_sync → projection_complete → completed
 ```
 
-- Command drives aggregate
-- Events generated and stored
-- Projection blocks until complete
+The projection runs before the write returns.
 
 ### 5. ES Async Mode Workflow
 
-Full event sourcing with asynchronous projection using **fork pattern**:
+Asynchronous projection, modelled with a **fork**:
 
 ```
 idle → command_received → aggregate_loading → aggregate_loaded →
@@ -162,29 +186,25 @@ async_fork ──┬──→ response_returned (terminal: immediate response)
              └──→ job_processing → projecting_async → projection_complete (terminal: eventual)
 ```
 
-**Fork Pattern:** The `async_fork` transition uses Petri net fork semantics - a single transition produces tokens in TWO places simultaneously:
-- `response_returned` - Caller gets response immediately (non-blocking)
-- `job_processing` - Background projection starts independently
+The `async_fork` transition puts a token in two places at once:
+- `response_returned`: the caller gets its response without waiting
+- `job_processing`: the background projection starts
 
-- Two terminal states: `response_returned` (immediate) and `projection_complete` (eventual)
-- Background job handles projection
-- Eventually consistent read model
+Both `response_returned` and `projection_complete` are terminal places.
 
-### Fork vs Choice Pattern
-
-The ES Async workflow uses a **fork** pattern, which is different from a **choice** pattern:
+### Fork vs Choice
 
 | Pattern | Visual | Semantics |
 |---------|--------|-----------|
-| **Choice** | `A → T1 → B` or `A → T2 → C` | Pick ONE transition (exclusive OR) |
-| **Fork** | `A → T → [B, C]` | ONE transition, BOTH outputs (parallel AND) |
+| **Choice** | `A → T1 → B` or `A → T2 → C` | One of several transitions fires (exclusive OR) |
+| **Fork** | `A → T → [B, C]` | One transition, both outputs (parallel AND) |
 
 ```ruby
-# Choice pattern (multiple transitions from same place)
+# Choice: several transitions from the same place
 transition :cancel, from: :order, to: :cancelled
 transition :complete, from: :order, to: :completed
 
-# Fork pattern (one transition to multiple places)
+# Fork: one transition to several places
 transition :async_fork, from: :events_stored, to: [:response_returned, :job_processing]
 ```
 
@@ -192,62 +212,62 @@ transition :async_fork, from: :events_stored, to: [:response_returned, :job_proc
 
 ## Output Files
 
-### Workflow Files
+### Workflow files
 
-Workflow files are generated in `app/workflows/` directory:
-- **Lyra gem context**: `lyra/app/workflows/`
-- **Normal application**: `<rails_root>/app/workflows/`
+Written to `OUTPUT_DIR` if set, otherwise to `app/workflows/`:
+- when the application is the Lyra gem itself (its root holds `lyra.gemspec`,
+  or `Rails.root` lies inside the gem): Lyra's own `app/workflows/`
+- otherwise: `<Rails.root>/app/workflows/`
+
+| File | Class |
+|------|-------|
+| `lifecycle_workflow.rb` | `LifecycleWorkflow` |
+| `monitor_mode_workflow.rb` | `MonitorModeWorkflow` |
+| `hijack_mode_workflow.rb` | `HijackModeWorkflow` |
+| `es_sync_mode_workflow.rb` | `EsSyncModeWorkflow` |
+| `es_async_mode_workflow.rb` | `EsAsyncModeWorkflow` |
+
+The classes are top-level constants named after their files
+(`WorkflowGenerator.workflow_file_basename(mode)` and
+`.workflow_class_name(mode)`), so Zeitwerk can load them from
+`app/workflows/`. Lyra ships a generated set in its own `app/workflows/`.
+
+### Report files
+
+Written to `REPORTS_DIR` if set, otherwise to `<Rails.root>/reports/`:
 
 | File | Content |
 |------|---------|
-| `lifecycle_workflow.rb` | CRUD lifecycle PetriFlow class |
-| `monitor_mode_workflow.rb` | Monitor mode PetriFlow class |
-| `hijack_mode_workflow.rb` | Hijack mode PetriFlow class |
-| `es_sync_mode_workflow.rb` | ES Sync mode PetriFlow class |
-| `es_async_mode_workflow.rb` | ES Async mode PetriFlow class |
+| `workflow_analysis_<timestamp>.md` | The analysis and every generated net, with Mermaid diagrams |
+| `workflow_analysis_latest.md` | The same, overwritten on each run |
 
-### Report Files
-
-Report files are generated in `reports/` directory:
-
-| File Pattern | Content |
-|--------------|---------|
-| `workflow_analysis_<timestamp>.md` | Timestamped report for history |
-| `workflow_analysis_latest.md` | Latest report for easy access |
-
-### Example Generated Class
+### Example generated class
 
 ```ruby
 # frozen_string_literal: true
 # Auto-generated by Lyra::Verification::WorkflowGenerator
+# Generated at: <time>
 
-module Lyra
-  module Verification
-    module Generated
+# Monitor Mode Workflow
+# Passively observes CRUD operations without modification
+class MonitorModeWorkflow < PetriFlow::Workflow
+  workflow_name "Monitor Mode Workflow"
 
-      class MonitorModeWorkflow < PetriFlow::Workflow
-        workflow_name "Monitor Mode Workflow"
+  places :idle, :crud_executing, :crud_completed, :event_building, :event_publishing, :completed
+  initial_place :idle
+  terminal_places :completed
 
-        places :idle, :crud_executing, :crud_completed,
-               :event_building, :event_publishing, :completed
-        initial_place :idle
-        terminal_places :completed
+  transition :receive_crud,
+             from: :idle,
+             to: :crud_executing,
+             trigger: "ActiveRecord callback triggered"
 
-        transition :receive_crud,
-                   from: :idle,
-                   to: :crud_executing,
-                   trigger: "ActiveRecord callback triggered"
+  transition :crud_success,
+             from: :crud_executing,
+             to: :crud_completed,
+             trigger: "CRUD operation completes successfully"
 
-        transition :crud_success,
-                   from: :crud_executing,
-                   to: :crud_completed,
-                   trigger: "CRUD operation completes successfully"
-
-        # ... more transitions
-      end
-
-    end
-  end
+  # ... more transitions
 end
 ```
 
@@ -255,30 +275,27 @@ end
 
 ## API Reference
 
-### WorkflowGenerator Class
+### WorkflowGenerator
 
 ```ruby
-require 'lyra/verification/workflow_generator'
+require "lyra/verification/workflow_generator"
 
 generator = Lyra::Verification::WorkflowGenerator.new
 
-# Generate all workflows
-result = generator.generate!
-
-# Generate specific mode workflow
-result = generator.generate!(mode: :monitor)
-result = generator.generate!(mode: :hijack)
-result = generator.generate!(mode: :es_sync)
-result = generator.generate!(mode: :es_async)
+result = generator.generate!                   # lifecycle + all four mode nets
+result = generator.generate!(mode: :monitor)   # lifecycle + one mode net
 ```
 
-### Result Structure
+An unknown mode raises `ArgumentError`. The nets are only built when PetriFlow
+is loaded; otherwise the workflow entries are `nil` (or `{}`).
+
+### Result structure
 
 ```ruby
 {
   lifecycle_workflow: {
     name: "CRUD Entity Lifecycle (Generated)",
-    places: [:nonexistent, :created, :persisted, ...],
+    places: [:nonexistent, :created, :persisted, :updated, :destroyed, :deleted],
     initial_place: :nonexistent,
     terminal_places: [:deleted],
     transitions: [...],
@@ -286,28 +303,26 @@ result = generator.generate!(mode: :es_async)
     source: "Lyra::Verification::WorkflowGenerator"
   },
 
-  # When mode: specified
-  mode_workflow: { ... },
+  # with mode:
+  mode_workflow: { name:, description:, places:, initial_place:, terminal_places:, transitions:, ... },
 
-  # When all modes generated
-  mode_workflows: {
-    monitor: { ... },
-    hijack: { ... },
-    es_sync: { ... },
-    es_async: { ... }
-  },
+  # without mode:
+  mode_workflows: { monitor: {...}, hijack: {...}, es_sync: {...}, es_async: {...} },
 
   analysis: {
-    modes: [:monitor, :hijack, :es_sync, :es_async, :disabled],
+    modes: [:monitor, :hijack, :es_sync, :es_async, :disabled],   # a fixed list
     current_mode: :monitor,
-    callbacks: { ... },
-    models: [ ... ],
-    event_types: [ ... ]
+    mode_methods: { monitor: true, hijack: true, event_sourcing: true },
+    callbacks: { create: [], update: [], destroy: [] },
+    callback_hooks: { before: [], after: [] },
+    models: [ { name:, table_name:, callbacks:, event_prefix:, ... } ],
+    event_types: [ { name:, class:, attributes: } ],
+    crud_events: [:Created, :Updated, :Destroyed]
   }
 }
 ```
 
-### Available Modes
+### Available modes
 
 ```ruby
 Lyra::Verification::WorkflowGenerator::AVAILABLE_MODES
@@ -318,135 +333,131 @@ Lyra::Verification::WorkflowGenerator::AVAILABLE_MODES
 
 ## Integration with PetriFlow
 
-### Loading Generated Workflows
+### Loading a generated workflow
+
+In the application, Zeitwerk loads the classes from `app/workflows/`:
 
 ```ruby
-# Load a generated workflow
-require_relative 'reports/monitor_mode_workflow_20260103_103348'
-
-workflow = Lyra::Verification::Generated::MonitorModeWorkflow.new
+workflow = MonitorModeWorkflow.new
 ```
 
-### Running Verification
+### Running verification
 
 ```ruby
-# Verify the workflow
-result = workflow.verify
+result = workflow.verify!
 
-puts "Bounded: #{result[:boundedness][:is_bounded]}"
-puts "Safe: #{result[:boundedness][:is_safe]}"
-puts "Reachable states: #{result[:reachability][:reachable_states].count}"
+result[:boundedness][:is_bounded]
+result[:boundedness][:is_safe]
+result[:reachability][:total_reachable_states]
+result[:liveness][:terminates_properly]   # deadlock-free except at terminal places
+result[:liveness][:deadlock_free]         # raw: counts the terminal marking as a deadlock
+workflow.terminal_reachability            # { completed: true }
 ```
 
-### Generating Visualizations
+`verify!` passes the workflow's terminal places to `PetriFlow.verify`, so
+`liveness[:terminates_properly]` is the property the thesis calls
+deadlock-freedom: a reachable marking in which nothing can fire is a deadlock
+only if it marks no terminal place (`PetriFlow::Verification::LivenessChecker`).
+The raw `deadlock_free` is false for every net that is meant to finish,
+including the lifecycle net, whose update cycle does not prevent it from
+terminating properly.
+
+### Visualizations and export
 
 ```ruby
-# Generate Mermaid diagram
-mermaid = workflow.to_mermaid
-puts mermaid
+workflow.to_mermaid   # Mermaid source
+workflow.to_dot       # GraphViz DOT source
+workflow.simulate(steps: 20)
 
-# Export to other formats
-workflow.export(:pnml, 'monitor_workflow.pnml')
-workflow.export(:json, 'monitor_workflow.json')
+PetriFlow.save(workflow.net, "monitor_workflow.pnml")   # format from the extension
+PetriFlow.save(workflow.net, "monitor_workflow.json")
 ```
 
 ---
 
-## Customization
+## Other Verification Nets
 
-### Extending the Generator
+The generated nets describe the modes; the nets Lyra checks its mapping with
+live in `lib/lyra/verification/`:
 
-You can subclass the generator to add custom analysis:
+- `CrudLifecycleWorkflow`, and `CreateModeWorkflow`, `UpdateModeWorkflow`,
+  `DestroyModeWorkflow` (one per operation, branching on the mode)
+  (`crud_lifecycle_workflow.rb`).
+- `Lyra::Verification::BypassWorkflow` (`bypass_workflow.rb`): the writes
+  that skip ActiveRecord callbacks (`update_column(s)`, `delete`, `touch`,
+  `update_all`, `delete_all`, `insert_all(!)`, `upsert_all`, and
+  `dependent: :nullify`), as `StrictDataAccess` and `CachedRelation`
+  implement them, with strict mode on or off and a table-backed or
+  events-only store. `BypassWorkflow.coverage` checks Bypass Coverage: every
+  reachable marking in which nothing can fire is either a rejection or a
+  store change with an event logged; it returns `covered:`, `dead_markings:`
+  and `silent_writes:`. `BypassWorkflow::METHODS` is kept equal to the
+  methods Lyra overrides by `test/verification/bypass_workflow_test.rb`.
+- `Lyra::Verification::CrudVerifier#verify_all` runs the lifecycle net, the
+  three operation nets, the bypass net and every `*_workflow.rb` found in
+  Lyra's and the application's `app/workflows/`, and summarises them
+  (`lifecycle_valid`, `modes_valid`, `all_terminals_reachable`,
+  `deadlock_free` (the terminal-aware check), `bypass_covered`).
+
+`Lyra.verify_crud_mapping` returns that report. `Lyra.verify_mapping!` raises
+`Lyra::MappingVerificationError` naming every failed check (and any monitored
+model without a table or primary key). To run it at boot:
 
 ```ruby
-class CustomWorkflowGenerator < Lyra::Verification::WorkflowGenerator
-  def generate!
-    result = super
-    result[:custom_analysis] = perform_custom_analysis
-    result
-  end
-
-  private
-
-  def perform_custom_analysis
-    # Your custom introspection logic
-  end
+# config/initializers/lyra.rb
+Lyra.configure do |config|
+  config.models = %w[Order Payment]
+  config.verify_mapping!   # after boot, it verifies immediately
 end
 ```
 
-### Adding New Mode Workflows
-
-To add support for a new mode, update the `AVAILABLE_MODES` constant and add a corresponding `generate_*_workflow` method:
-
-```ruby
-AVAILABLE_MODES = [:monitor, :hijack, :es_sync, :es_async, :custom].freeze
-
-def generate_custom_workflow
-  {
-    name: "Custom Mode Workflow",
-    description: "Description of custom mode",
-    places: [...],
-    transitions: [...],
-    # ...
-  }
-end
-```
+See [API_REFERENCE.md](API_REFERENCE.md#formal-verification-needs-petri_flow).
 
 ---
 
 ## Verification View
 
-The Lyra dashboard includes a verification view at `/lyra/verification` that displays:
+With the engine mounted at `/lyra`, the dashboard's verification page is
+`/lyra/verification` (JSON: `/lyra/verification.json`). It runs
+`CrudVerifier#verify_all` and shows:
 
-1. **Lifecycle Workflow** - Entity CRUD lifecycle verification
-2. **Mode Verification Workflow** - Combined mode switching verification
-3. **Generated Mode Workflows** - Individual mode workflows from `app/workflows/`
+1. **Lifecycle Workflow**
+2. **CRUD Mode Verification Workflows**: the Create, Update and Destroy nets
+3. **Bypass writes**: whether every callback-bypassing write is recorded
+4. **Generated Mode Workflows**: the files in `app/workflows/`
 
-Each workflow shows:
-- Verification status (PASS/FAIL)
-- Reachable states count
-- Terminal state reachability
-- Petri net diagram (Mermaid)
-
-### Understanding "Not Deadlock Free"
-
-In Petri net theory, a net is **deadlock-free** if every reachable state can eventually reach a terminal state. However, this can be misleading for workflows with intentional cycles.
-
-**The Lifecycle Workflow** contains a cycle: `persisted ↔ updated`. This is *intentional behavior*: entities can be updated indefinitely without being deleted. From a formal standpoint, once in the update cycle, the system *could* stay there forever (never reaching `deleted`), which is technically "not deadlock free."
-
-**What matters for correctness:**
-- **Terminal reachability** - The `deleted` state *can* be reached from any state
-- **No unwanted deadlocks** - No state where operations are blocked
-- **Boundedness** - The system is safe (1-bounded)
-
-**Summary:** "Not deadlock free" in the lifecycle workflow is expected and correct behavior for CRUD semantics.
+For each net: reachable states, terminal states, whether it is 1-bounded,
+whether it is deadlock-free except at terminal places, terminal state
+reachability, and a Mermaid diagram.
 
 ---
 
 ## Troubleshooting
 
-### PetriFlow Not Available
+### PetriFlow not available
 
 ```
 Error: PetriFlow gem is required
 ```
 
-**Solution:** Ensure `petri_flow` gem is in your Gemfile and bundle is installed.
+Add the `orfeas_petri_flow` gem (with `require: "petri_flow"`) to the
+Gemfile and run `bundle install`.
 
-### Invalid Mode
+### Invalid mode
 
 ```
-Error: Invalid mode 'foo'. Available modes: monitor, hijack, es_sync, es_async, all
+Error: Invalid mode 'foo'
+Available modes: monitor, hijack, es_sync, es_async, all
 ```
 
-**Solution:** Use one of the available modes or `all`.
+Use one of the listed modes.
 
-### No Callbacks Detected
+### "No callbacks detected in source"
 
-If "No callbacks detected in source" appears, ensure:
-1. `lib/lyra/monitorable.rb` exists and contains callback definitions
-2. The generator can find the Lyra gem root directory
+Expected with the current code: the generator looks for callbacks in
+`lib/lyra/monitorable.rb`, which does not exist. The lifecycle net then uses
+the default triggers; the nets are otherwise unaffected.
 
----
+### "Don't know how to build task 'environment'"
 
-*Documentation generated for Lyra::Verification::WorkflowGenerator*
+The tasks need a Rails application; run them from one that loads Lyra.

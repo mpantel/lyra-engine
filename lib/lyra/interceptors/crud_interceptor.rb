@@ -131,6 +131,25 @@ module Lyra
         end
       end
 
+      # The attribution metadata every event of this record's writes carries,
+      # whichever mode stores it: who (user_id, request_id), the causal chain
+      # (correlation_id, causation_id), the user action in scope (action_id,
+      # user_action), merged with config.metadata_proc's hash. Monitor's
+      # after_* callbacks and the CommandHandler (hijack, event sourcing) both
+      # build their metadata here, so the modes attribute a write alike.
+      def lyra_event_metadata(operation)
+        base_metadata = {
+          user_id: lyra_current_user_id,
+          request_id: lyra_current_request_id,
+          correlation_id: Lyra::Correlation.current_id,
+          causation_id: Lyra::Causation.current_id,
+          action_id: lyra_current_action_id,
+          user_action: lyra_current_user_action
+        }
+
+        base_metadata.merge(lyra_custom_metadata(operation))
+      end
+
       class_methods do
         # Enable Lyra monitoring for this model
         # The model as it was at +time+, rebuilt from its event streams
@@ -506,6 +525,13 @@ module Lyra
         if Lyra.config.async_projections_inline?
           Lyra::Projections::ModelProjection.project(self.class, operation, result)
         else
+          # Inside ReadYourWrites.with_guaranteed_read the write is also
+          # projected when the block ends, so the block's reads find it. The
+          # job is still enqueued: it replays the whole stream, so it
+          # converges on the same row whichever runs first.
+          if Lyra::Consistency::ReadYourWrites.in_guaranteed_block?
+            Lyra::Consistency::ReadYourWrites.record_write(self.class, operation, result)
+          end
           Lyra::Projections::AsyncProjectionJob.perform_later(
             event.event_id,
             self.class.name,
@@ -580,19 +606,7 @@ module Lyra
       end
 
       def build_event_data(operation)
-        # Base metadata from built-in context
-        base_metadata = {
-          user_id: lyra_current_user_id,
-          request_id: lyra_current_request_id,
-          correlation_id: Lyra::Correlation.current_id,
-          causation_id: Lyra::Causation.current_id,
-          action_id: lyra_current_action_id,
-          user_action: lyra_current_user_action
-        }
-
-        # Merge custom metadata from metadata_proc if configured
-        custom_metadata = lyra_custom_metadata(operation)
-        merged_metadata = base_metadata.merge(custom_metadata)
+        merged_metadata = lyra_event_metadata(operation)
 
         {
           model_class: self.class.name,

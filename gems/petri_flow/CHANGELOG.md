@@ -4,6 +4,14 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Terminal-aware deadlock-freedom** — `PetriFlow.verify` and `Verification::LivenessChecker`
+  take `terminal_places:`. The liveness report adds `terminal_places`, `terminates_properly`
+  (no reachable dead marking outside the terminal places) and `improper_dead_markings` (the
+  count of those that remain). The raw `deadlock_free`, which counts the intended end of a net
+  as a deadlock, is unchanged. `Workflow#verify!` now passes the workflow's `terminal_places`.
+  First liveness tests for the gem.
+
 ### Fixed
 - **Undeclared `rexml` dependency** — the PNML and CPN Tools exporters `require "rexml/document"`,
   but the gemspec did not declare `rexml`, which has not been a default gem since Ruby 3.4.

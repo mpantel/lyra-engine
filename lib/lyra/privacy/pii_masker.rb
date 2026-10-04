@@ -37,28 +37,45 @@ module Lyra
 
         # Mask all PII in a collection of Lyra events
         #
+        # Returns new events, one per input event, of the same class, with
+        # the same event_id, event type and metadata; only data changes:
+        # its attributes are masked, and so is each [old, new] pair in its
+        # changes. The stored events are not touched (they are immutable).
+        #
         # @param events [Array<Lyra::Event>] Events to mask
         # @param strategy [Symbol] Masking strategy
-        # @return [Array] Events with masked attributes
+        # @return [Array<Lyra::Event>] Masked copies of the events
         #
         def mask_events(events, strategy: :partial)
           PamDsl::PIIMasker.mask_records(
             events,
             attribute_extractor: ->(e) { e.attributes },
-            attribute_setter: ->(e, masked) {
-              Lyra::Event.new(
-                event_id: e.event_id,
-                operation: e.operation,
-                model_class: e.model_class,
-                model_id: e.model_id,
-                attributes: masked,
-                changes: e.changes,
-                timestamp: e.timestamp,
-                metadata: e.metadata
-              )
-            },
+            attribute_setter: ->(e, masked) { masked_copy(e, masked, strategy) },
             strategy: strategy
           )
+        end
+
+        private
+
+        # RubyEventStore events take only event_id:, data: and metadata:.
+        # Data keys may be symbols or strings (after JSON serialization);
+        # the copy keeps whichever the event has.
+        def masked_copy(event, masked_attributes, strategy)
+          data = event.data.is_a?(Hash) ? event.data.dup : {}
+          attributes_key = data.key?("attributes") ? "attributes" : :attributes
+          data[attributes_key] = masked_attributes
+
+          changes_key = data.key?("changes") ? "changes" : :changes
+          if data[changes_key].is_a?(Hash)
+            data[changes_key] = data[changes_key].to_h do |field, values|
+              masked = Array(values).map do |v|
+                v.nil? ? v : PamDsl::PIIMasker.mask_field(v, field, strategy: strategy)
+              end
+              [field, values.is_a?(Array) ? masked : masked.first]
+            end
+          end
+
+          event.class.new(event_id: event.event_id, data: data, metadata: event.metadata.to_h)
         end
       end
     end

@@ -21,18 +21,32 @@ module Lyra
         #
         # Tracks any writes within the block and ensures they are
         # projected before the block returns.
+        #
+        # Nesting: an inner block keeps its own list of writes and projects
+        # them when it ends (so reads after the inner block, still inside the
+        # outer one, see them), then restores the outer block's list, so the
+        # outer block's writes made before and after the inner block are
+        # projected when the outer block ends. If the inner block raises, its
+        # unprojected writes are handed to the outer block, which projects
+        # them if it completes. Every write is projected by the time the
+        # outermost block returns. (The inner block used to reset the list to
+        # [] and then to nil, losing the outer block's writes.)
         def with_guaranteed_read
           return yield unless Lyra.event_sourcing_mode?
 
           # Store pending writes in thread-local storage
+          outer = Thread.current[:lyra_pending_writes]
           Thread.current[:lyra_pending_writes] = []
 
           begin
             result = yield
             ensure_projected
+            Thread.current[:lyra_pending_writes] = []
             result
           ensure
-            Thread.current[:lyra_pending_writes] = nil
+            pending = Thread.current[:lyra_pending_writes] || []
+            outer&.concat(pending)
+            Thread.current[:lyra_pending_writes] = outer
           end
         end
 

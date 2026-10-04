@@ -17,7 +17,6 @@ PetriFlow is a Ruby gem that provides a complete toolkit for modeling, analyzing
 - **Token Colors**: Typed tokens carrying structured data
 - **Guards**: Conditional transition firing (e.g., privacy policies)
 - **Arc Expressions**: Data transformations during transitions
-- **Hierarchical Nets**: Multi-level system modeling
 
 ### 📊 Matrix Analysis
 - **CRUD-Event Mapping Matrix**: Track which CRUD operations generate which events
@@ -29,7 +28,7 @@ PetriFlow is a Ruby gem that provides a complete toolkit for modeling, analyzing
 ### 🔍 Formal Verification
 - **Reachability Analysis**: What states are reachable?
 - **Boundedness Checking**: Are token counts bounded?
-- **Liveness Checking**: Can transitions fire? Deadlock detection
+- **Liveness Checking**: Can transitions fire? Deadlock detection, optionally relative to designated terminal places
 - **Invariant Checking**: Custom property verification
 
 ### 🎬 Simulation
@@ -160,6 +159,13 @@ puts "Bounded: #{results[:boundedness][:is_bounded]}"
 puts "Safe: #{results[:boundedness][:is_safe]}"
 puts "Deadlock-free: #{results[:liveness][:deadlock_free]}"
 
+# deadlock_free counts every reachable dead marking as a deadlock, including
+# the intended end of the net. Pass terminal_places: to check deadlock-freedom
+# except at markings that mark one of those places.
+results = PetriFlow.verify(net, terminal_places: [:completed, :rejected])
+puts "Terminates properly: #{results[:liveness][:terminates_properly]}"
+puts "Improper dead markings: #{results[:liveness][:improper_dead_markings]}"
+
 # Custom invariants
 checker = PetriFlow::Verification::InvariantChecker.new(net)
 
@@ -222,6 +228,24 @@ ascii = PetriFlow.visualize(net, format: :ascii)
 puts ascii
 ```
 
+### Export
+
+Nets (plain and colored) can be exported to PNML, CPN Tools XML, JSON and YAML:
+
+```ruby
+pnml = PetriFlow.export(net, format: :pnml)
+cpn  = PetriFlow.export(net, format: :cpn)    # CPN Tools XML
+json = PetriFlow.export(net, format: :json)   # pretty: true by default
+yaml = PetriFlow.export(net, format: :yaml)
+
+# Write to a file; the format is detected from the extension
+# (.pnml, .cpn, .json, .yaml/.yml; .xml is PNML unless the name contains "cpn")
+PetriFlow.save(net, "order.pnml")
+PetriFlow.save(net, "order.xml", format: :cpn)
+```
+
+See [docs/PETRIFLOW_EXPORT.md](docs/PETRIFLOW_EXPORT.md) and `examples/export_example.rb`.
+
 ## Rails Integration: Workflow DSL
 
 PetriFlow includes a declarative DSL for defining workflows in Rails applications,
@@ -275,6 +299,27 @@ rake petri_flow:config
 rake workflows:verify
 rake workflows:list
 ```
+
+### Generating Workflows from State Machines
+
+Models that use `aasm` or `state_machines-activerecord` can be turned into
+workflow classes:
+
+```bash
+# List models with a supported state machine
+rake petri_flow:generate:scan
+
+# Write app/workflows/order_workflow.rb from Order's state machine
+# (state attribute defaults to :state), then verify it
+rake petri_flow:generate:from_state_machine[Order,state]
+
+# Aliases
+rake workflows:scan
+rake workflows:from_state_machine[Order,state]
+```
+
+`Workflow#verify!` passes the workflow's `terminal_places` to `PetriFlow.verify`,
+so its results include `liveness[:terminates_properly]`.
 
 ### Generated Reports
 
@@ -552,14 +597,24 @@ It provides the formal verification foundation for the CRUD-to-Event mapping fra
 - `PetriFlow::Visualization::Graphviz` - DOT/GraphViz output
 - `PetriFlow::Visualization::Mermaid` - Mermaid diagrams
 
+### Export
+
+- `PetriFlow::Export` - `export` / `save` dispatch by format
+- `PetriFlow::Export::PnmlExporter`, `CpnToolsExporter`, `JsonExporter`, `YamlExporter`
+
+### Workflows
+
+- `PetriFlow::Workflow` - Declarative workflow DSL
+- `PetriFlow::Generators::WorkflowGenerator` - Workflow classes from AASM / state_machines
+
 ## Development
 
 ```bash
 # Install dependencies
 bundle install
 
-# Run tests
-bundle exec rspec
+# Run tests (Minitest)
+bundle exec rake test
 
 # Run examples
 ruby examples/crud_mapping_example.rb

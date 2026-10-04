@@ -10,7 +10,8 @@ PAM DSL provides a fluent, expressive way to define privacy policies using the P
 - **Specify processing purposes** with legal bases (GDPR compliant)
 - **Configure retention policies** with field-level granularity
 - **Manage consent requirements** with expiration and granular control
-- **Validate data access** against defined policies
+- **Validate data access** against defined policies, blocking violations (strict mode) or recording them (audit mode)
+- **Declare the Article 30 record of processing**: data subjects, recipients, international transfers and security measures
 
 ## Installation
 
@@ -126,7 +127,9 @@ end
 See [Sensitivity Levels and Legislative Background](#sensitivity-levels-and-legislative-background) for detailed regulatory mapping.
 
 **PII Types:**
-`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:custom`
+`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:online_identifier`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:credential`, `:token`, `:payment_token`, `:custom`
+
+Any other type, or a sensitivity outside the four levels, raises `PamDsl::InvalidFieldError` when the field is declared. A field's sensitivity defaults to `:internal`.
 
 ### Defining Purposes
 
@@ -218,6 +221,39 @@ end
 - `:public_health` - 9(2)(i): public health
 - `:research_archiving` - 9(2)(j): scientific/historical research or statistics
 
+#### Article 30 Declarations
+
+The record of processing activities (GDPR Art. 30(1)) needs facts that access control does not: who the data is about, who receives it, whether it leaves the EEA, and how it is protected. A purpose declares the first three; the policy declares the security measures.
+
+```ruby
+PamDsl.define_policy :shop do
+  security_measures "TLS in transit", "role-based access", "encrypted backups"  # Art. 30(1)(g)
+
+  purpose :payment_processing do
+    basis :contract
+    requires :email, :billing_address
+    data_subjects "customers"                                      # Art. 30(1)(c)
+    recipients "card payment processor", "tax authority"           # Art. 30(1)(d)
+    transfer to: "US", safeguard: :standard_contractual_clauses    # Art. 30(1)(e)
+  end
+
+  purpose :order_fulfillment do
+    basis :contract
+    requires :email
+    data_subjects "customers"
+    recipients "shipping partner"
+    no_transfers!                                                  # declares that there are none
+  end
+end
+
+policy = PamDsl.policy(:shop)
+policy.article_30_gaps   # => [] when every item is declared
+```
+
+`data_subjects`, `recipients` and `security_measures` accumulate across calls and store strings; called with no arguments they return what has been declared. Each `transfer` call adds `{ to:, safeguard: }` (both stored as strings). A purpose's transfers are undeclared until it calls `transfer` or `no_transfers!`, so "none" must be stated rather than assumed.
+
+`policy.article_30_gaps` returns what the record cannot state because the policy does not declare it, as `[purpose_name, clause]` pairs (`purpose_name` is nil for the policy-wide security measures), for example `[:order_fulfillment, "Art. 30(1)(d) categories of recipients"]`. The Article 30 report prints these gaps in its completeness section.
+
 ### Retention Policies
 
 Define how long data should be retained:
@@ -240,16 +276,18 @@ PamDsl.define_policy :my_policy do
       on_expiry :anonymize  # or :hard_delete, :soft_delete, :archive
     end
 
-    # Conditional retention
+    # Conditional retention (`when` is a Ruby keyword: call it on self)
     for_model 'Transaction' do
       keep_for 10.years
-      when do |context|
+      self.when do |context|
         context[:transaction_type] == 'financial'
       end
     end
   end
 end
 ```
+
+The default retention is 7 years and the default deletion strategy `:soft_delete`. Conditions given with `self.when` are stored on the rule and evaluated by `RetentionRule#applies_to?(context)` (true when every condition holds, or there are none); `retention_for` returns the rule's duration without evaluating them.
 
 **Deletion Strategies:**
 - `:hard_delete` - Permanently delete data
@@ -262,7 +300,7 @@ end
 Consent has two distinct layers in PAM:
 
 1. **Policy-time spec** (`consent` DSL block) — declares *what* consent is required per purpose
-2. **Runtime consent store** — records *whether* each data subject has actually granted or withdrawn consent
+2. **Runtime consent store** — records each data subject's consent and where it stands: pending, granted, expired or withdrawn
 
 #### Policy-time spec
 
@@ -290,16 +328,28 @@ end
 
 Before calling `validate_access!` for a consent-based purpose, populate the store with the subject's actual consent decision. The store is the runtime $CS$ component from the formal model — indexed by `(purpose, subject)` pairs.
 
+Each `(purpose, subject)` pair has a `ConsentRecord` in one of four states:
+
+- `:pending` - consent requested (`request_consent`), not yet granted
+- `:granted` - consent active; the only state in which access is allowed
+- `:expired` - the record's `expires_at` has passed (derived when the state is read)
+- `:withdrawn` - the subject revoked consent
+
+Expired and withdrawn are final for that record. A new `request_consent` or `grant_consent` starts a fresh record (re-consent). `grant_consent` sets `expires_at` from the requirement's `expires_in`, counted from `granted_at`.
+
 ```ruby
 policy = PamDsl.policy(:my_policy)
 
-# Subject 42 grants marketing consent
+# Optionally record that consent was requested (state :pending)
+policy.consent_policy.request_consent(purpose: :marketing, subject: 42)
+
+# Subject 42 grants marketing consent (pending -> granted)
 policy.consent_policy.grant_consent(purpose: :marketing, subject: 42)
 
-# Subject 42 grants with a backdated timestamp (e.g. loaded from DB)
+# Subject 43 grants with a backdated timestamp (e.g. loaded from DB)
 policy.consent_policy.grant_consent(
   purpose: :marketing,
-  subject: 42,
+  subject: 43,
   granted_at: 6.months.ago
 )
 
@@ -307,16 +357,16 @@ policy.consent_policy.grant_consent(
 policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 42)
 ```
 
-`validate_access!` then looks up the store automatically — no need to pass a boolean:
+`validate_access!` then looks up the store automatically — no need to pass a boolean. The check applies when the purpose's basis is `:consent` and its consent requirement is `required!` (the default once `for_purpose` declares one):
 
 ```ruby
-# Passes: record exists and is not withdrawn/expired
+# Passes: the record's state is :granted
 policy.validate_access!([:email], :marketing, subject: 42)
 
 # Raises ConsentRequiredError: no record for subject 99
 policy.validate_access!([:email], :marketing, subject: 99)
 
-# Raises ConsentRequiredError: record is withdrawn
+# Raises ConsentRequiredError: the record is withdrawn
 policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 42)
 policy.validate_access!([:email], :marketing, subject: 42)
 ```
@@ -418,8 +468,9 @@ end
 
 # Access purpose metadata
 purpose = policy.get_purpose(:analytics)
-purpose.metadata[:lia_conducted]  # => true
-purpose.metadata[:dpia_reference] # => nil (not set)
+purpose.lia_documented?           # => true
+purpose.metadata[:lia_date]       # => "2026-06-02"
+purpose.metadata[:dpia_reference] # => nil (not set on :analytics)
 ```
 
 #### Common Use Cases for Metadata
@@ -431,7 +482,7 @@ purpose.metadata[:dpia_reference] # => nil (not set)
 | Data categorization | Field | `:pii_category`, `:special_category_data`, `:children_data` |
 | Cross-border transfers | Field | `:cross_border_transfer`, `:adequacy_decision`, `:sccs_required` |
 | Third-party sharing | Field | `:third_party_sharing`, `:processors`, `:joint_controllers` |
-| LIA documentation | Purpose | `:lia_conducted`, `:lia_date`, `:balancing_test` |
+| LIA documentation | Purpose | `:lia_date`, `:lia_outcome`, `:balancing_test` |
 | DPIA references | Purpose | `:dpia_required`, `:dpia_reference`, `:impact_assessment_date` |
 | Automated decisions | Purpose | `:automated_decision_making`, `:profiling`, `:human_review` |
 
@@ -451,6 +502,8 @@ export[:purposes][:analytics][:metadata]    # Purpose metadata
 
 This makes metadata available for compliance reporting, auditing, and integration with external systems.
 
+Metadata is free-form and PAM does not interpret it. Facts the Article 30 report needs (data subjects, recipients, transfers, security measures) have their own declarations (see [Article 30 Declarations](#article-30-declarations)), and so does a completed LIA (`lia_documented!`); the report and `lia_compliance_gaps` read those, not metadata.
+
 ### Using Policies
 
 ```ruby
@@ -466,11 +519,14 @@ policy.consent_policy.grant_consent(purpose: :marketing, subject: current_user.i
 
 # Validate data access — subject: is always required
 begin
-  policy.validate_access!([:email, :name], :marketing, subject: current_user.id)
+  policy.validate_access!([:email], :marketing, subject: current_user.id)
 rescue PamDsl::ConsentRequiredError => e
   puts "Consent error: #{e.message}"
 rescue PamDsl::SensitivityViolationError => e
   puts "Art. 9 violation: #{e.message}"
+rescue PamDsl::Error => e
+  # UndeclaredPurposeError, InvalidFieldError, PurposeFieldMismatchError
+  puts "Access refused: #{e.message}"
 end
 
 # Get field and apply transformation
@@ -490,6 +546,54 @@ duration = policy.retention_for('User', field_name: :email)
 # Export policy as hash
 policy_hash = policy.to_h
 ```
+
+`validate_access!` checks, in order: the purpose is declared (`UndeclaredPurposeError`), consent is active when the purpose needs it (`ConsentRequiredError`), each field is declared (`InvalidFieldError`) and allowed for the purpose (`PurposeFieldMismatchError`), and a purpose touching an Article 9 type has an Art. 9(2) basis (`SensitivityViolationError`). All errors inherit from `PamDsl::Error`. `policy.access_violations(fields, purpose, subject:)` returns every violation found, in that order, without raising or recording anything.
+
+### Enforcement Modes
+
+What happens when an access fails validation depends on the enforcement mode:
+
+- `:strict` (the default) blocks it: `validate_access!` raises the first violation as its typed error.
+- `:audit` lets it through and records every violation found, not only the first: each is logged as a warning (to `Rails.logger` under Rails, standard error otherwise; set another with `PamDsl.logger =`) and passed to the `on_violation` handlers, and `validate_access!` returns `false`. Use it to introduce a policy to a running system and see what it would block before it blocks anything.
+
+`validate_access!` returns `true` for a valid access in either mode.
+
+```ruby
+# Globally
+PamDsl.enforcement_mode = :audit   # or :strict; anything else raises ArgumentError
+
+# Or per policy, overriding the global mode
+PamDsl.define_policy :legacy_crm do
+  enforcement :audit
+  # ...
+end
+
+PamDsl.policy(:legacy_crm).enforcement_mode   # => :audit
+
+# Handle each violation recorded in audit mode
+PamDsl.on_violation do |violation|
+  # violation is a PamDsl::Enforcement::Violation with
+  # policy, purpose, fields, subject, error_class, message, at
+  ViolationLog.create!(policy: violation.policy, message: violation.to_s)
+end
+```
+
+`PamDsl.reset!` clears the registered policies, the global enforcement mode (back to `:strict`) and the violation handlers.
+
+### Access Recorder
+
+`PamDsl.access_recorder` receives every `validate_access!` call, whatever its outcome. It is an object answering `record?(policy)` and `call(access)`; `access` is a `PamDsl::Enforcement::Access` with `policy`, `purpose`, `legal_basis`, `fields`, `subject`, `outcome` (`:granted`, `:audited` or `:denied`), `violations` and `at`. The recorder runs before `validate_access!` returns or raises, and an error it raises propagates, so an access that cannot be recorded does not go ahead.
+
+```ruby
+class AccessAudit
+  def self.record?(_policy) = true
+  def self.call(access) = Rails.logger.info("#{access.outcome}: #{access.purpose} #{access.fields}")
+end
+
+PamDsl.access_recorder = AccessAudit
+```
+
+There is one recorder per process, set by the host application; Lyra installs its access log (`Lyra::AccessLog`, active when `config.record_access_events` is on). `PamDsl.reset!` leaves the recorder in place.
 
 ### Advanced Examples
 
@@ -536,8 +640,8 @@ retention do
   for_model 'Contract' do
     keep_for 10.years
 
-    when do |context|
-      # Keep active contracts longer
+    # The rule applies to active contracts
+    self.when do |context|
       context[:status] == 'active'
     end
 
@@ -547,8 +651,8 @@ retention do
   for_model 'SupportTicket' do
     keep_for 3.years
 
-    when do |context|
-      # Keep escalated tickets longer
+    # The rule applies to tickets that were not escalated
+    self.when do |context|
       !context[:escalated]
     end
   end
@@ -571,8 +675,11 @@ bundle exec rake pam_dsl:report:article_30
 # Full compliance report
 bundle exec rake pam_dsl:report:full
 
-# Export to JSON
+# Export to JSON (default path: tmp/privacy_report_<timestamp>.json)
 bundle exec rake "pam_dsl:report:export[reports/privacy_report.json]"
+
+# Compare two policies (Markdown report, default reports/policy_comparison.md)
+bundle exec rake "pam_dsl:report:compare[policy_v1,policy_v2,reports/comparison.md]"
 
 # PII analysis from event store (requires Lyra)
 bundle exec rake pam_dsl:report:pii
@@ -614,14 +721,14 @@ report_hash = reporter.to_h
 - Retention rules per model
 - Sensitivity breakdown chart
 
-**Article 30 Report:**
-- Controller and DPO information
-- Processing activities with legal basis citations (GDPR Art. 6(1)(a-f))
-- Data categories and retention periods
-- Data subject rights implementation status
-- Technical and organizational measures
+**Article 30 Report** (generated from the declared policy):
+- Controller and DPO contact
+- Processing activities, one per declared purpose (Art. 30(1)(b)-(e)): description, legal basis with its Art. 6(1) citation, data subjects, data categories (required and optional fields), whether consent is required, recipients, and transfers with their safeguards
+- Retention schedule (Art. 30(1)(f)): the default and each model rule, with its deletion strategy and field overrides
+- Technical and organisational measures (Art. 30(1)(g)) declared with `security_measures`
+- Completeness: every Article 30(1) item the policy does not declare (`article_30_gaps`); undeclared items are also marked NOT DECLARED where they would appear
 
-**Event Store Analysis (requires Lyra):**
+**Event Store Analysis (requires an event store; the rake tasks use Lyra's):**
 - PII field occurrence counts
 - Retention compliance status per model
 - Access patterns by operation type and time
@@ -638,14 +745,20 @@ bundle exec rake "pam_dsl:generate:from_models[my_app_policy]"
 
 # Generate basic template
 bundle exec rake "pam_dsl:generate:policy[my_app_policy]"
+
+# Replace an existing config/initializers/pam_dsl_policy.rb
+FORCE=1 bundle exec rake "pam_dsl:generate:from_models[my_app_policy]"
 ```
+
+Both tasks write `config/initializers/pam_dsl_policy.rb` and refuse to overwrite an existing file there unless `FORCE=1` is set, so a reviewed policy is not replaced by a fresh draft. The policy name defaults to `application`.
 
 ### PolicyGenerator Class
 
 ```ruby
 generator = PamDsl::PolicyGenerator.new(
   :my_app,
-  output_path: "config/initializers/pam_dsl_policy.rb"
+  output_path: "config/initializers/pam_dsl_policy.rb",
+  force: false   # true replaces an existing file
 )
 
 # Generate from template
@@ -655,31 +768,35 @@ generator.generate
 generator.generate_from_models
 ```
 
-### Detection Patterns
+If the output file already exists and `force:` is false, both methods raise `PamDsl::PolicyGenerator::FileExistsError` before scanning or writing anything (the rake tasks turn this into an abort with the message).
 
-The generator detects PII fields by name patterns:
+### Detection
 
-| Type | Patterns Detected |
-|------|-------------------|
-| Email | `email`, `email_address`, `user_email` |
-| Phone | `phone`, `mobile`, `telephone`, `fax` |
-| Name | `name`, `firstname`, `lastname`, `full_name` |
-| Address | `address`, `street`, `city`, `postal_code`, `zip` |
-| Financial | `iban`, `bic`, `account_number`, `routing_number` |
-| Credit Card | `card_number`, `credit_card`, `cvv`, `card_` |
-| Identifiers | `ssn`, `vat_number`, `tax_id`, `passport` |
-| Location | `latitude`, `longitude`, `location`, `coordinates` |
-| IP Address | `ip_address`, `ip`, `remote_ip` |
-| Date of Birth | `dob`, `date_of_birth`, `birth_date`, `birthday` |
+`generate_from_models` scans every concrete ActiveRecord model with a table and classifies each column with `PIIDetector` (the same dictionary as the rest of PAM, in its current matching mode; see below). On top of the detector it applies one rule: a bare `name` column counts only in a model that holds other personal data (an address's name does, a product's does not). Columns listed in a model's `ignored_columns` are kept and marked with a comment, since the application cannot see or erase them.
 
-**Exclusion Patterns** (to reduce false positives):
-- Timestamps: `*_at` (e.g., `created_at`, `email_sent_at`)
-- Amounts: `*_amount` (e.g., `vat_amount`, `total_amount`)
-- Foreign keys: `*_id` (e.g., `user_id`)
-- Status fields: `*_status`, `*_reason`
-- Boolean flags: `is_*`, `has_*`, `*_enabled`
-- Security fields: `*_digest`, `*_token`, `encrypted_*`
-- Code fields: `*_code` (e.g., `country_code`, but `postal_code` is whitelisted)
+In the default (partial) mode, for example:
+
+| Type | Detected |
+|------|----------|
+| `:email` | `email`, `email_address`, `customer_email`, `emailAddress` |
+| `:phone` | `phone`, `mobile`, `telephone`, `cell`, and names containing them (`billing_phone`) |
+| `:name` | `first_name`, `last_name`, `full_name`, `surname`, role names such as `customer_name` or `card_holder_name`, and a bare `name` |
+| `:address` | `address`, `address1`, `street`, `city`, `zipcode`, `postal_code`, `country`, `state_name` |
+| `:identifier` | `passport`, `tax_id`, `vat_number`, `vat_id`, `license`; also `login`, `username`, `nickname` |
+| `:financial` | `iban`, `bic`, `swift`, `account_number`, `routing_number`, `salary`, `income` |
+| `:credit_card` | `card_number`, `credit_card`, `cvv`, `cvc`, `last4`, `last_digits` |
+| `:location` | `latitude`, `longitude`, `location`, `gps` |
+| `:ip_address` | `ip`, `ip_address`, any `*_ip` such as `current_sign_in_ip` |
+| `:date_of_birth` | `dob`, `birthday`, `birth_date`, `date_of_birth` |
+| `:credential` | `password`, `encrypted_password`, `password_digest`, `api_key`, `secret` |
+| `:token` | a person's account and session tokens: `reset_password_token`, `remember_token`, `confirmation_token`, `authentication_token`, `session_token`, `guest_token` |
+| `:payment_token` | `stripe_customer_id`, `paypal_account_id`, `gateway_customer_profile_id` (a column named `payment_token` falls under the `*_token` exclusion) |
+
+Not detected by default: `fax` and `coordinates` (the exact mode does match `fax`), and login names are reported as `:identifier`, not `:online_identifier`.
+
+**Exclusions** (checked first, to avoid false positives): timestamps and dates (`*_at`, `*_on`, `*_date`, `*_time`, and `created_*`, `updated_*`, ...), counters and amounts (`*_count`, `*_amount`, `*_total`), flags (`is_*`, `has_*`, `*_enabled`, `*_verified`, `*_confirmed`, `*_sent`, `*_notified`), `*_status`, `*_type`, `*_code`, `*_uuid`, primary keys, foreign keys (`*_id`, `*_ids`), ISO codes (`*_iso`, `*_iso3`), `*_message`, `*_reason`, `*_note`/`*_notes`, hashes and tokens (`*_digest`, `*_hash`, `*_token`) and `encrypted_*`.
+
+Some personal columns would fall under an exclusion and are carved out of it: `postal_code`, `zip_code`, `birth_date`, `health_status`, identifier columns such as `vat_id`, `tax_id`, `national_id`, `passport_id` and `face_id`, the payment-provider ids above, the credentials `encrypted_password`, `password_digest`, `password_hash`, `password_salt`, and the account and session tokens listed above. A generic `csrf_token` or `user_id` stays excluded.
 
 ### PIIDetector Configuration
 
@@ -872,7 +989,8 @@ masked = PamDsl::PIIMasker.mask(data)
 masked = PamDsl::PIIMasker.mask(data, strategy: :full)
 # => { email: "[REDACTED]", name: "[REDACTED]", status: "active" }
 
-# Redact only sensitive PII (ssn, credit_card, financial, health, biometric)
+# Redact only sensitive PII (ssn, credit_card, financial, health, biometric,
+# identifier, credential, token, payment_token)
 data = { email: "alice@example.com", ssn: "123-45-6789" }
 masked = PamDsl::PIIMasker.mask(data, strategy: :redact_sensitive)
 # => { email: "a***@example.com", ssn: "[REDACTED]" }
@@ -1067,12 +1185,14 @@ report = compliance.data_export
 
 ### Generated Output
 
-The generator creates a complete policy file with:
-- Field definitions with appropriate types and sensitivity
-- Auto-generated transformations for masking
-- Suggested processing purposes based on field types
-- Model-specific retention rules (10 years for financial models)
-- Rails configuration boilerplate
+`generate_from_models` creates a draft policy file with:
+- Field definitions with the detected type and sensitivity, each commented with the models it was found in
+- `:display` and `:log` transformations for confidential and restricted fields
+- Suggested processing purposes, chosen by the detected types, with `lia_documented!` left commented out for legitimate-interests purposes
+- A 7-year default retention, and 10 years for models whose names contain payment, transaction, invoice or order
+- Rails configuration boilerplate (`default_policy`, `organization`, `dpo_contact`)
+
+The draft declares no data subjects, recipients, transfers or security measures, so its Article 30 report lists those as gaps until you add them. `generate` writes a basic template instead. Neither overwrites an existing output file unless forced (`FORCE=1` for the rake tasks, `force: true` for the class).
 
 ## Rails Integration
 
@@ -1104,15 +1224,18 @@ rake pam_dsl:report:pii             # PII analysis (requires Lyra)
 rake pam_dsl:report:retention       # Retention compliance (requires Lyra)
 rake pam_dsl:report:access_patterns # Access patterns (requires Lyra)
 rake pam_dsl:report:export[path]    # Export to JSON
+rake pam_dsl:report:compare[policy1,policy2,path]  # Compare two policies (Markdown)
 
-# Generation
+# Generation (refuse to overwrite config/initializers/pam_dsl_policy.rb unless FORCE=1)
 rake pam_dsl:generate:policy[name]       # Generate template policy
 rake pam_dsl:generate:from_models[name]  # Generate from model scan
 
 # Aliases
 rake privacy:report                 # Same as pam_dsl:report:full
 rake privacy:policy                 # Same as pam_dsl:report:policy
+rake privacy:retention              # Same as pam_dsl:report:retention
 rake privacy:article_30             # Same as pam_dsl:report:article_30
+rake privacy:export[path]           # Same as pam_dsl:report:export
 ```
 
 ## Integration with Lyra
@@ -1145,13 +1268,21 @@ class Student < ApplicationRecord
 end
 ```
 
+Lyra reaches PAM through its privacy provider interface, with PAM as the adapter (`Lyra::Privacy::Adapters::Pam`). See the [integration guide](docs/PAM_DSL_INTEGRATION.md) for the privacy stamp on events, purpose-bound reads and the access log.
+
 ## API Reference
 
 ### PamDsl Module
 
 - `PamDsl.define_policy(name, &block)` - Define a new policy
-- `PamDsl.policy(name)` - Get a defined policy
-- `PamDsl.reset!` - Clear all policies
+- `PamDsl.policy(name)` - Get a defined policy; raises `PolicyNotFoundError` if there is none
+- `PamDsl.registry` - The policy registry (`names`, `get`, `exists?`, `count`, ...)
+- `PamDsl.enforcement_mode` / `PamDsl.enforcement_mode=(mode)` - Global enforcement mode, `:strict` (default) or `:audit`
+- `PamDsl.on_violation { |violation| ... }` - Register a handler for each violation recorded in audit mode
+- `PamDsl.logger` / `PamDsl.logger=` - Where audit-mode violations are logged
+- `PamDsl.access_recorder` / `PamDsl.access_recorder=` - Object receiving every `validate_access!` call (`record?(policy)`, `call(access)`)
+- `PamDsl.reporter(policy_name = nil, **options)` - Build a `Reporter`, defaulting to the Rails-configured policy, organization and DPO contact
+- `PamDsl.reset!` - Clear all policies, the enforcement mode and the violation handlers (not the access recorder)
 
 ### Policy
 
@@ -1160,12 +1291,20 @@ end
 - `retention(&block)` - Configure retention
 - `consent(&block)` - Configure consent
 - `meta(key, value)` - Add custom metadata to policy
+- `enforcement(mode)` - Set this policy's enforcement mode, overriding the global one
+- `enforcement_mode` - The mode this policy enforces with (its own, or the global one)
+- `security_measures(*measures)` - Declare technical and organisational measures (Art. 30(1)(g)); with no arguments, return them
+- `article_30_gaps` - `[purpose_name or nil, clause]` pairs for every Article 30(1) item not declared
+- `get_field(name)` / `get_purpose(name)` - Look up a field or purpose; raise `InvalidFieldError` / `UndeclaredPurposeError`
 - `allowed?(field, purpose)` - Check if field is allowed for purpose
-- `validate_access!(fields, purpose, subject:)` - Validate access for a data subject; raises `ConsentRequiredError`, `SensitivityViolationError`, or `InvalidFieldError`
+- `validate_access!(fields, purpose, subject:)` - Validate access for a data subject. Returns `true` when valid. In strict mode raises the first violation: `UndeclaredPurposeError`, `ConsentRequiredError`, `InvalidFieldError`, `PurposeFieldMismatchError` or `SensitivityViolationError`; in audit mode records every violation and returns `false`. Every call goes to the access recorder, if one is set
+- `access_violations(fields, purpose, subject:)` - Every violation for the access, as error objects, without raising or recording
 - `consent_policy` - Access the `ConsentPolicy` to populate the runtime consent store
 - `lia_compliance_gaps` - Returns purposes with `:legitimate_interests` basis that have not called `lia_documented!`
 - `sensitive_fields` - Get all fields with confidential/restricted sensitivity
 - `restricted_fields` - Get all fields with restricted sensitivity
+- `retention_for(model_class, field_name: nil)` - Retention duration for a model (and field), falling back to the default
+- `fields`, `purposes`, `retention_policy` - The declared fields and purposes (hashes by name) and the `RetentionPolicy`
 - `metadata` - Access policy metadata hash
 - `to_h` - Export policy as hash (includes all metadata)
 
@@ -1177,6 +1316,7 @@ end
 - `metadata` - Access field metadata hash
 - `sensitive?` - Check if field is confidential or restricted
 - `restricted?` - Check if field is restricted
+- `special_category?` - True for an Article 9 type (`:health`, `:biometric`)
 - `allowed_for?(purpose)` - Check if allowed for specific purpose
 - `apply_transformation(context, value)` - Apply defined transformation
 
@@ -1189,6 +1329,12 @@ end
 - `art9_basis(*bases)` - Declare one or more Art. 9(2) bases; required when the purpose accesses Article-9 special-category-**type** fields (e.g. `:health`, `:biometric`), independently of the `:restricted` risk level; multiple calls accumulate
 - `requires(*fields)` - Define required fields
 - `optionally(*fields)` - Define optional fields
+- `data_subjects(*categories)` - Declare categories of data subjects (Art. 30(1)(c)); with no arguments, return them
+- `recipients(*names)` - Declare categories of recipients, including processors (Art. 30(1)(d)); with no arguments, return them
+- `transfer(to:, safeguard:)` - Declare a transfer to a third country or international organisation and its safeguard (Art. 30(1)(e))
+- `no_transfers!` - Declare that the purpose involves no international transfer
+- `transfers` - Declared transfers (`[{ to:, safeguard: }]`), `[]` after `no_transfers!`, nil when undeclared
+- `transfers_declared?` - True after `transfer` or `no_transfers!`
 - `meta(key, value)` - Add custom metadata
 - `metadata` - Access purpose metadata hash
 - `requires_consent?` - Check if purpose requires consent (basis is :consent)
@@ -1204,7 +1350,8 @@ end
 - `for_model(model_class, &block)` - Define model retention
 - `keep_for(duration)` - Set retention duration
 - `field(name, duration:)` - Set field retention
-- `on_expiry(strategy)` - Set deletion strategy
+- `on_expiry(strategy)` - Set deletion strategy (`:hard_delete`, `:soft_delete` (default), `:anonymize`, `:archive`)
+- `self.when { |context| ... }` - Add a condition to the rule; `applies_to?(context)` evaluates them
 
 ### ConsentPolicy
 
@@ -1214,35 +1361,41 @@ DSL configuration (policy-time):
 - `granular!(value)` - Enable granular consent
 - `withdrawable!(value)` - Set if withdrawable
 - `expires_in(duration)` - Set expiration window
+- `describe(text)` - Describe the consent request
 
 Runtime consent store (per-subject, accessed via `policy.consent_policy`):
-- `grant_consent(purpose:, subject:, granted_at: Time.current)` - Record that subject granted consent
-- `withdraw_consent(purpose:, subject:)` - Record that subject withdrew consent
+- `request_consent(purpose:, subject:)` - Create a pending record (consent requested, not yet granted)
+- `grant_consent(purpose:, subject:, granted_at: Time.current)` - Record that subject granted consent; `expires_at` is computed from the requirement's `expires_in`
+- `withdraw_consent(purpose:, subject:)` - Record that subject withdrew consent (no-op when there is no record; raises `PamDsl::Error` unless the record is granted)
+- `validate!(purpose, subject:)` - Raise `ConsentRequiredError` unless consent is required-and-granted or not required
 - `requirement_for(purpose)` - Look up the `ConsentRequirement` for a purpose
 - `required_for?(purpose)` - True if consent is required for the purpose
 - `store` - The underlying `ConsentStore`
 
 ### ConsentStore
 
-- `grant(purpose:, subject:, granted_at:)` - Add a consent record to CS
-- `withdraw(purpose:, subject:)` - Mark a record as withdrawn
+- `request(purpose:, subject:)` - Create a pending record; replaces an expired or withdrawn one, raises `PamDsl::Error` if a pending or granted record exists
+- `grant(purpose:, subject:, granted_at: Time.current, expires_at: nil)` - Grant a pending record, or create a new granted record
+- `withdraw(purpose:, subject:)` - Withdraw the record (no-op when there is none)
 - `record_for(purpose, subject)` - Returns the `ConsentRecord` or nil
-- `granted?(purpose, subject)` - True when a non-withdrawn record exists
+- `granted?(purpose, subject)` - True only when the record's state is `:granted`
 
 ### ConsentRecord
 
 - `purpose` - Purpose symbol
 - `subject` - Subject identifier
-- `granted_at` - Time consent was granted
+- `granted_at` - Time consent was granted, or nil
+- `expires_at` - Time consent expires, or nil (no expiry)
 - `withdrawn_at` - Time consent was withdrawn, or nil
-- `withdrawn?` - True if consent has been withdrawn
-- `state` - `:granted` or `:withdrawn`
+- `state` - `:pending`, `:granted`, `:expired` (granted and `expires_at` has passed) or `:withdrawn`
+- `pending?`, `granted?`, `expired?`, `withdrawn?` - State predicates
+- `grant!(granted_at:, expires_at:)` / `withdraw!(at:)` - Transitions; raise `PamDsl::Error` from the wrong state
 
 ### Reporter
 
 - `Reporter.new(policy_name, organization:, dpo_contact:, event_store:, output:)` - Create reporter
 - `policy_summary` - Print policy summary
-- `article_30_report` - Print GDPR Article 30 report
+- `article_30_report` - Print GDPR Article 30 report (activities, retention schedule, declared measures, gaps)
 - `pii_analysis` - Analyze PII in event store
 - `retention_check` - Check retention compliance
 - `access_patterns` - Show access patterns
@@ -1252,20 +1405,20 @@ Runtime consent store (per-subject, accessed via `policy.consent_policy`):
 
 ### PolicyGenerator
 
-- `PolicyGenerator.new(name, output_path:)` - Create generator
+- `PolicyGenerator.new(name, output_path: nil, force: false)` - Create generator (default path `config/initializers/pam_dsl_policy.rb` under Rails, `pam_dsl_policy.rb` otherwise)
 - `generate` - Generate template policy file
-- `generate_from_models` - Scan models and generate policy
-- `scan_models` - Detect PII fields in ActiveRecord models
+- `generate_from_models` - Scan ActiveRecord models with `PIIDetector` and generate a policy
+- Both raise `PolicyGenerator::FileExistsError` when the output file exists and `force` is false
 
 ### PIIDetector
 
-- `PIIDetector.detect(attributes)` - Detect PII in a hash, returns `{ field: { type:, value:, sensitivity: } }`
+- `PIIDetector.detect(attributes)` - Detect PII in a hash, returns `{ field: { type:, value:, sensitive:, sensitivity: } }`
 - `PIIDetector.contains_pii?(field_name)` - Check if a field name is PII
 - `PIIDetector.pii_type(field_name)` - Get PII type for a field (`:email`, `:phone`, etc.)
 - `PIIDetector.sensitivity(field_name)` - Get sensitivity level for a field
 - `PIIDetector.sensitive?(pii_type)` - Check if PII type requires special protection
 - `PIIDetector.mask(value, pii_type)` - Mask a PII value for safe display
-- `PIIDetector.extract_pii_from_records(records, attribute_extractor:, metadata_extractor:)` - Extract PII from any record collection
+- `PIIDetector.extract_pii_from_records(records, attribute_extractor:, metadata_extractor: nil)` - Extract PII from any record collection
 - `PIIDetector.partial_match=(bool)` - Enable/disable partial matching mode
 - `PIIDetector.reset!` - Reset to default settings
 
@@ -1278,10 +1431,10 @@ Runtime consent store (per-subject, accessed via `policy.consent_policy`):
 
 ### GDPRCompliance
 
-- `GDPRCompliance.new(subject_id:, subject_type:, record_reader:, **extractors)` - Create compliance handler
+- `GDPRCompliance.new(subject_id:, record_reader:, subject_type: 'User', **options)` - Create compliance handler (options: extractors, `retention_policy:`, `policy_name:`)
 - `data_export` - Right to Access (Art. 15) - Full data export
 - `right_to_be_forgotten_report` - Right to Erasure (Art. 17) - Deletion analysis
-- `portable_export(format:)` - Right to Portability (Art. 20) - Export as JSON/CSV/XML
+- `portable_export(format: :json)` - Right to Portability (Art. 20) - Export as JSON, CSV, XML or a Hash (`:hash`)
 - `rectification_history` - Right to Rectification (Art. 16) - Correction history
 - `processing_activities` - Processing Records (Art. 30) - Activity documentation
 - `retention_compliance_check` - Check retention policy compliance
@@ -1407,7 +1560,7 @@ The sensitivity levels are derived from three primary sources:
 
 ### PII Type to Sensitivity Mapping
 
-The following table shows the default sensitivity assignments in PAM DSL:
+A declared field's sensitivity is whatever the policy states (default `:internal`). The table shows the sensitivity `PIIDetector` assigns to each type it detects, which the policy generator writes into its draft:
 
 | PII Type | Default Sensitivity | GDPR Category | Regulatory Notes |
 |----------|---------------------|---------------|------------------|
@@ -1424,6 +1577,11 @@ The following table shows the default sensitivity assignments in PAM DSL:
 | `identifier` | `:restricted` | National ID | VAT, tax IDs, passports |
 | `health` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
 | `biometric` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `credential` | `:restricted` | Regular (Art. 6) | Passwords, password hashes, API keys |
+| `token` | `:restricted` | Regular (Art. 6) | A person's account and session tokens |
+| `payment_token` | `:restricted` | Financial | Payment-provider customer and profile ids |
+
+Login names (`login`, `username`, `nickname`) are detected as `identifier` with `:internal` sensitivity, not as `identifier`'s usual `:restricted`. The `:online_identifier` and `:custom` types can be declared but the detector never assigns them.
 
 ### Legal Bases by Sensitivity
 

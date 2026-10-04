@@ -1,6 +1,9 @@
 # Lyra Troubleshooting Guide
 
-Common issues, debugging techniques, and solutions for Lyra.
+Problems you may meet with Lyra, what causes them, and how to fix them. For
+the API see [API_REFERENCE.md](API_REFERENCE.md); for the migration path and
+its pitfalls see [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md); for switching modes
+see [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
 
 ## Table of Contents
 
@@ -8,219 +11,158 @@ Common issues, debugging techniques, and solutions for Lyra.
 2. [Installation Issues](#installation-issues)
 3. [Event Store Issues](#event-store-issues)
 4. [State Consistency Issues](#state-consistency-issues)
-5. [Performance Issues](#performance-issues)
-6. [Privacy & PII Issues](#privacy--pii-issues)
-7. [Mode Switching Issues](#mode-switching-issues)
-8. [Debugging Techniques](#debugging-techniques)
-9. [Common Error Messages](#common-error-messages)
-10. [Getting Help](#getting-help)
+5. [Mode Switching Issues](#mode-switching-issues)
+6. [Event-Sourcing Configurations](#event-sourcing-configurations)
+7. [Performance Issues](#performance-issues)
+8. [Privacy and PII Issues](#privacy-and-pii-issues)
+9. [Debugging Techniques](#debugging-techniques)
+10. [Common Error Messages](#common-error-messages)
+11. [Getting Help](#getting-help)
 
 ---
 
 ## Quick Diagnostics
 
-Run these checks first to identify the issue category:
+Run these first to place the problem:
+
+```bash
+bin/rails lyra:mode:status          # configured mode, last applied mode, whether the gate is on
+bin/rails lyra:repair DRY_RUN=1     # Monitor/Disabled only: records whose row and events disagree
+```
 
 ```ruby
-# Check Lyra configuration
-rails console
-> Lyra.config.mode
-> Lyra.config.event_store
-> Lyra.config.privacy_enabled
+# bin/rails console
+Lyra::ModeTransition.current        # => "monitor", "hijack", "event_sourcing/lazy", ...
+Lyra.config.monitored_models        # the classes Lyra records events for
+User.lyra_monitored?                # => true for a monitored model
+Lyra.event_store                    # the RailsEventStore client Lyra writes to
 
-# Check event store connectivity
-> Rails.configuration.event_store.read.count
-> # Should return a number, not an error
-
-# Check if models are monitored
-> User.respond_to?(:lyra_monitored?)
-> # Should return true
-
-# Check recent events
-> Rails.configuration.event_store.read.limit(10).to_a
-> # Should return array of events
-
-# Check for discrepancies
-> Lyra::DualView.find_discrepancies(User).count
-> # Should return 0 for consistency
+Lyra.event_store.read.stream("User$123").to_a.map(&:event_type)
+Lyra::DualView.find_discrepancies(User).size   # 0 when every row agrees with its events
 ```
+
+Lyra writes to `Lyra.event_store` (the same object as `Lyra.config.event_store`).
+The engine sets it to `RailsEventStore::Client.new` at boot unless your
+initializer sets one; it does not read `Rails.configuration.event_store`.
 
 ---
 
 ## Installation Issues
 
-### Error: "uninitialized constant Lyra"
+### `NameError: uninitialized constant Lyra` (or `PamDsl`, `PetriFlow`)
 
-**Cause**: Lyra not properly installed or loaded.
+**Cause**: The gems are named `orfeas_lyra`, `orfeas_pam_dsl` and
+`orfeas_petri_flow`, but their entry files are `lyra`, `pam_dsl` and
+`petri_flow`. Bundler's automatic require looks for a file named after the gem
+and finds none.
 
-**Solution**:
+**Fix**: Name the file to require in the Gemfile:
+
+```ruby
+gem "orfeas_lyra", path: "path/to/lyra", require: "lyra"
+gem "orfeas_pam_dsl", path: "path/to/lyra/gems/pam_dsl", require: "pam_dsl"          # optional
+gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"  # optional
+```
+
+See [GETTING_STARTED.md](GETTING_STARTED.md#1-install) for installing from
+GitHub, and why not to use the 0.6.0 releases on rubygems.org.
+
+### `NameError: uninitialized constant PetriFlow::Workflow` when eager loading
+
+**Cause**: Lyra's `app/workflows/*.rb` subclass `PetriFlow::Workflow`. Earlier
+versions eager-loaded them even without petri_flow, so production boot and the
+`lyra` rake tasks that eager-load the application (`lyra:mode:*`,
+`lyra:repair`, `lyra:schema:*`) failed.
+
+**Fix**: Update Lyra. Without petri_flow, or with
+`LYRA_DISABLE_PETRI_FLOW=true`, the engine neither autoloads nor eager-loads
+`app/workflows`; formal verification is then unavailable. To verify, add
+`orfeas_petri_flow` with `require: "petri_flow"`.
+
+### Bundler cannot resolve `rails_event_store`
+
+**Cause**: Lyra depends on `rails_event_store ~> 3.0`; an application pinned
+to RailsEventStore 2 cannot resolve.
+
+**Fix**: Move the application to RailsEventStore 3, or drop its own
+`rails_event_store` line and let Lyra pull it in. The RailsEventStore 3 names
+differ from 2: the repository is `RubyEventStore::ActiveRecord::EventRepository`,
+and the migration generator is `ruby_event_store:active_record:migration`.
+
+### `PG::UndefinedTable: relation "event_store_events" does not exist`
+
+**Cause**: The event store tables were not created.
+
+**Fix**:
+
 ```bash
-# Verify installation
-bundle list | grep lyra
-
-# If not installed
-bundle install
-
-# Restart Rails
-rails restart  # or kill and restart server
+bin/rails generate ruby_event_store:active_record:migration
+bin/rails db:migrate
 ```
 
-### Error: "uninitialized constant RailsEventStore"
+Lyra's own tables (`lyra_mode_transitions`, `lyra_projection_checkpoints`) are
+created on first use and need no migration.
 
-**Cause**: RailsEventStore not installed or configured.
+### A name in `config.models` fails the boot
 
-**Solution**:
-```ruby
-# Add to Gemfile
-gem 'rails_event_store', '~> 2.14'
+**Cause**: `config.models = %w[...]` resolves each name once the application's
+code has loaded; a name that does not resolve to a class raises
+`ArgumentError`.
 
-# Install
-bundle install
-
-# Generate migration
-rails generate rails_event_store_active_record:migration
-
-# Run migration
-rails db:migrate
-
-# Configure in application.rb
-module YourApp
-  class Application < Rails::Application
-    config.to_prepare do
-      Rails.configuration.event_store = RailsEventStore::Client.new
-    end
-  end
-end
-```
-
-### Error: "LoadError: cannot load such file -- lyra"
-
-**Cause**: Lyra path incorrect in Gemfile.
-
-**Solution**:
-```ruby
-# Gemfile
-gem 'orfeas_lyra', path: '../path/to/lyra'  # Adjust path
-
-# Or from git
-gem 'orfeas_lyra', git: 'https://github.com/mpantel/lyra-engine.git'
-
-# Then
-bundle install
-```
+**Fix**: Correct the name (namespaced models need the full name,
+`"Spree::Order"`), or remove it.
 
 ---
 
 ## Event Store Issues
 
-### Events Not Being Captured
+### Events are not recorded
 
-**Symptom**: CRUD operations execute but no events in event store.
-
-**Diagnosis**:
-```ruby
-# Check if model is monitored
-rails console
-> User.instance_methods.grep(/lyra/)
-> # Should show lyra-related methods
-
-# Check event store count before/after operation
-> before = Rails.configuration.event_store.read.count
-> User.create!(email: "test@example.com", name: "Test")
-> after = Rails.configuration.event_store.read.count
-> puts "Events created: #{after - before}"
-```
-
-**Solutions**:
-
-1. **Missing monitor_with_lyra call**:
-```ruby
-class User < ApplicationRecord
-  monitor_with_lyra  # Add this line
-end
-
-# Restart Rails
-```
-
-2. **Lyra not in monitor or hijack mode**:
-```ruby
-# config/initializers/lyra.rb
-Lyra.configure do |config|
-  config.mode = :monitor  # Must be :monitor or :hijack
-end
-```
-
-3. **Event store not configured**:
-```ruby
-# config/initializers/lyra.rb
-Lyra.configure do |config|
-  config.event_store = Rails.configuration.event_store  # Set this
-end
-```
-
-### Error: "PG::UndefinedTable: ERROR: relation 'event_store_events' does not exist"
-
-**Cause**: Event store tables not created.
-
-**Solution**:
-```bash
-rails generate rails_event_store_active_record:migration
-rails db:migrate
-
-# If already generated but not run
-rails db:migrate
-
-# Check tables exist
-rails dbconsole
-> \dt event_store_events
-```
-
-### Events Not Readable from Event Store
-
-**Symptom**: Events published but `read.count` returns 0.
+**Symptom**: Writes succeed but the record's stream stays empty.
 
 **Diagnosis**:
+
 ```ruby
-# Check if events are in database
-ActiveRecord::Base.connection.execute("SELECT COUNT(*) FROM event_store_events").first
+User.lyra_monitored?                               # false: the model is not monitored
+Lyra::ModeTransition.current                       # "disabled": no mode records events
+before = Lyra.event_store.read.stream("User$#{user.id}").count
+user.update!(name: "Test")
+Lyra.event_store.read.stream("User$#{user.id}").count - before   # 1 expected
 ```
 
-**Solution**:
+**Causes and fixes**:
 
-1. **Wrong repository configuration**:
-```ruby
-# config/application.rb
-config.to_prepare do
-  Rails.configuration.event_store = RailsEventStore::Client.new(
-    repository: RailsEventStoreActiveRecord::EventRepository.new(
-      serializer: YAML  # or JSON
-    )
-  )
-end
-```
+1. **The model is not monitored.** Add `monitor_with_lyra` to the model, or
+   its name to `config.models`.
+2. **Lyra is in Disabled mode.** Every other mode records events: Monitor
+   appends one after each write, Hijack and the event-sourcing modes store
+   the event as the write itself. See the modes table in
+   [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#the-modes-at-a-glance).
+3. **The write did not go through ActiveRecord.** Raw SQL
+   (`connection.execute`), triggers and other applications are invisible to
+   Lyra. Writes that skip callbacks (`update_all`, `delete_all`,
+   `update_columns`, ...) are recorded as bypass events, not as `Updated` or
+   `Destroyed`; see
+   [API_REFERENCE.md](API_REFERENCE.md#callback-bypassing-writes).
+4. **The append failed in Monitor.** Monitor logs the failure and keeps the
+   write; see the next entry.
+5. **You are reading the wrong stream.** Streams are named
+   `"#{Model.name}$#{id}"` (`"User$123"`, `"Spree::Price$7"`).
 
-2. **Transactions not committed** (in tests):
-```ruby
-# test/test_helper.rb
-class ActiveSupport::TestCase
-  self.use_transactional_tests = false  # Disable for event store tests
-end
-```
+### Error: `Lyra::EventStoreUnavailableError`, or log line "Lyra: Failed to publish event … run bin/rails lyra:repair"
 
-### Error: `Lyra::EventStoreUnavailableError` / "Failed to publish event … run bin/rails lyra:repair"
-
-**Symptom:** an event could not be stored. The error's `cause` is the store's own error, and its
-message names the stream.
+**Symptom:** an event could not be stored. The error's message names the
+stream, and its `cause` is the store's own error.
 
 What happened to the write depends on the mode:
 
 | Mode | Policy | The write |
 |---|---|---|
 | Hijack, event sourcing (any projection mode) | fail-closed | raises `EventStoreUnavailableError` and rolls back: nothing in the table, nothing in the log |
-| Monitor | log-and-continue | stands; the error is logged, and the record's stream falls behind its row |
+| Monitor | log-and-continue | stands; the error is logged ("Lyra: Failed to publish event … the write stands"), and the record's stream falls behind its row |
 
-**Solution:** fix the cause (look at `error.cause`). In Monitor, then bring the lagging streams
-back in line from the tables:
+**Fix:** fix the cause (look at `error.cause`). In Monitor, then bring the
+lagging streams back in line from the tables:
 
 ```bash
 bin/rails lyra:repair DRY_RUN=1        # list the records out of line
@@ -228,687 +170,445 @@ bin/rails lyra:repair                  # append the events that bring them back
 bin/rails lyra:repair MODELS=User,Order
 ```
 
-Each repaired stream gets one event (`Imported`, `Updated` with the differing columns, or
-`Destroyed`, metadata `source: "lyra_repair"`) that makes it replay to its row; the detail of the
-lost changes is not recoverable. Repair refuses to run in Hijack or event sourcing, where the
-events are authoritative: there, rebuild the tables (`bin/rails lyra:mode:check ... REBUILD=1`).
-Sampled verification (`config.dual_view_sample_rate`) reports such records as they happen.
+Each repaired stream gets one event (`Imported`, `Updated` with the differing
+columns, or `Destroyed`, metadata `source: "lyra_repair"`) that makes it replay
+to its row; the detail of the lost changes is not recoverable. Repair refuses
+to run in Hijack or event sourcing (`Lyra::Repair::Refused`), where the events
+are authoritative: there, rebuild the tables from the log
+(`bin/rails lyra:projections:rebuild`, see
+[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#recovery)). Sampled verification
+(`config.dual_view_sample_rate`) reports such records as they happen.
+
+### Times differ by fractions of a second between rows and events
+
+**Cause**: The event store was configured with `serializer: JSON`. Ruby's JSON
+writes times without fractional seconds, so an event can record a time that is
+not the row's, or an update that changed nothing.
+
+**Fix**: Use `Lyra::EventSerializer`, which writes times with microseconds:
+
+```ruby
+config.event_store = RailsEventStore::Client.new(
+  repository: RubyEventStore::ActiveRecord::EventRepository.new(serializer: Lyra::EventSerializer)
+)
+```
+
+Events already stored keep the times they were stored with.
 
 ---
 
 ## State Consistency Issues
 
-### CRUD State != Event-Sourced State
+### A row disagrees with its events
 
-**Symptom**: `Lyra::DualView` shows differences between views.
+**Symptom**: `Lyra::DualView.new(User, id).compare[:differences]` is not
+`{ no_differences: true }`, or `lyra:repair DRY_RUN=1` lists the record.
 
 **Diagnosis**:
+
 ```ruby
-user = User.first
 comparison = Lyra::DualView.new(User, user.id).compare
-
-pp comparison[:differences]
-# Examine which fields differ
+comparison[:differences]   # { exists_mismatch: true } or { "name" => { crud: ..., event_sourced: ... } }
 ```
 
-**Common Causes and Solutions**:
+`created_at` and `updated_at` are not compared, and times compare at
+microseconds. `bin/rails lyra:repair DRY_RUN=1` classifies each finding as
+"row but no events", "events but no row", "row of a destroyed record" or "row
+differs from its events".
 
-#### 1. Events Missing
+**Causes and fixes**:
 
-**Cause**: Some CRUD operations occurred before Lyra was enabled.
+1. **Rows that predate Lyra** ("row but no events", or `exists_mismatch`).
+   They have no stream until Genesis gives each one an `Imported` event. With
+   the default `config.genesis = :auto` that happens on its own only in
+   event-sourcing mode; otherwise run it:
+   ```bash
+   bin/rails lyra:genesis
+   bin/rails lyra:genesis MODEL=User,Order
+   ```
+   Or set `config.genesis = true`. See
+   [MIGRATION_GUIDE.md, Phase 2](MIGRATION_GUIDE.md#phase-2-genesis-rows-that-predate-lyra).
+2. **Writes Lyra cannot see**: raw SQL, triggers, other applications. Find
+   them (`execute`, `exec_update`, triggers in `db/structure.sql`) and route
+   the writes through ActiveRecord. In Monitor, `bin/rails lyra:repair` then
+   brings the streams back in line. Do not publish hand-made events to fix a
+   stream.
+3. **A lost append in Monitor**: see
+   [`EventStoreUnavailableError`](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair).
+4. **Expected lag**: in ES-Async, ES-Lazy and ES-NoProj the tables lag the log
+   by design, so a comparison of rows with events there is not a consistency
+   check. Sampled DualView skips these configurations.
 
-**Solution**:
+### Replayed state is not what you expect
+
+**Diagnosis**: look at the stream event by event.
+
 ```ruby
-# Backfill events for existing records
-User.find_each do |user|
-  event = Lyra::EventMapper.map_operation(
-    User,
-    :created,
-    {
-      attributes: user.attributes,
-      changes: {},
-      user_id: 'system'
-    }
-  )
-
-  stream = "User-#{user.id}"
-  Rails.configuration.event_store.publish(event, stream_name: stream)
+Lyra.event_store.read.stream("User$#{id}").each do |event|
+  puts [event.event_type, Lyra::Event.operation_of(event).inspect, event.changes].join("  ")
 end
+Lyra::StateProjection.rebuild_state(User, id)   # the replayed attributes
 ```
 
-#### 2. Event Data Incorrect
-
-**Cause**: Event handlers not applying changes correctly.
-
-**Solution**:
-```ruby
-# Check aggregate event handlers
-class UserAggregate < Lyra::Aggregate
-  private
-
-  def apply_user_updated(event)
-    # Make sure this applies ALL changes
-    event.changes.each do |field, (old_val, new_val)|
-      set_state(field.to_sym, new_val)  # Apply new value
-    end
-  end
-end
-```
-
-#### 3. Timestamp Differences
-
-**Cause**: CRUD uses `updated_at`, events use `timestamp`.
-
-**Solution**: Timestamps may differ slightly; this is normal. Ignore timestamp fields in comparisons if needed.
-
-#### 4. Database Updates Outside Rails
-
-**Cause**: Direct SQL updates bypass Lyra.
-
-**Solution**: Always use ActiveRecord for updates, or manually publish events:
-```ruby
-# After direct SQL update
-connection.execute("UPDATE users SET name = 'New' WHERE id = 123")
-
-# Manually publish event
-event = Lyra::EventMapper.map_operation(User, :updated, {
-  attributes: User.find(123).attributes,
-  changes: { name: ["Old", "New"] }
-})
-Rails.configuration.event_store.publish(event, stream_name: "User-123")
-```
-
-### State Reconstruction Fails
-
-**Symptom**: `StateProjection.rebuild_state` raises error or returns incorrect state.
-
-**Diagnosis**:
-```ruby
-events = Rails.configuration.event_store.read.stream("User-#{user_id}").to_a
-puts "Event count: #{events.count}"
-events.each_with_index do |event, i|
-  puts "#{i + 1}. #{event.event_type}: #{event.data[:operation]}"
-end
-
-# Try rebuilding step by step
-projection = Lyra::StateProjection.new
-state = {}
-events.each do |event|
-  puts "Before: #{state.inspect}"
-  state = projection.send(:apply_operation, state, event)
-  puts "After: #{state.inspect}"
-rescue => e
-  puts "Error at event #{event.event_type}: #{e.message}"
-  break
-end
-```
-
-**Solution**: Check event handler implementation in `StateProjection#rebuild_from_events`.
-
----
-
-## Performance Issues
-
-### Slow Event Publishing
-
-**Symptom**: CRUD operations take much longer with Lyra enabled.
-
-**Diagnosis**:
-```ruby
-require 'benchmark'
-
-Benchmark.bm do |x|
-  x.report("create") { User.create!(email: "test@example.com", name: "Test") }
-  x.report("update") { User.first.update!(name: "Updated") }
-end
-```
-
-**Solutions**:
-
-#### 1. Synchronous Event Handlers
-
-**Cause**: Event handlers processing synchronously.
-
-**Solution**:
-```ruby
-# Enable async processing
-Lyra.configure do |config|
-  config.async_event_handlers = true
-end
-
-# Or use background jobs
-class MyProjection < Lyra::Projection
-  include ActiveJob::Performs
-
-  def handle(event)
-    perform_later(event)  # Process in background
-  end
-end
-```
-
-#### 2. Too Many Projections
-
-**Cause**: Many projections subscribed to same events.
-
-**Solution**: Consolidate projections or make them async.
-
-#### 3. Event Store Write Contention
-
-**Cause**: High write volume to event store.
-
-**Solution**:
-```ruby
-# Add database indexes
-add_index :event_store_events_in_streams, [:stream, :position]
-add_index :event_store_events, :event_type
-add_index :event_store_events, :created_at
-
-# Or use partitioning for high volume
-```
-
-### Slow Aggregate Loading
-
-**Symptom**: Loading aggregates takes too long.
-
-**Diagnosis**:
-```ruby
-require 'benchmark'
-
-time = Benchmark.realtime do
-  aggregate = UserAggregate.load(user_id)
-end
-
-stream = "User-#{user_id}"
-events = Rails.configuration.event_store.read.stream(stream).to_a
-
-puts "Time: #{time}s"
-puts "Events: #{events.count}"
-puts "Time per event: #{(time / events.count * 1000).round(2)}ms"
-```
-
-**Solutions**:
-
-#### 1. Enable Snapshotting
-
-```ruby
-class UserAggregate < Lyra::Aggregate
-  snapshot_frequency 100  # Snapshot every 100 events
-
-  def take_snapshot
-    {
-      version: version,
-      state: @state.dup,
-      timestamp: Time.current
-    }
-  end
-
-  def load_snapshot(snapshot)
-    @version = snapshot[:version]
-    @state = snapshot[:state]
-  end
-end
-```
-
-#### 2. Cache Aggregates
-
-```ruby
-Lyra.configure do |config|
-  config.cache_aggregates = true
-  config.aggregate_cache_ttl = 5.minutes
-end
-```
-
-#### 3. Reduce Event Count
-
-Archive or compact old events:
-```ruby
-# Compact events older than 1 year
-User.find_each do |user|
-  stream = "User-#{user.id}"
-  events = Rails.configuration.event_store.read.stream(stream).to_a
-
-  old_events = events.select { |e| e.timestamp < 1.year.ago }
-  next if old_events.empty?
-
-  # Create snapshot
-  projection = Lyra::StateProjection.new
-  snapshot_state = projection.rebuild_from_events(old_events)
-
-  # Create compacted event
-  compacted_event = Event.new(
-    event_type: "UserStateSnapshot",
-    data: { state: snapshot_state, original_events: old_events.count }
-  )
-
-  # Archive old events, keep snapshot
-  # (Implementation depends on event store)
-end
-```
-
----
-
-## Privacy & PII Issues
-
-### PII Not Detected
-
-**Symptom**: Fields that should be PII are not detected.
-
-**Diagnosis**:
-```ruby
-attributes = { email: "test@example.com", user_email: "test@example.com" }
-pii = Lyra::Privacy::PIIDetector.detect(attributes)
-
-pp pii
-# Check if expected fields are present
-```
-
-**Solution**:
-
-PII detection uses regex patterns. Field must match patterns like:
-- Email: `email`, `email_address`, `e_mail`
-- Name: `name`, `first_name`, `last_name`, `full_name`
-
-If your field has a different name:
-
-```ruby
-# Option 1: Rename field to match pattern
-rename_column :users, :user_email, :email
-
-# Option 2: Define custom PII pattern
-class CustomPIIDetector < Lyra::Privacy::PIIDetector
-  def self.pii_patterns
-    super.merge(
-      custom_email: /user_email|contact/
-    )
-  end
-end
-
-Lyra::Privacy::PIIDetector = CustomPIIDetector
-```
-
-### PII Not Masked
-
-**Symptom**: `PIIMasker.mask` not masking expected fields.
-
-**Solution**:
-
-PIIMasker only masks detected PII. Check detection first:
-```ruby
-pii_fields = Lyra::Privacy::PIIDetector.detect(attributes)
-# If field not in pii_fields, it won't be masked
-
-# Force masking
-masked = attributes.transform_values { |v| v.is_a?(String) ? "[REDACTED]" : v }
-```
-
-### PAM Policy Not Applied
-
-**Symptom**: Privacy policy not enforcing rules.
-
-**Diagnosis**:
-```ruby
-policy = PamDsl.policies[:my_policy]
-pp policy
-
-# Check if model references policy
-User.lyra_config[:privacy_policy]  # Should return :my_policy
-```
-
-**Solution**:
-```ruby
-# Make sure policy is defined
-# config/initializers/privacy_policies.rb
-PamDsl.define_policy :my_policy do
-  # ...
-end
-
-# Make sure model references it
-class User < ApplicationRecord
-  monitor_with_lyra privacy_policy: :my_policy
-end
-
-# Restart Rails
-```
+Replay dispatches on each event's recorded operation (`Lyra::Event.operation_of`):
+`:created` and `:imported` set the attributes, `:updated` applies the new value
+of each change, `:destroyed` marks the record destroyed. Events for which
+`operation_of` returns `nil` (an additional domain event with `also: true`, an
+access-log event) are not replayed. A stream that starts with `Updated` has no
+head: the record predates Lyra and was not imported (Genesis, above).
 
 ---
 
 ## Mode Switching Issues
 
-### Can't Switch from Monitor to Hijack
+Mode switches are gated: a switch that changes the authoritative store needs a
+clean check of every row against its stream. The full procedure is in
+[MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
 
-**Symptom**: `enable_hijack!` doesn't take effect.
+### `Lyra::ModeTransition::Refused`: "Lyra will not start in hijack: the application last ran in monitor, and no clean check certifies that switch"
 
-**Solution**:
-```ruby
-# config/initializers/lyra.rb
-Lyra.configure do |config|
-  config.enable_hijack!
-end
+**Cause**: The initializer's mode was changed and deployed without a check.
+At boot each process compares its configured mode with the last one applied
+(`lyra_mode_transitions`); a switch that needs a check needs a fresh
+certificate.
 
-# Restart Rails (required!)
-rails restart
+**Fix**: Run the check the message names, on the running application, then
+deploy again:
 
-# Verify
-rails console
-> Lyra.config.hijack_mode?  # Should return true
+```bash
+bin/rails lyra:mode:check TO=hijack
+bin/rails lyra:mode:check TO=event_sourcing PROJECTION=sync
+bin/rails lyra:mode:check TO=monitor REBUILD=1   # leaving ES-NoProj
 ```
 
-### Operations Still Using CRUD in Hijack Mode
+A certificate is valid for `config.mode_transition_certificate_ttl` seconds
+(3600 by default). `LYRA_FORCE_MODE_TRANSITION=1` lets a process start without
+one, when you accept that the stores may disagree. Rake tasks are not gated at
+boot, so the check and migrations run in any configuration.
 
-**Symptom**: Database records updated directly, not through events.
+### `Lyra::ModeTransition::Refused`: "Lyra refuses monitor -> hijack: N discrepancies, e.g. …"
+
+**Cause**: `lyra:mode:check`, `Lyra::ModeTransition.to!` or a `config.enable_*!`
+helper after boot found rows that disagree with their events. `error.report`
+holds the full `Report`.
+
+**Fix**: Resolve the discrepancies as in
+[State Consistency Issues](#state-consistency-issues) (in Monitor:
+`bin/rails lyra:repair`), then check again. `ModeTransition.to!(mode,
+force: true)` switches without the check.
+
+### The mode changes back, or a process runs in another mode than its initializer says
+
+**Cause**: `Lyra::ModeSync` keeps every process in the application's mode,
+the last switch recorded in `lyra_mode_transitions`. A process whose mode was
+set with the raw setter (`Lyra.config.mode = ...`) adopts a newer switch
+recorded by another process.
+
+**Fix**: Switch through a deploy or `Lyra::ModeTransition.to!`, which record
+the switch. `bin/rails lyra:mode:status` shows the configured and the last
+applied mode. In the test environment the gate and ModeSync are off by
+default.
+
+### Still in Hijack after `config.mode = :monitor`
+
+**Cause**: `enable_hijack!` also sets `config.hijack_enabled`, and
+`hijack_mode?` is true while that flag is set, whatever `mode` says.
+
+**Fix**: Leave Hijack with `config.enable_monitor!` or
+`Lyra::ModeTransition.to!(:monitor)`, which clear the flag.
+
+### Rows are still written in Hijack
+
+This is expected. In Hijack the event is stored first and then the row is
+written, in the same transaction; reads still come from the tables. Only
+ES-NoProj and ES-Lazy defer or skip the row write.
+
+---
+
+## Event-Sourcing Configurations
+
+### `Lyra::Projections::UnsupportedQuery` (ES-NoProj)
+
+**Cause**: In ES-NoProj (`projection_mode = :disabled`) reads are answered
+from the event store and evaluated in Ruby. A query the reader cannot answer
+exactly raises instead of returning a wrong answer: SQL fragments other than
+simple `"column OP ?"` terms, string, nested, `:through`, polymorphic or
+scoped joins, conditions on tables not joined, and scopes it cannot reduce to
+conditions.
+
+**Fix**: Rewrite the query with hash conditions, or use ES-Lazy or a projected
+configuration (ES-Sync, ES-Async) for that code. The supported subset is listed
+in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled).
+
+### A record just written is not found (ES-Async)
+
+**Cause**: ES-Async projects each event to the table in a background job
+(`Lyra::Projections::AsyncProjectionJob`, queue `lyra_projections`, enqueued
+after commit). A read right after the write, such as the page a create
+redirects to, can run before the job.
+
+**Fix**: Use ES-Sync or ES-Lazy for flows that read their own writes, and make
+sure a worker processes the `lyra_projections` queue. In the test environment
+async projections run inline unless `config.async_projections_inline = false`.
+
+### Projection failures are only logged (ES-Sync, ES-Async)
+
+**Cause**: By default a failed sync projection, or a failed enqueue of an
+async one, is logged and passed to `config.projection_error_handler`; the
+event stays stored.
+
+**Fix**: Set `config.strict_projections = true` to re-raise instead, or rebuild
+the affected table from the log with `bin/rails lyra:projections:rebuild
+MODEL=...`.
+
+### Events skipped after a long transaction (ES-Lazy)
+
+**Cause**: ES-Lazy applies pending events before each read and tracks gaps in
+the event ids. A gap still empty after `LazyProjection::GAP_TTL` (300 seconds)
+is taken to be a rolled-back transaction and forgotten, so a single
+transaction open longer than that has its events skipped by the tables.
+
+**Fix**: Keep transactions short. After one that ran longer, rebuild the
+affected tables from the log (`bin/rails lyra:projections:rebuild MODEL=...`).
+
+### Stale reads with raw SQL (ES-Lazy)
+
+**Cause**: The catch-up runs before ActiveRecord reads; SQL sent directly
+through the connection (`connection.select_all`) does not trigger it.
+
+**Fix**: Read through ActiveRecord, or call
+`Lyra::Projections::LazyProjection.catch_up!` first.
+
+---
+
+## Performance Issues
+
+### Slow reads in ES-NoProj
+
+**Cause**: Each record is rebuilt by replaying its stream, through a cache
+keyed by the stream's last event id in `Rails.cache`. A collection query loads
+every record of the model and filters in memory. With `:null_store` as the
+cache nothing is kept, and every read replays.
+
+**Fix**: Configure a persistent `Rails.cache` (Solid Cache, Redis, Memcached).
+For queries over large tables use ES-Lazy, which runs real SQL.
+
+### The first request after enabling a mode is slow
+
+**Cause**: Genesis runs on a model's first use in a process and imports every
+row that has no stream.
+
+**Fix**: Run `bin/rails lyra:genesis` before enabling the mode.
+
+### Bulk writes are slow
+
+**Cause**: Callback-bypassing bulk writes on monitored models (`update_all`,
+`delete_all`, `insert_all`, ...) publish one bypass event per affected record.
+
+**Fix**: This is by design: each changed record's stream records the change.
+`Lyra.projection_write { ... }` runs a block without bypass events and without
+strict-access checks, so its changes are missing from the log (in Monitor,
+`lyra:repair DRY_RUN=1` then reports the records). Reserve it for data the log
+need not hold; see [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#common-pitfalls).
+
+---
+
+## Privacy and PII Issues
+
+### A field is not detected as PII
+
+**Symptom**: `Lyra::Privacy::PIIDetector.detect(attributes)` leaves out a
+field you consider personal.
+
+**Cause**: `PIIDetector` delegates to the privacy provider's detector. With PAM
+that is a name-based detector: a field is detected when its name matches one of
+PAM's PII patterns (partial matching by default, so `billing_phone` matches),
+and names that look like timestamps, counters, flags or amounts are excluded
+first. Without PAM (`Lyra.pam_dsl_available?` false) nothing is detected.
+
+**Fix**: Declare the field in the model's PAM policy:
+
+```ruby
+PamDsl.define_policy :my_policy do
+  field :contact, type: :email, sensitivity: :confidential
+end
+```
+
+Declarations are what Lyra's privacy features use: purpose-bound reads, the
+access log, privacy stamps and erasure work on declared attributes.
+`Lyra::Privacy::PolicyIntegration.new(:my_policy).detect_pii(attributes)`
+reports declared fields first and falls back to the detector;
+`PIIDetector.detect` alone does not read the policy.
+
+### A field is not masked
+
+**Cause**: `Lyra::Privacy::PIIMasker.mask(attributes, strategy: :partial)` masks
+the fields the name-based detector finds, as above.
+
+**Fix**: For a declared field, use the policy's transformations:
+`Lyra::Privacy.policy_for(User).mask(:contact, value, :display)` or
+`PolicyIntegration.new(:my_policy).mask_pii(:contact, value, :display)`.
+
+### The privacy policy does not apply
 
 **Diagnosis**:
+
 ```ruby
-# Check mode
-Lyra.config.mode  # Should be :hijack
-
-# Check if model is monitored
-User.lyra_monitored?  # Should be true
-
-# Try operation and check events
-before = Rails.configuration.event_store.read.count
-user = User.create!(email: "test@example.com")
-after = Rails.configuration.event_store.read.count
-
-puts "Events created: #{after - before}"  # Should be > 0
-puts "User ID: #{user.id}"  # Should be set
+Lyra.pam_dsl_available?                     # false: PAM is not loaded (or LYRA_DISABLE_PAM_DSL=true)
+PamDsl.policy(:my_policy)                   # raises PamDsl::PolicyNotFoundError if not defined
+User.lyra_config.privacy_policy             # => :my_policy (nil falls back to config.privacy_policy)
+Lyra::Privacy.policy_for(User).loaded?      # => true when Lyra sees the policy
 ```
 
-**Solution**:
+**Fix**: Require PAM (`require: "pam_dsl"` in the Gemfile), define the policy
+with `PamDsl.define_policy` in an initializer, and name it on the model
+(`monitor_with_lyra privacy_policy: :my_policy`) or as the default
+(`config.privacy_policy = :my_policy`).
 
-Hijack mode requires full Lyra integration. Check:
+### `Lyra::PurposeBoundReads::PurposeRequiredError`: "read of … with no declared purpose"
 
-1. **Commands implemented**:
+**Cause**: `config.reads_without_purpose = :deny`, and a model with a loaded
+policy was read outside any declared purpose.
+
+**Fix**: Declare the purpose where the read is made:
+
 ```ruby
-# lib/lyra/commands/ should have:
-# - create_command.rb
-# - update_command.rb
-# - destroy_command.rb
-```
+Lyra.with_purpose(:invoicing) { Registration.find(id) }
 
-2. **Callbacks configured**:
-```ruby
-# In monitor_with_lyra, callbacks should intercept
-class User < ApplicationRecord
-  monitor_with_lyra  # This sets up callbacks
-
-  # Callbacks should be present:
-  # before_create :lyra_handle_create (in hijack mode)
+class PaymentsController < ApplicationController
+  lyra_purpose :payment_processing
 end
 ```
+
+Or use `:audit` while you add purposes; it logs such reads and lets them
+through. See [API_REFERENCE.md](API_REFERENCE.md#purpose-bound-reads).
+
+### A read inside a purpose raises a PAM error
+
+**Cause**: Within a declared purpose, every declared attribute the query loads
+must be allowed for that purpose. The policy's enforcement mode decides the
+outcome: strict raises the first violation (`PamDsl::InvalidFieldError`,
+`PurposeFieldMismatchError`, `ConsentRequiredError`, ...), audit logs it and
+lets the read through.
+
+**Fix**: Select only the attributes the purpose needs
+(`Registration.select(:id, :vat_number).find(id)`), or allow the field for the
+purpose in the policy (`allow_for`).
 
 ---
 
 ## Debugging Techniques
 
-### Enable Debug Logging
+### Inspect a record's events
 
 ```ruby
-# config/initializers/lyra.rb
-Lyra.configure do |config|
-  config.logger = Logger.new(Rails.root.join('log', 'lyra_debug.log'))
-  config.logger.level = Logger::DEBUG
-end
-
-# Or temporarily in console
-Lyra.config.logger.level = Logger::DEBUG
-```
-
-### Inspect Events in Detail
-
-```ruby
-# View latest event
-event = Rails.configuration.event_store.read.last
-
-puts "Event Type: #{event.event_type}"
-puts "Event ID: #{event.event_id}"
-puts "Timestamp: #{event.timestamp}"
-puts "\nData:"
-pp event.data
-puts "\nMetadata:"
-pp event.metadata
-
-# View event stream for record
-stream = "User-123"
-events = Rails.configuration.event_store.read.stream(stream).to_a
-
-events.each_with_index do |event, i|
-  puts "#{i + 1}. #{event.event_type} at #{event.timestamp}"
-  puts "   Data: #{event.data.inspect}"
+events = Lyra.event_store.read.stream("User$123").to_a
+events.each do |event|
+  puts "#{event.event_type} #{event.event_id} at #{event.timestamp}"
+  pp event.data
+  pp event.metadata
 end
 ```
 
-### Trace Event Flow
+Event readers (`operation`, `attributes`, `changes`, `model_class`,
+`model_id`, `timestamp`) accept data with symbol or string keys; with a JSON
+serializer `event.data` itself has string keys. The data envelope and the
+metadata each write path records are listed in
+[API_REFERENCE.md](API_REFERENCE.md#events-streams-and-metadata).
+
+### Trace a record's history
 
 ```ruby
-# Enable event tracing
-module EventTracer
-  def publish(event, stream_name:)
-    puts "=== Publishing Event ==="
-    puts "Stream: #{stream_name}"
-    puts "Type: #{event.event_type}"
-    puts "Data: #{event.data.inspect}"
-    puts "======================="
-
-    super
-  end
-end
-
-Rails.configuration.event_store.singleton_class.prepend(EventTracer)
+Lyra::AuditProjection.audit_trail(User, 123)   # one hash per event
+Lyra.state_at(User, 123, 2.days.ago)           # the record as it was then
+Lyra::StateAnalyzer.analyze(User, 123)         # comparison, audit trail and recommendations
 ```
 
-### Check Aggregate State
+### Follow a chain of writes
+
+Writes in a `Lyra::Correlation.with_id { ... }` block share a correlation id,
+so the events of one user action can be grouped:
 
 ```ruby
-# Load aggregate and inspect
-aggregate = UserAggregate.load(user_id)
-
-puts "Version: #{aggregate.version}"
-puts "Changes: #{aggregate.changes.count}"
-puts "\nState:"
-pp aggregate.instance_variable_get(:@state)
-
-# Manually rebuild to see each step
-events = Rails.configuration.event_store.read.stream("User-#{user_id}").to_a
-aggregate = UserAggregate.new
-
-events.each_with_index do |event, i|
-  puts "\n=== Event #{i + 1}: #{event.event_type} ==="
-  puts "Before: #{aggregate.instance_variable_get(:@state)}"
-
-  aggregate.apply(event)
-
-  puts "After: #{aggregate.instance_variable_get(:@state)}"
-end
+Lyra.event_store.read.to_a.select { |e| e.metadata[:correlation_id] == correlation_id }
 ```
 
-### Profile Performance
+### Log output
 
-```ruby
-# Benchmark operations
-require 'benchmark'
+Lyra logs through `Rails.logger`; its messages begin with `Lyra`. There is no
+separate Lyra logger to configure:
 
-Benchmark.bm(20) do |x|
-  x.report("create (no Lyra)") do
-    # Temporarily disable Lyra
-    Lyra.configure { |c| c.mode = :disabled }
-    100.times { User.create!(email: "#{rand}@example.com", name: "Test") }
-  end
-
-  x.report("create (monitor)") do
-    Lyra.configure { |c| c.mode = :monitor }
-    100.times { User.create!(email: "#{rand}@example.com", name: "Test") }
-  end
-
-  x.report("aggregate load") do
-    100.times { UserAggregate.load(User.first.id) }
-  end
-end
+```bash
+grep "Lyra" log/production.log
 ```
 
 ---
 
 ## Common Error Messages
 
-### "NoMethodError: undefined method `lyra_monitored?'"
+The full list of errors Lyra raises is in
+[API_REFERENCE.md](API_REFERENCE.md#errors). The ones most often met:
 
-**Cause**: Model not properly configured with `monitor_with_lyra`.
+| Error | Cause | Fix |
+|---|---|---|
+| `Lyra::EventStoreUnavailableError` | An event could not be stored; the write rolled back (Hijack, event sourcing). | [Above](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair) |
+| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate. | [Mode Switching Issues](#mode-switching-issues) |
+| `Lyra::Repair::Refused` | `lyra:repair` outside Monitor/Disabled. | Rebuild the tables instead: `bin/rails lyra:projections:rebuild`. |
+| `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. | [Above](#lyraprojectionsunsupportedquery-es-noproj) |
+| `Lyra::PurposeBoundReads::PurposeRequiredError` | A read with no purpose under `reads_without_purpose = :deny`. | [Above](#lyrapurposeboundreadspurposerequirederror-read-of--with-no-declared-purpose) |
+| `Lyra::StrictDataAccessViolation` | A callback-bypassing write with `config.strict_data_access` on. | Use `save`/`update`/`destroy`, or wrap deliberate bulk work in `Lyra.without_strict_access { ... }`. |
+| `Lyra::Temporal::HistoryNotRecorded` | A point-in-time read before an imported record's history begins. | The record was imported by Genesis; its history before the import was not recorded. |
+| `Lyra::MappingVerificationError` | `verify_mapping!` failed, or petri_flow is missing. | Read the failed checks in the message; add `orfeas_petri_flow` with `require: "petri_flow"`. |
+| `ActiveRecord::RecordInvalid` | Model validations failed. | Validations run in every mode, before Lyra stores an event. |
 
-**Solution**: Add `monitor_with_lyra` to model class.
-
-### "NameError: uninitialized constant UserAggregate"
-
-**Cause**: Aggregate class not defined or not loaded.
-
-**Solution**:
-```ruby
-# Create aggregate class
-# app/aggregates/user_aggregate.rb
-class UserAggregate < Lyra::Aggregate
-  # ...
-end
-
-# Ensure autoloading configured
-# config/application.rb
-config.eager_load_paths << Rails.root.join('app', 'aggregates')
-```
-
-### "TypeError: no implicit conversion of Symbol into String"
-
-**Cause**: Event data keys mismatch (String vs Symbol).
-
-**Solution**: Ensure consistent key types:
-```ruby
-# Use string keys
-event.data['model_class']  # Correct
-
-# Or symbolize
-event.data.symbolize_keys[:model_class]
-```
-
-### "ArgumentError: Stream name cannot be nil"
-
-**Cause**: Event published without stream name.
-
-**Solution**:
-```ruby
-# Always provide stream name
-stream_name = "User-#{user.id}"
-Rails.configuration.event_store.publish(event, stream_name: stream_name)
-```
-
-### "ActiveRecord::RecordInvalid: Validation failed"
-
-**Cause**: Validation errors when creating/updating records.
-
-**Solution**: Check validation errors:
-```ruby
-user = User.new(email: "invalid")
-unless user.valid?
-  pp user.errors.full_messages
-end
-
-# In hijack mode, validations still apply
-# Ensure event data passes validations
-```
+A command that fails in Hijack or event sourcing does not raise: it adds its
+error to the record's `errors[:base]`, and `save` returns false.
 
 ---
 
 ## Getting Help
 
-### Gather Information
+### Gather information
 
-Before asking for help, collect:
+1. The configuration: `bin/rails lyra:mode:status`, and in a console
+   `Lyra::ModeTransition.current`, `Lyra.config.monitored_models`,
+   `User.lyra_config`.
+2. Versions: `Lyra::VERSION`, `bin/rails --version`, `ruby --version`,
+   `bundle exec gem list rails_event_store`.
+3. The events of an affected record:
+   `Lyra.event_store.read.stream("User$123").to_a`.
+4. The full error: `e.full_message`, and for `ModeTransition::Refused` its
+   `report.summary`.
+5. The `Lyra:` lines from the Rails log.
 
-1. **Lyra Configuration**:
+### Minimal reproduction
+
 ```ruby
-rails console
-> pp Lyra.config
-```
-
-2. **Rails Version**:
-```bash
-rails --version
-ruby --version
-```
-
-3. **Event Store Info**:
-```ruby
-> Rails.configuration.event_store.class
-> Rails.configuration.event_store.read.count
-```
-
-4. **Error Details**:
-```ruby
-# Full stack trace
-> begin
->   # ... operation that fails
-> rescue => e
->   puts e.full_message
-> end
-```
-
-5. **Model Configuration**:
-```ruby
-> User.lyra_config
-```
-
-### Check Logs
-
-```bash
-# Rails log
-tail -f log/development.log
-
-# Lyra log (if configured)
-tail -f log/lyra_events.log
-
-# Look for errors
-grep ERROR log/development.log
-```
-
-### Minimal Reproduction
-
-Create minimal example:
-```ruby
-# test_lyra.rb
-require_relative 'config/environment'
-
-Lyra.configure do |config|
-  config.mode = :monitor
-  config.event_store = Rails.configuration.event_store
-end
-
-class TestModel < ApplicationRecord
-  self.table_name = 'users'
+# bin/rails runner repro.rb
+class ReproUser < ApplicationRecord
+  self.table_name = "users"
   monitor_with_lyra
 end
 
-# Test operation
-TestModel.create!(email: "test@example.com")
-
-# Check events
-puts Rails.configuration.event_store.read.count
+user = ReproUser.create!(email: "test@example.com")
+pp Lyra.event_store.read.stream("ReproUser$#{user.id}").to_a.map(&:event_type)
 ```
 
-### Contact Support
+### Contact
 
-- **Email**: mpantel@aegean.gr
-- **GitHub Issues**: [Repository Issues](https://github.com/mpantel/lyra-engine/issues)
-- **Stack Overflow**: Tag questions with `lyra` and `event-sourcing`
+- GitHub issues: https://github.com/mpantel/lyra-engine/issues
+- Email: mpantel@aegean.gr
 
-Include:
-- Lyra version
-- Rails version
-- Ruby version
-- Error message and stack trace
-- Configuration
-- Minimal reproduction steps
+Include the Lyra, Rails and Ruby versions, the configuration, the error with
+its stack trace, and the reproduction steps.
 
 ---
 
 ## Additional Resources
 
+- [Getting Started](GETTING_STARTED.md)
 - [API Reference](API_REFERENCE.md)
 - [Migration Guide](MIGRATION_GUIDE.md)
-- [Example Application](../examples/blog_app/README.md)
+- [Switching Modes](MODE_TRANSITIONS.md)
+- [Architecture](ARCHITECTURE.md)
 - [Main Documentation](../README.md)

@@ -12,6 +12,16 @@ PAM DSL is a declarative Domain-Specific Language for defining privacy policies 
 - **Consent management** with expiration tracking
 - **Data transformation** for different contexts (display, logging, API)
 
+Lyra does not depend on PAM directly. It defines a privacy provider interface
+(`Lyra::Privacy::Policy`, `Lyra::Privacy::Detector` and `Lyra::Privacy::Provider`
+in `lib/lyra/privacy/interface.rb`), whose base classes are null
+implementations: no attribute is declared personal, every access is allowed and
+the detector finds nothing. PAM plugs in as the adapter
+`Lyra::Privacy::Adapters::Pam` (`lib/lyra/privacy/adapters/pam.rb`), which
+becomes the provider when the pam_dsl gem is loaded. `Lyra::Privacy.provider`
+returns the active provider and can be replaced with `Lyra::Privacy.provider =`.
+Everything below goes through this interface.
+
 ## Quick Start
 
 ### 1. Define a Privacy Policy
@@ -30,7 +40,7 @@ PamDsl.define_policy :my_app do
 
   field :ssn, type: :ssn, sensitivity: :restricted do
     allow_for :legal_compliance
-    transform :display { |_| "***REDACTED***" }
+    transform(:display) { |_| "***REDACTED***" }
   end
 
   # Define purposes
@@ -76,6 +86,9 @@ class User < ApplicationRecord
 end
 ```
 
+A model without `privacy_policy:` uses the default policy,
+`config.privacy_policy`, if one is set.
+
 ### 3. Load Policies in Your Application
 
 In `config/initializers/lyra.rb`:
@@ -86,6 +99,7 @@ require_relative '../privacy_policies'
 Lyra.configure do |config|
   config.mode = :monitor
   config.event_store = RailsEventStore::Client.new
+  config.privacy_policy = :my_app   # optional: default policy for monitored models
 end
 ```
 
@@ -128,7 +142,7 @@ end
 - `:restricted` - Highly restricted access (SSN, credit cards, health data)
 
 **Available PII Types:**
-`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:custom`
+`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:online_identifier`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:credential`, `:token`, `:payment_token`, `:custom`
 
 ### Purposes
 
@@ -142,7 +156,11 @@ purpose :order_fulfillment do
   optionally :delivery_instructions
 
   meta :department, "Operations"
-  meta :data_recipients, ["Shipping Partner", "Payment Processor"]
+
+  # Article 30 declarations, used by the Article 30 report
+  data_subjects "customers"
+  recipients "Shipping Partner", "Payment Processor"
+  no_transfers!
 end
 ```
 
@@ -179,12 +197,17 @@ retention do
   for_model 'SupportTicket' do
     keep_for 3.years
 
-    when do |context|
-      !context[:escalated]  # Keep non-escalated tickets for 3 years
+    # `when` is a Ruby keyword, so call it with an explicit receiver
+    self.when do |record|
+      !record[:escalated]  # the rule applies to non-escalated tickets
     end
   end
 end
 ```
+
+Conditions are stored on the rule and checked with `RetentionRule#applies_to?`;
+Lyra's adapter passes them on as the `applies` predicate of the retention rule.
+`retention_for` returns the rule's duration without evaluating them.
 
 ### Consent
 
@@ -251,13 +274,13 @@ user_data = {
   email: "user@example.com",
   name: "John Doe",
   ssn: "123-45-6789",
-  phone: "555-1234"  # Not in policy, detected by PIIDetector
+  phone: "555-1234"   # Not in policy, detected by PIIDetector
 }
 
 pii = integration.detect_pii(user_data)
 # => {
 #   email: { type: :email, sensitive: false, source: :policy, ... },
-#   name: { type: :name, sensitive: false, source: :policy, ... },
+#   name: { type: :name, sensitive: false, source: :detector, ... },  # not declared in :my_app
 #   ssn: { type: :ssn, sensitive: true, source: :policy, ... },
 #   phone: { type: :phone, sensitive: false, source: :detector, ... }
 # }
@@ -268,26 +291,31 @@ masked = integration.mask_pii(:ssn, "123-45-6789", :display)
 
 # Get retention duration (nil = infinite/manual retention)
 retention = integration.retention_duration('User')
-# => 7.years (from policy) or nil (no policy)
+# => 10.years (the policy's User rule) or nil (no policy)
 
-# Check consent requirements
+# Check whether the purpose's legal basis is consent
 if integration.consent_required?(:marketing)
   # Verify user consent before proceeding
 end
 
-# Validate access
+# Validate access for a data subject. Consent is looked up in the policy's
+# runtime consent store, so record it there first.
+PamDsl.policy(:my_app).consent_policy.grant_consent(purpose: :marketing, subject: user.id)
+
 begin
-  integration.validate_access!(
-    [:email, :name],
-    :marketing,
-    consent_granted: true,
-    consent_granted_at: 6.months.ago
-  )
-  # Access granted
+  integration.validate_access!([:email], :marketing, subject: user.id)
+  # Access granted (returns true; false in audit mode when there are violations)
 rescue PamDsl::ConsentRequiredError => e
   # Handle consent error
 end
 ```
+
+`validate_access!(field_names, purpose, subject:)` delegates to the policy's
+`validate_access!`. In strict mode (the default) the first violation is raised
+as its typed error; in audit mode (`PamDsl.enforcement_mode = :audit`, or
+`enforcement :audit` in the policy) every violation is logged and passed to the
+`PamDsl.on_violation` handlers, and the call returns false. With no provider
+installed it always returns true.
 
 #### Fallback Behavior
 
@@ -360,8 +388,8 @@ class DataProcessor
     @integration = Lyra::Privacy::PolicyIntegration.new(@policy_name)
   end
 
-  def process_data(data, purpose)
-    @integration.validate_access!(data.keys, purpose)
+  def process_data(data, purpose, subject:)
+    @integration.validate_access!(data.keys, purpose, subject: subject)
     # Process data...
   end
 end
@@ -423,54 +451,68 @@ end
 
 ## Event Integration
 
-### Automatic PII Detection in Events
+### What Lyra does with a policy
 
-When a model uses a privacy policy, Lyra automatically:
+A monitored model's policy (its `privacy_policy:` option, or
+`config.privacy_policy`) is used in three places. None of them changes the
+attribute values Lyra records in events.
 
-1. Detects PII based on policy field definitions
-2. Applies transformations for event metadata
-3. Validates purpose-based access
-4. Tracks consent requirements
+1. **Privacy stamp (opt-in).** With `config.annotate_privacy = true` (off by
+   default), each event Lyra builds for a model with a loaded policy gets a
+   `metadata[:privacy]` entry naming the policy and annotating every declared
+   attribute the event carries: its type, sensitivity, allowed purposes (the
+   field's `allow_for` list), retention period (ISO 8601) and the contexts it has a transformation for.
+   Never a value. A create annotates the attributes it carries, an update the
+   ones it changed (and, in Monitor mode, the full row it also carries). An
+   event with no declared attribute is left unstamped.
+2. **Purpose-bound reads.** A read made for a declared purpose
+   (`Lyra.with_purpose(:invoicing) { ... }`, or `lyra_purpose` in a controller
+   or job) is checked against the policy with `validate_access!`, with the
+   record as the subject.
+3. **Access log (opt-in).** With `config.record_access_events = true`, every
+   call to `validate_access!` is recorded as a `DataAccessed` or
+   `DataAccessDenied` event in the subject's access stream, through
+   `PamDsl.access_recorder`. Field names only, never values.
 
 ```ruby
 class Order < ApplicationRecord
   monitor_with_lyra privacy_policy: :ecommerce
 end
 
-# When you create an order
-order = Order.create!(
-  email: "customer@example.com",
-  credit_card: "4111111111111111"
-)
+Lyra.configure { |config| config.annotate_privacy = true }
 
-# Lyra automatically:
-# 1. Detects email and credit_card as PII from policy
-# 2. Transforms credit_card for event metadata (****-****-****-1111)
-# 3. Marks fields with sensitivity levels
-# 4. Records in event metadata which purposes could use this data
+Order.create!(email: "customer@example.com", credit_card: "4111111111111111")
 ```
 
-### Event Metadata Enhancement
+### The privacy stamp
+
+With the policy declaring `email` and `credit_card`, the event's metadata
+includes (string keys; values illustrative):
 
 ```ruby
-# Events include policy-aware metadata
 {
-  event_type: "OrderCreated",
-  data: {
-    model_id: 123,
-    # ... order data
-  },
-  metadata: {
-    pii_detected: {
-      email: { type: :email, sensitivity: :internal },
-      credit_card: { type: :credit_card, sensitivity: :restricted }
-    },
-    allowed_purposes: [:order_fulfillment, :payment_processing],
-    consent_required: false,
-    retention_period: 252288000  # 7 years in seconds
+  # ... metadata Lyra already records ...
+  privacy: {
+    "policy" => "ecommerce",
+    "fields" => {
+      "email" => {
+        "type" => "email", "sensitivity" => "internal",
+        "purposes" => ["order_fulfillment"], "retention" => "P7Y"
+      },
+      "credit_card" => {
+        "type" => "credit_card", "sensitivity" => "restricted",
+        "purposes" => ["payment_processing"], "retention" => "P7Y",
+        "transformations" => ["display", "log"]
+      }
+    }
   }
 }
 ```
+
+`Lyra::Privacy.stamp_of(event)` reads the stamp of a stored event back with
+string keys, or nil if it was not stamped. Because the stamp records the
+policy as it was when the event was written, reclassifying a field later does
+not rewrite the history.
 
 ## Best Practices
 
@@ -540,7 +582,7 @@ def audit_policy(policy_name)
   }"
   puts "Retention periods: #{
     policy.retention_policy.rules.map { |r|
-      "#{r.model_class}: #{r.duration / 1.year} years"
+      "#{r.model_class}: #{r.duration ? r.duration.inspect : 'default'}"
     }
   }"
 end
@@ -609,12 +651,10 @@ RSpec.describe Lyra::Privacy::PolicyIntegration do
 
   describe "#validate_access!" do
     it "raises error when consent required but not given" do
+      # :marketing has basis :consent and a required consent requirement;
+      # subject 99 has no consent record
       expect {
-        integration.validate_access!(
-          [:email],
-          :marketing,
-          consent_granted: false
-        )
+        integration.validate_access!([:email], :marketing, subject: 99)
       }.to raise_error(PamDsl::ConsentRequiredError)
     end
   end
@@ -654,21 +694,25 @@ integration = Lyra::Privacy::PolicyIntegration.new(:my_app, use_detector: false)
 ```ruby
 # Error: PamDsl::ConsentRequiredError
 
-# Solution: Provide consent information
-integration.validate_access!(
-  [:email],
-  :marketing,
-  consent_granted: true,
-  consent_granted_at: Time.current
-)
+# Solution: record the subject's consent in the runtime consent store, then
+# validate for that subject
+policy = PamDsl.policy(:my_app)
+policy.consent_policy.grant_consent(purpose: :marketing, subject: user.id)
+integration.validate_access!([:email], :marketing, subject: user.id)
 ```
+
+The error message gives the reason: no consent record, consent requested but
+not yet granted, expired, or withdrawn. The check applies to purposes whose
+basis is `:consent` and that have a required consent requirement
+(`consent { for_purpose(:marketing) { required! } }`).
 
 ## Further Reading
 
-- [PAM DSL README](../gems/pam_dsl/README.md) - Complete PAM DSL documentation
-- [Privacy Compliance Guide](PRIVACY_COMPLIANCE.md) - GDPR compliance with Lyra
-- [Privacy Policy Examples](../config/privacy_policies.rb) - Example policy definitions
-- [Usage Examples](../examples/privacy_policy_usage.rb) - Code examples
+- [PAM DSL README](../README.md) - Complete PAM DSL documentation
+- [Privacy Compliance Guide](../../../docs/PRIVACY_COMPLIANCE.md) - GDPR compliance with Lyra
+- [Privacy Policy Examples](../../../config/privacy_policies.rb) - Example policy definitions
+- [Usage Examples](../../../examples/privacy_policy_usage.rb) - Code examples
+- [Privacy provider interface](../../../lib/lyra/privacy/interface.rb) and [PAM adapter](../../../lib/lyra/privacy/adapters/pam.rb)
 
 ## Support
 

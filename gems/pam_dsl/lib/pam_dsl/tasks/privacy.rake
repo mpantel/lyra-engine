@@ -103,19 +103,24 @@ namespace :pam_dsl do
     end
   end
 
+  # Both refuse to overwrite an existing policy file unless FORCE=1.
   namespace :generate do
-    desc "Generate a PAM DSL policy file with sensible defaults"
+    desc "Generate a PAM DSL policy file with sensible defaults (FORCE=1 overwrites an existing one)"
     task :policy, [:name] => :environment do |_t, args|
       name = args[:name] || "application"
-      generator = PamDsl::PolicyGenerator.new(name)
+      generator = PamDsl::PolicyGenerator.new(name, force: ENV["FORCE"] == "1")
       generator.generate
+    rescue PamDsl::PolicyGenerator::FileExistsError => e
+      abort e.message
     end
 
-    desc "Generate policy from existing ActiveRecord models"
+    desc "Generate policy from existing ActiveRecord models (FORCE=1 overwrites an existing one)"
     task :from_models, [:name] => :environment do |_t, args|
       name = args[:name] || "application"
-      generator = PamDsl::PolicyGenerator.new(name)
+      generator = PamDsl::PolicyGenerator.new(name, force: ENV["FORCE"] == "1")
       generator.generate_from_models
+    rescue PamDsl::PolicyGenerator::FileExistsError => e
+      abort e.message
     end
   end
 end

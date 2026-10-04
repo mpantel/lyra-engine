@@ -9,6 +9,19 @@ module Lyra
 
       AVAILABLE_MODES = [:monitor, :hijack, :es_sync, :es_async].freeze
 
+      # The file a mode's workflow is written to, without ".rb": es_sync ->
+      # "es_sync_mode_workflow". The same name whether one mode or all are
+      # generated, so MODE=es_sync overwrites the file a full run wrote.
+      def self.workflow_file_basename(mode)
+        "#{mode}_mode_workflow"
+      end
+
+      # The class that file defines, the constant Zeitwerk expects from the
+      # file's path: es_sync_mode_workflow.rb -> EsSyncModeWorkflow.
+      def self.workflow_class_name(mode)
+        workflow_file_basename(mode).split("_").map(&:capitalize).join
+      end
+
       def initialize(options = {})
         @options = options
         @analysis = {

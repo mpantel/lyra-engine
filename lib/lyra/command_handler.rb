@@ -67,7 +67,7 @@ module Lyra
 
       # Create aggregate
       aggregate_class = find_aggregate_class
-      aggregate = aggregate_class.new(id, command.model_class)
+      aggregate = aggregate_class.new(id, *aggregate_args(aggregate_class))
 
       # Create event with pre-generated ID
       # Use symbolize_keys for consistent key types in event data
@@ -97,9 +97,7 @@ module Lyra
     end
 
     def handle_update
-      # Load aggregate (or create new one for records without event history)
-      aggregate_class = find_aggregate_class
-      aggregate = aggregate_class.load(command.id, Lyra.config.event_store) rescue aggregate_class.new(command.id, command.model_class)
+      aggregate = load_aggregate
 
       # Create event
       events = create_events(:updated, command.id, { changes: command.changes })
@@ -118,9 +116,7 @@ module Lyra
     end
 
     def handle_destroy
-      # Load aggregate (or create new one for records without event history)
-      aggregate_class = find_aggregate_class
-      aggregate = aggregate_class.load(command.id, Lyra.config.event_store) rescue aggregate_class.new(command.id, command.model_class)
+      aggregate = load_aggregate
 
       # Create event
       events = create_events(:destroyed, command.id, {})
@@ -173,11 +169,7 @@ module Lyra
         timestamp: Time.current
       }
 
-      event_metadata = {
-        source: 'lyra_command_handler',
-        correlation_id: Lyra::Correlation.current_id,
-        causation_id: Lyra::Causation.current_id
-      }
+      event_metadata = attribution_metadata(operation).merge(source: 'lyra_command_handler')
 
       config = Lyra.config.model_config(command.model_class)
       event_name = config.event_name_for(operation)
@@ -198,9 +190,75 @@ module Lyra
       event_class.new(data: event_data, metadata: Lyra::Privacy.stamp(command.model_class, event_data, event_metadata))
     end
 
+    # The same attribution metadata a Monitor event carries
+    # (CrudInterceptor#lyra_event_metadata: user_id, request_id, the causal
+    # chain, the user action, config.metadata_proc), built from the record
+    # the command came from. Hijack and event-sourcing events used to carry
+    # only the causal chain, so they lost who made the write. A command
+    # without a record (direct CommandHandler use) gets the context that
+    # needs no record: the causal chain and the user action in scope.
+    def attribution_metadata(operation)
+      record = command.respond_to?(:record) ? command.record : nil
+      return record.lyra_event_metadata(operation) if record.respond_to?(:lyra_event_metadata)
+
+      context = Lyra::UserActionContext.current
+      {
+        correlation_id: Lyra::Correlation.current_id,
+        causation_id: Lyra::Causation.current_id,
+        action_id: context&.action_id,
+        user_action: context && { type: context.action_type, controller: context.controller, action: context.action_name }
+      }
+    end
+
+    # The aggregate for an update or destroy.
+    #
+    # Only a model's own aggregate_class is loaded with its stream's history,
+    # since only domain checks there can use it. The default GenericAggregate
+    # decides nothing from history, so it starts empty: reading the stream
+    # would add SQL to every Hijack and event-sourcing update and destroy for
+    # nothing. A record without event history loads as a new aggregate
+    # (version 0).
+    #
+    # Loading used to call load without the model class GenericAggregate
+    # needs for its stream name, and rescue the NoMethodError that followed. A
+    # programming error now fails the command (visibly, as an error on the
+    # record); an error reading the store is logged and the write proceeds
+    # from an empty aggregate. An unavailable store fails closed.
+    def load_aggregate
+      aggregate_class = find_aggregate_class
+      args = aggregate_args(aggregate_class)
+      return aggregate_class.new(command.id, *args) unless custom_aggregate?
+
+      begin
+        aggregate_class.load(command.id, Lyra.config.event_store, *args)
+      rescue EventStoreUnavailableError, NoMethodError, NameError, ArgumentError, TypeError
+        raise
+      rescue => e
+        Rails.logger.error(
+          "Lyra: could not load #{aggregate_class.name} history for " \
+          "#{command.model_class.name}$#{command.id} (#{e.class}: #{e.message}); continuing from an empty aggregate"
+        )
+        aggregate_class.new(command.id, *args)
+      end
+    end
+
+    # GenericAggregate (and any aggregate whose initializer takes it) needs
+    # the model class for its stream name; an Aggregate subclass with the
+    # base initializer takes the id alone.
+    def aggregate_args(aggregate_class)
+      params = aggregate_class.instance_method(:initialize).parameters
+      positional = params.count { |type, _| type == :req || type == :opt }
+      positional >= 2 || params.any? { |type, _| type == :rest } ? [command.model_class] : []
+    end
+
     def find_aggregate_class
       config = Lyra.config.model_config(command.model_class)
-      config.aggregate_class || Lyra::GenericAggregate
+      klass = config.aggregate_class || Lyra::GenericAggregate
+      klass.is_a?(String) ? klass.constantize : klass
+    end
+
+    def custom_aggregate?
+      !Lyra.config.model_config(command.model_class).aggregate_class.nil?
     end
 
     # Once per model: say why its created events are not in its own stream.

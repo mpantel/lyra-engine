@@ -51,15 +51,24 @@ namespace :lyra do
     abort e.message
   end
   desc "Erase one record's personal data from its row and its events (Art. 17) " \
-       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone] [EVERYWHERE=1])"
+       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone] [EVERYWHERE=1] " \
+       "[MAX_COPIES=10: with EVERYWHERE, a value held by more other records is left as shared])"
   task erase: :environment do
     model = ENV.fetch("MODEL").constantize
+    max_copies = Lyra::Erasure::MAX_COPIES
+    if ENV["MAX_COPIES"].present?
+      max_copies = Integer(ENV["MAX_COPIES"], 10, exception: false)
+      abort "MAX_COPIES must be a positive integer (got #{ENV['MAX_COPIES'].inspect})" unless max_copies&.positive?
+    end
     result = Lyra::Erasure.erase!(model, ENV.fetch("ID"), reason: ENV.fetch("REASON"),
                                   fields: ENV["FIELDS"]&.split(",")&.map(&:strip),
-                                  everywhere: ENV["EVERYWHERE"].present?)
+                                  everywhere: ENV["EVERYWHERE"].present?, max_copies: max_copies)
     puts "Erased #{result.fields.join(', ')} of #{result.model} #{result.id}: " \
          "#{result.events_rewritten} events rewritten, row #{result.row_erased ? 'erased' : 'absent'}."
     puts "Copies erased: #{result.copies.join(', ')}" if result.copies.any?
+    if result.shared_values.positive?
+      puts "Values left as shared (held by more than #{max_copies} other records): #{result.shared_values}"
+    end
   rescue KeyError => e
     abort "#{e.message}: MODEL, ID and REASON are required"
   rescue Lyra::Erasure::Unsupported => e
