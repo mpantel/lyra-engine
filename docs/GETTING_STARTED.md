@@ -1,298 +1,196 @@
 # Getting Started with Lyra
 
-This guide will walk you through setting up Lyra in your Rails application.
+This is the short path: install Lyra in a Rails application, record events for
+one model in Monitor mode, and check that the events agree with the table. In
+Monitor the tables stay authoritative and every write behaves as before; Lyra
+only appends an event after it. Moving on to Hijack or event sourcing is
+covered by [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md), and every option by
+[API_REFERENCE.md](API_REFERENCE.md).
 
-## Prerequisites
+## Requirements
 
-- Ruby 3.4.5+ (tested up to 4.0)
-- Rails 8.0+
-- PostgreSQL (recommended) or SQLite
+- Ruby 3.4.5 or later and Rails 8.0 or later (from `lyra.gemspec`).
+- RailsEventStore 3 (`rails_event_store ~> 3.0`), pulled in by Lyra.
+- PostgreSQL. Lyra depends on the `pg` gem. Genesis and ES-Lazy take
+  PostgreSQL advisory locks to stay correct under concurrency, and Hijack
+  reserves record ids from PostgreSQL sequences.
+- Writes go through ActiveRecord. Lyra does not see raw SQL, triggers, or
+  other applications writing the same tables.
 
-## Installation
+## 1. Install
 
-### Step 1: Add Lyra to your Gemfile
+The gems are named `orfeas_*`, and their entry files are not, so name the
+file to require. From a checkout of the repository:
 
 ```ruby
 # Gemfile
-gem 'orfeas_lyra', path: 'path/to/lyra'  # For local development
-# or
-gem 'orfeas_lyra', git: 'https://github.com/mpantel/lyra-engine'  # From git
+gem "orfeas_lyra", path: "path/to/lyra", require: "lyra"
+gem "orfeas_pam_dsl", path: "path/to/lyra/gems/pam_dsl", require: "pam_dsl"          # optional, privacy
+gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"  # optional, verification
 ```
 
-### Step 2: Install Dependencies
+or the engine straight from GitHub:
+
+```ruby
+gem "orfeas_lyra", git: "https://github.com/mpantel/lyra-engine", branch: "main", require: "lyra"
+```
+
+The `orfeas_*` 0.6.0 releases on rubygems.org date from January 2026 and
+predate this guide (no RailsEventStore 3, Genesis or repair); use the
+repository.
+
+Then install, and create the event store tables with the RailsEventStore 3
+generator:
 
 ```bash
 bundle install
+bin/rails generate ruby_event_store:active_record:migration
+bin/rails db:migrate
 ```
 
-### Step 3: Generate Rails Event Store Migration
+Lyra's own tables (`lyra_mode_transitions`, `lyra_projection_checkpoints`) are
+created on first use.
 
-```bash
-rails generate rails_event_store_active_record:migration
-```
-
-> **Note**: Lyra requires RailsEventStore v2.0+ which includes the `valid_at` column for bi-temporal event sourcing. The generator will create the appropriate schema.
-
-### Step 4: Run Migrations
-
-```bash
-rails db:migrate
-```
-
-### Step 5: Create Lyra Initializer
-
-Create `config/initializers/lyra.rb`:
-
-```ruby
-Lyra.configure do |config|
-  # Start with monitor mode (non-intrusive)
-  config.mode = :monitor
-
-  # Configure event store
-  config.event_backend = :rails_event_store
-  config.event_store = RailsEventStore::Client.new
-end
-```
-
-### Step 6: Enable Monitoring on Models
-
-Add `monitor_with_lyra` to your ActiveRecord models:
-
-```ruby
-class Order < ApplicationRecord
-  # Enable Lyra monitoring
-  monitor_with_lyra
-
-  # Your existing code
-  validates :total, presence: true
-  belongs_to :customer
-  has_many :line_items
-end
-```
-
-### Step 7: Mount Lyra Routes (Optional)
-
-To access the dashboard, add to `config/routes.rb`:
-
-```ruby
-Rails.application.routes.draw do
-  mount Lyra::Engine => "/lyra"
-
-  # Your other routes...
-end
-```
-
-## Quick Start Example
-
-### 1. Create a Simple Model
-
-```bash
-rails generate model Product name:string price:decimal stock:integer
-rails db:migrate
-```
-
-### 2. Enable Lyra Monitoring
-
-```ruby
-# app/models/product.rb
-class Product < ApplicationRecord
-  monitor_with_lyra
-
-  validates :name, presence: true
-  validates :price, numericality: { greater_than: 0 }
-  validates :stock, numericality: { greater_than_or_equal_to: 0 }
-end
-```
-
-### 3. Perform CRUD Operations
-
-```ruby
-# Rails console
-rails console
-
-# Create a product
-product = Product.create!(name: "Widget", price: 19.99, stock: 100)
-# => CRUD: Product saved to database
-# => EVENT: ProductCreated event published
-
-# Update the product
-product.update!(stock: 95)
-# => CRUD: Product updated
-# => EVENT: ProductUpdated event published
-
-# Delete the product
-product.destroy!
-# => CRUD: Product deleted
-# => EVENT: ProductDestroyed event published
-```
-
-### 4. Analyze Events
-
-```ruby
-# Compare CRUD state with event-sourced state
-comparison = Lyra::DualView.new(Product, product.id).compare
-
-puts comparison[:crud_view]
-# => { exists: false } # (deleted)
-
-puts comparison[:event_sourced_view]
-# => { exists: true, state: {...}, events_count: 3 }
-
-# View audit trail
-audit = Lyra::DualView.new(Product, product.id).audit_trail
-# => [
-#      { operation: :created, timestamp: ..., attributes: {...} },
-#      { operation: :updated, timestamp: ..., changes: { stock: [100, 95] } },
-#      { operation: :destroyed, timestamp: ... }
-#    ]
-```
-
-### 5. Access Dashboard
-
-Visit `http://localhost:3000/lyra/dashboard` to see:
-- All monitored models
-- Event counts
-- State comparisons
-- Discrepancies
-
-## Advanced Configuration
-
-### Custom Event Names
-
-```ruby
-class Order < ApplicationRecord
-  monitor_with_lyra(
-    event_prefix: 'Order'  # Events will be OrderCreated, OrderUpdated, etc.
-  )
-end
-```
-
-### Namespaced Models
-
-Lyra supports Rails engine namespaced models:
-
-```ruby
-module Billing
-  class Invoice < ApplicationRecord
-    monitor_with_lyra event_prefix: "Billing::Invoice"
-  end
-end
-```
-
-Event naming follows the convention `Billing::InvoiceCreated` → `Lyra::Events::BillingInvoiceCreated`.
-
-### Custom Aggregates
-
-```ruby
-class OrderAggregate < Lyra::Aggregate
-  def total
-    get_state(:total)
-  end
-
-  def can_be_cancelled?
-    !['shipped', 'delivered'].include?(get_state(:status))
-  end
-
-  private
-
-  def apply_order_created(event)
-    @id = event.model_id
-    set_state(:total, event.attributes['total'])
-    set_state(:status, 'pending')
-  end
-
-  def apply_order_updated(event)
-    event.changes.each { |k, (old, new)| set_state(k.to_sym, new) }
-  end
-end
-
-class Order < ApplicationRecord
-  monitor_with_lyra(
-    event_prefix: 'Order',
-    aggregate_class: OrderAggregate
-  )
-end
-```
-
-### Switching to Hijack Mode
-
-After testing in monitor mode, enable hijack mode:
+## 2. Add an initializer in Monitor
 
 ```ruby
 # config/initializers/lyra.rb
 Lyra.configure do |config|
-  config.mode = :hijack  # or config.enable_hijack!
-  config.event_store = RailsEventStore::Client.new
+  config.mode = :monitor
 end
 ```
 
-Now CRUD operations will be routed through event sourcing!
+`:monitor` is also the default. Without `config.event_store`, the engine uses
+`RailsEventStore::Client.new`. Other options (a JSON serializer, who made each
+change through `config.metadata_proc`) are in
+[MIGRATION_GUIDE.md, Phase 0](MIGRATION_GUIDE.md#phase-0-install).
 
-## Example Applications
+## 3. Monitor one model
 
-### Aegean E-Pay Testbed (Comprehensive)
+In the model:
 
-For a complete working example, see the Aegean E-Pay testbed in `examples/aegean_epay_testbed/`.
-
-```bash
-cd examples/aegean_epay_testbed
-bundle install
-rails db:create db:migrate db:seed
-
-# Run integration tests demonstrating all Lyra features
-ruby test_lyra_integration.rb
+```ruby
+class Order < ApplicationRecord
+  monitor_with_lyra
+end
 ```
 
-### Blog App (Getting Started)
+or by name in the initializer, without editing the model file:
 
-For a simpler introduction, see `examples/blog_app/`:
-
-```bash
-cd examples/blog_app
-bundle install
-rails db:create db:migrate db:seed
-rails console
+```ruby
+config.models = %w[Order]
 ```
 
-## Next Steps
+A name in `config.models` that does not resolve to a class fails the boot.
 
-1. **Read the Architecture Guide**: See `ARCHITECTURE.md` for detailed design
-2. **Explore Examples**: Check `examples/usage_examples.rb` for code samples
-3. **Customize Aggregates**: Create domain-specific aggregates
-4. **Build Projections**: Create read models for queries
-5. **Monitor Performance**: Track event publishing and state reconstruction
-6. **Switch to Hijack**: When ready, enable full event sourcing
+## 4. Make a write and read its stream
 
-## Troubleshooting
+Each record has one stream, `"#{Model.name}$#{id}"`. In `bin/rails console`:
 
-### Events Not Being Published
+```ruby
+order = Order.create!(total: 10)
+order.update!(total: 12)
 
-1. Check that `monitor_with_lyra` is called in the model
-2. Verify Rails Event Store is configured
-3. Check database migrations are run
-4. Look for errors in logs
+events = Lyra.config.event_store.read.stream("Order$#{order.id}").to_a
+events.map(&:event_type)  # => ["Lyra::Events::OrderCreated", "Lyra::Events::OrderUpdated"]
+events.last.operation     # => :updated
+events.last.changes       # the update's previous_changes
+events.last.attributes    # the row after the write, without created_at/updated_at
+```
 
-### State Discrepancies
+`destroy` appends `OrderDestroyed`. Writes that skip callbacks (`update_all`,
+`delete_all`, `insert_all`, ...) are recorded as bypass events; see
+[API_REFERENCE.md](API_REFERENCE.md#callback-bypassing-writes).
 
-1. Use `Lyra::DualView.find_discrepancies(Model)` to identify issues
-2. Check if records existed before Lyra was enabled
-3. Verify event store tables exist
+If an append fails in Monitor, the write stands and the error is logged
+(`Lyra: Failed to publish event ... run bin/rails lyra:repair ...`). Step 7
+finds and repairs such records.
 
-### Performance Issues
+## 5. Compare the row with its events
 
-1. Consider async event publishing
-2. Use snapshots for large event streams
-3. Cache aggregates
-4. Use projections for read-heavy queries
+```ruby
+Lyra::DualView.new(Order, order.id).compare
+# => { crud_view: {...}, event_sourced_view: {...},
+#      differences: { no_differences: true }, metadata: {...} }
+```
 
-## Support
+`differences` is `{ no_differences: true }` when the row and the state replayed
+from the stream agree, `{ exists_mismatch: true }` when only one of them has
+the record, and otherwise one entry per differing column,
+`{ total: { crud: ..., event_sourced: ... } }`. `created_at` and `updated_at`
+are not compared. `Lyra::DualView.find_discrepancies(Order)` runs the
+comparison for every row.
 
-- Documentation: See README.md and ARCHITECTURE.md
-- Examples: Check `examples/` directory
-- Issues: Open a GitHub issue
+## 6. Rows that existed before Lyra
 
-## Resources
+A row written before Lyra was enabled has no stream, so DualView reports
+`exists_mismatch` for it. Genesis gives each such row one `Imported` event
+(`OrderImported`) holding the row as it is. With the default
+`config.genesis = :auto` it runs by itself only in event-sourcing mode, so in
+Monitor run it yourself:
 
-- [Rails Event Store Docs](https://railseventstore.org/)
-- [Event Sourcing Pattern](https://martinfowler.com/eaaDev/EventSourcing.html)
-- [CQRS](https://martinfowler.com/bliki/CQRS.html)
+```bash
+bin/rails lyra:genesis                # every monitored model
+bin/rails lyra:genesis MODEL=Order
+```
+
+or set `config.genesis = true` to import on the first write to each model in
+a process. Run the task before the first write when the table already has
+rows. Details: [MIGRATION_GUIDE.md, Phase 2](MIGRATION_GUIDE.md#phase-2-genesis-rows-that-predate-lyra).
+
+## 7. Check every record
+
+```bash
+bin/rails lyra:repair DRY_RUN=1               # lists out-of-line records, writes nothing
+bin/rails lyra:repair DRY_RUN=1 MODELS=Order
+```
+
+It prints `checked N records: X out of line, 0 repaired, X still out of line`
+and up to 20 findings, each one of "row but no events", "events but no row",
+"row of a destroyed record" or "row differs from its events". Without
+`DRY_RUN=1` it appends events that bring each stream back in line with its row.
+It runs only in Monitor or Disabled, where the tables are authoritative. See
+[MIGRATION_GUIDE.md, Phase 3](MIGRATION_GUIDE.md#phase-3-verify-and-repair-in-monitor).
+
+## 8. Optional: mount the dashboard
+
+```ruby
+# config/routes.rb
+mount Lyra::Engine => "/lyra"
+```
+
+The dashboard is at `/lyra/dashboard` (the engine's root redirects to that
+path, so mount it at `/lyra`), with record comparisons, audit trails, event
+flow views and privacy pages. The engine's controllers do no authentication of
+their own: mount it inside your application's authentication, for example a
+route constraint that admits only administrators.
+
+## Do not just change the mode in the initializer
+
+Changing `config.mode` to `:hijack` or `:event_sourcing` makes the events
+authoritative. Outside the test environment, Lyra then refuses to boot unless
+a clean check certifies the switch from the mode the application last ran in:
+
+```bash
+bin/rails lyra:mode:status
+bin/rails lyra:mode:check TO=hijack
+```
+
+Run the check, fix what it reports, and deploy the new mode within the
+certificate's lifetime (an hour by default). The whole procedure, and how to
+step back, is in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#phase-4-hijack) and
+[MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+
+## Where next
+
+- [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md): from Monitor to Hijack and event
+  sourcing, through the mode check, with recovery steps.
+- [API_REFERENCE.md](API_REFERENCE.md): every configuration option, method and
+  rake task.
+- [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md): how mode switches are checked
+  and certified.
+- [ADOPTION.md](ADOPTION.md): what adoption costs, and when it is not worth it.
+- [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md): privacy policies with PAM
+  DSL, erasure, retention and access logging.
+- [ARCHITECTURE.md](ARCHITECTURE.md): how the engine is built.
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md): common errors.
