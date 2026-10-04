@@ -12,6 +12,9 @@ Rails.application.configure do
   config.active_support.deprecation = :stderr
   config.active_support.test_order = :random
 
+  # Every SQL statement at :debug grew test.log by ~30 MB a run
+  config.log_level = :warn
+
   # Use Solid Cache (SQLite-backed) for projection caching tests
   config.cache_store = :solid_cache_store
 end
