@@ -55,17 +55,22 @@ Rails association operations (e.g., `dependent: :nullify`) are automatically all
 
 **Operational Modes:**
 
-Lyra supports 7 operational modes for different use cases:
+Lyra has four principal modes; event sourcing takes one of four projection
+modes, which gives seven configurations:
 
-| # | Mode | Config | Description |
+| # | Configuration | Config | Description |
 |---|------|--------|-------------|
 | 1 | **Disabled** | `mode: :disabled` | Lyra completely disabled (baseline) |
-| 2 | **Monitor** | `mode: :monitor` | Non-intrusive event logging after CRUD |
-| 3 | **Hijack+PT** | `mode: :hijack` + PaperTrail | Lyra + PaperTrail coexistence (migration) |
-| 4 | **Hijack** | `mode: :hijack` | Full CRUD interception, events as source of truth |
-| 5 | **ES Sync** | `mode: :event_sourcing, projection_mode: :sync` | Event sourcing with synchronous projections |
-| 6 | **ES Async** | `mode: :event_sourcing, projection_mode: :async` | Event sourcing with background projections |
-| 7 | **ES Disabled** | `mode: :event_sourcing, projection_mode: :disabled` | Pure CQRS, reads from event replay cache |
+| 2 | **Monitor** | `mode: :monitor` | Records an event for every write; the table stays authoritative |
+| 3 | **Hijack** | `mode: :hijack` | Full CRUD interception, events as source of truth |
+| 4 | **ES-Sync** | `mode: :event_sourcing, projection_mode: :sync` | Event sourcing with synchronous projections |
+| 5 | **ES-Async** | `mode: :event_sourcing, projection_mode: :async` | Event sourcing with background projections |
+| 6 | **ES-NoProj** | `mode: :event_sourcing, projection_mode: :disabled` | No projections; reads rebuild records from events and are evaluated in Ruby |
+| 7 | **ES-Lazy** | `mode: :event_sourcing, projection_mode: :lazy` | Writes store events only; before a read the tables are brought up to date from the log, and the read runs as real SQL |
+
+Benchmarks add **Hijack+PT** (Hijack with the application's PaperTrail left
+on) to isolate PaperTrail's share of the cost; it is a measurement
+configuration, not a mode.
 
 **Mode Details:**
 
@@ -77,8 +82,10 @@ Lyra supports 7 operational modes for different use cases:
 2. **Monitor Mode** (`config.mode = :monitor`)
    - Non-intrusive observation
    - CRUD operations complete normally
-   - Events logged asynchronously after save
-   - Failures don't affect CRUD operations
+   - The event is appended inside the row write's transaction (in a
+     savepoint), not asynchronously
+   - A failed append is logged and the write stands; `lyra:repair` recovers
+     the missing events
 
 3. **Hijack Mode** (`config.mode = :hijack`)
    - Intercepts CRUD before execution
@@ -90,7 +97,10 @@ Lyra supports 7 operational modes for different use cases:
    - Full event sourcing with configurable projection modes:
      - `:sync` - Projections updated synchronously in same transaction
      - `:async` - Projections updated via background jobs
-     - `:disabled` - No projections, reads replay from event cache
+     - `:disabled` (ES-NoProj) - No projections; reads rebuild records from
+       the event store and evaluate the query in Ruby (see Layer 5)
+     - `:lazy` (ES-Lazy) - Projection on read; the tables are a disposable
+       cache of the log (see Layer 5)
 
 ### Layer 2: Event Layer
 
@@ -192,6 +202,42 @@ Lyra supports 7 operational modes for different use cases:
 - Chronological list of all changes
 - Includes user, timestamp, changes
 - Used for compliance and debugging
+
+**Point-in-time state** (`lib/lyra/temporal.rb`)
+- `Lyra.state_at(Model, id, time)` replays a record's stream up to `time`
+- `Model.as_of(time)` builds read-only records as they were then
+
+**Reads without projected tables: ES-NoProj**
+(`lib/lyra/projections/cached_relation.rb`, `event_store_reader.rb`)
+- `find`, `where`, `all` and associations are answered from records rebuilt
+  from their event streams, as a `CachedRelation`
+- Evaluates conditions, ordering, `or`, joins through associations, grouped
+  aggregates and common search fragments in Ruby; association scopes,
+  `:through` associations and calculations on associations included
+- Anything else raises `Lyra::Projections::UnsupportedQuery` rather than
+  return wrong records
+- Every query scans the rebuilt records, so reads slow down as the log grows;
+  an audit and replay mode rather than a way to serve application reads
+
+**Projection on read: ES-Lazy** (`lib/lyra/projections/lazy_projection.rb`,
+`lib/lyra/interceptors/lazy_reads.rb`)
+- Writes append events only, as in ES-NoProj
+- Before any read of a monitored model, `LazyProjection.catch_up!` applies
+  the events the tables have not seen, one by one in the log's global order,
+  then the read runs as real SQL: joins, merged relations, fragments and
+  aggregates all work
+- A checkpoint (`lyra_projection_checkpoints`, created on first use, no
+  migration) records the last event applied and the ids missing below it.
+  Catch-up runs under a PostgreSQL advisory lock and in the reader's
+  transaction, so concurrent readers never apply an event twice and a
+  rolled-back write leaves nothing behind
+- Event ids are assigned before commit, so a slow transaction can commit an
+  earlier id late: missing ids are watched as gaps and re-checked at most every
+  `GAP_RECHECK` (1 s); a late event replays its record in full. A gap still
+  empty after `GAP_TTL` (300 s) is taken as a rollback, which bounds the mode:
+  a single transaction open longer than that would have its events skipped
+- Once caught up, a read costs two small queries to see whether the log has
+  moved on. The tables can be dropped and rebuilt from the log at any time
 
 ### Layer 6: Analysis Layer
 
@@ -426,6 +472,16 @@ end
   - Use read models for queries
 - **Consistency**: Transactions ensure atomicity
 
+### Event Sourcing Projection Modes
+- **ES-Sync / ES-Async**: reads are plain SQL on projected tables; ES-Async
+  trades read-after-write consistency for a cheaper write
+- **ES-NoProj**: the slowest way to read; cost grows with the log (on the
+  1,000-order Olist replay through Solidus it ran about 3x slower than
+  Monitor, slowing as the log grew). Its published benchmark figure was
+  inflated by a since-fixed harness defect and is being re-measured
+- **ES-Lazy**: write cost as ES-NoProj; a read pays only for the events since
+  the last read. It runs Solidus at about half ES-Sync's throughput
+
 ### Storage
 - **PostgreSQL**: Recommended for production
   - Better concurrency
@@ -524,4 +580,3 @@ mount Lyra::Engine => "/lyra"
 1. **Snapshots**: Periodic aggregate snapshots for performance
 2. **Event Versioning**: Support for event schema evolution
 3. **Sagas**: Distributed transaction support
-4. **Time Travel**: Query state at any point in time
