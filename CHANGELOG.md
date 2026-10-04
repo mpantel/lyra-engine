@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **ES-NoProj runs Solidus** — the Olist replay passes under `projection_mode :disabled`
+  (6 of 6 orders end as Olist records them). Association queries (`variant.prices.find_by`,
+  `.where`, `.find_or_create_by!`) run on the records the event store holds for the owner, and
+  `:through`, polymorphic (`as:`) and scoped associations are read correctly: a `:through`
+  association was filtered on a foreign key its target does not have. Calculations and plucks on
+  an association (`payment.refunds.sum(:amount)`) read the events instead of the empty table.
+  Building through an association or a `where` takes its conditions, as ActiveRecord's
+  `scope_for_create` does. `CachedRelation` gains `group` with grouped `count`/`sum`/`average`/
+  `minimum`/`maximum`, `extending`, class attributes (`discard_column`), records as condition
+  values (mapped to their ids) and the relation readers ActiveRecord's calculations ask for.
 - **Erasure driven by the policy, opt-in** (`Lyra::Retention`, `config.retention_executor`,
   `config.retention_anchors`, `bin/rails lyra:retention:apply [DRY_RUN=1] [MODELS=]`,
   `Lyra::RetentionJob`) — applies the policy's retention rules: for each monitored model with a

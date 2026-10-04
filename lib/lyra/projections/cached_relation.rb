@@ -104,6 +104,16 @@ module Lyra
       # what the query selected (Lyra::PurposeBoundReads). Carried through
       # every relation derived from this one.
       attr_accessor :selected_columns
+      # Equality conditions of where clauses: the attributes a record created
+      # through this relation gets (scope_for_create), as on ActiveRecord.
+      attr_writer :create_attributes
+
+      def create_attributes = @create_attributes || {}
+
+      # Columns of a group(...): the aggregates return a hash per group.
+      attr_writer :group_columns
+
+      def group_columns = @group_columns || []
 
       def initialize(model_class, records = [])
         @model_class = model_class
@@ -114,6 +124,9 @@ module Lyra
       def spawn_records(records)
         relation = self.class.new(model_class, records)
         relation.selected_columns = selected_columns
+        relation.create_attributes = create_attributes
+        relation.group_columns = group_columns
+        relation.extending!(*extensions) if extensions.any?
         relation
       end
 
@@ -148,6 +161,8 @@ module Lyra
       # COUNT(*) or COUNT(column): SQL counts the non-NULL values of a column,
       # so "" and false count (present? would drop them).
       def count(column_name = nil, &block)
+        return aggregate_by_group(:count, column_name) if group_columns.any? && !block
+
         if block_given?
           @records.count(&block)
         elsif column_name.nil? || [:all, "*"].include?(column_name) || column_name.to_s == "all"
@@ -275,9 +290,12 @@ module Lyra
 
         own, joined = split_joined_conditions(conditions)
         own = AssociationConditions.rewrite(model_class, own)
-        filter_rows do |record, joins|
+        relation = filter_rows do |record, joins|
           own.all? { |key, value| matches_value?(record, key, value) } && joined_match(joins, joined) == true
         end
+        scalars = own.select { |key, value| model_class.column_names.include?(key.to_s) && !value.is_a?(Array) && !value.is_a?(Range) && !value.is_a?(Hash) }
+        relation.create_attributes = create_attributes.merge(scalars.transform_keys(&:to_s)) if scalars.any?
+        relation
       end
 
       # The SQL fragments evaluated here: "col OP ?" terms, one bound value
@@ -558,6 +576,21 @@ module Lyra
         model_class.connection
       end
 
+      # ActiveRecord::Relation's value readers that its own code (calculations
+      # on an association proxy, eager-loading checks) asks a scope for. This
+      # relation holds loaded records: nothing is eager loaded, preloaded,
+      # included or referenced.
+      %i[eager_load_values includes_values preload_values references_values select_values
+         order_values having_values].each do |reader|
+        define_method(reader) { [] }
+      end
+
+      def group_values = group_columns.map(&:to_sym)
+
+      def eager_loading? = false
+
+      def distinct_value = false
+
       def joins_values
         []
       end
@@ -575,7 +608,35 @@ module Lyra
       end
 
       def scope_for_create
-        {}
+        create_attributes
+      end
+
+      # Records created through the relation take its equality conditions
+      # (an association's foreign key), as on ActiveRecord; they are created
+      # through the model, so under ES-NoProj the write is an event.
+      def new(attributes = nil, &block)
+        model_class.new(create_attributes.merge((attributes || {}).to_h.transform_keys(&:to_s)), &block)
+      end
+      alias_method :build, :new
+
+      def create(attributes = nil, &block)
+        new(attributes, &block).tap(&:save)
+      end
+
+      def create!(attributes = nil, &block)
+        new(attributes, &block).tap(&:save!)
+      end
+
+      def find_or_initialize_by(attributes, &block)
+        find_by(attributes) || new(attributes, &block)
+      end
+
+      def find_or_create_by(attributes, &block)
+        find_by(attributes) || create(attributes, &block)
+      end
+
+      def find_or_create_by!(attributes, &block)
+        find_by(attributes) || create!(attributes, &block)
       end
 
       def limit!(value)
@@ -586,13 +647,28 @@ module Lyra
         {}
       end
 
+      # Association and scope extensions, as ActiveRecord::Relation has them:
+      # the relation is extended with the modules (and a block's methods), and
+      # extensions lists them. ActiveRecord's collection proxy asks an
+      # association's scope for its extensions; under ES-NoProj that scope is
+      # this relation, and Solidus's price lookup (variant.prices) failed on it.
+      # extending used to drop the modules silently.
+      def extensions
+        @extensions || []
+      end
+
       def extending!(*modules, &block)
-        # No-op for cached relation - extensions are for AR scopes
+        modules = modules.flatten
+        modules << Module.new(&block) if block
+        return self if modules.empty?
+
+        @extensions = extensions + modules
+        modules.each { |mod| extend(mod) }
         self
       end
 
       def extending(*modules, &block)
-        self
+        spawn_records(@records).extending!(*modules, &block)
       end
 
       def spawn
@@ -682,7 +758,18 @@ module Lyra
       # quotient to its own scale (PostgreSQL: about 16 significant digits).
       # MIN/MAX on strings compare by Ruby's byte order, which can differ from
       # the database collation.
+      # SQL's GROUP BY with an aggregate, as ActiveRecord returns it: a hash
+      # from the group's value (an array of values for several columns) to
+      # the aggregate over its records. Solidus sums stock per variant and
+      # stock location this way.
+      def group(*columns)
+        relation = spawn_records(@records)
+        relation.group_columns = group_columns + columns.flatten.map { |c| c.to_s.split(".").last.delete('"') }
+        relation
+      end
+
       def sum(column_name = nil, &block)
+        return aggregate_by_group(:sum, column_name) if group_columns.any? && !block
         return @records.sum(&block) if block_given?
         return 0 unless column_name
 
@@ -690,6 +777,8 @@ module Lyra
       end
 
       def average(column_name)
+        return aggregate_by_group(:average, column_name) if group_columns.any?
+
         values = aggregate_values(column_name)
         return nil if values.empty?
 
@@ -701,11 +790,24 @@ module Lyra
       end
 
       def minimum(column_name)
+        return aggregate_by_group(:minimum, column_name) if group_columns.any?
+
         aggregate_values(column_name).min
       end
 
       def maximum(column_name)
+        return aggregate_by_group(:maximum, column_name) if group_columns.any?
+
         aggregate_values(column_name).max
+      end
+
+      private def aggregate_by_group(operation, column_name)
+        @records.group_by do |record|
+          values = group_columns.map { |column| record.read_attribute(column) }
+          values.size == 1 ? values.first : values
+        end.transform_values do |records|
+          self.class.new(model_class, records).public_send(operation, column_name)
+        end
       end
 
       def calculate(operation, column_name = nil)
@@ -833,6 +935,15 @@ module Lyra
       def method_missing(method_name, *args, **kwargs, &block)
         return bulk_mutate(method_name, *args, **kwargs) if BULK_MUTATION_METHODS.include?(method_name)
         return insert_through_table(method_name, *args, **kwargs) if INSERT_METHODS.include?(method_name)
+
+        # A class attribute (class_attribute :x defines x and x=) holds
+        # configuration, not a query: answer it, as a relation delegates it to
+        # its class. Scope lambdas read them (discard's with_discarded reads
+        # discard_column; Solidus's variant.prices uses it).
+        if args.empty? && kwargs.empty? && block.nil? && !method_name.to_s.end_with?("=", "!", "?") &&
+           model_class.respond_to?(method_name) && model_class.respond_to?(:"#{method_name}=")
+          return model_class.public_send(method_name)
+        end
 
         # Try to delegate to model class scopes
         if model_class.respond_to?(method_name)
@@ -1086,6 +1197,12 @@ module Lyra
 
       def matches_value?(record, key, value)
         record_value = record.send(key)
+        # A record, or a relation of records, stands for its primary key, as in
+        # ActiveRecord: where(variant_id: [variant]) matched nothing, and
+        # Solidus's stock check found no stock under ES-NoProj.
+        value = value.to_a if value.is_a?(CachedRelation) || value.is_a?(ActiveRecord::Relation)
+        value = value.id if value.is_a?(ActiveRecord::Base)
+        value = value.map { |v| v.is_a?(ActiveRecord::Base) ? v.id : v } if value.is_a?(Array)
 
         case value
         when Array
