@@ -142,7 +142,7 @@ module Lyra
           models.each { |model| imported += Lyra::Genesis.import_all(model) }
         end
         if LAGGING.include?(from)
-          Lyra::Projections::LazyProjection.catch_up! if from == "event_sourcing/lazy"
+          Lyra::Projections::LazyProjection.catch_up!(force: true) if from == "event_sourcing/lazy"
           rebuilt = models.sum { |model| Lyra::Projections::Rebuild.rebuild(model)[:records] } if rebuild
         end
 

@@ -109,8 +109,11 @@ module PetriFlow
     # @param terminal_places [Array<Symbol>] Places whose marking means the
     #   net has finished; liveness[:terminates_properly] is deadlock-freedom
     #   except at markings that mark one of them.
+    # The analysis fires transitions to explore the state space; the net's
+    # marking is restored afterwards, so verifying a net does not change it.
     def verify(net, initial_marking: nil, pt_abstraction: false, terminal_places: [])
-      initial_marking ||= net.current_marking
+      marking_before = net.current_marking
+      initial_marking ||= marking_before
 
       reachability = Verification::ReachabilityAnalyzer.new(net, initial_marking, pt_abstraction: pt_abstraction)
       reachability.analyze
@@ -123,6 +126,8 @@ module PetriFlow
         boundedness: boundedness.report,
         liveness: liveness.report
       }
+    ensure
+      net.set_marking(marking_before) if marking_before
     end
 
     # Quick simulation

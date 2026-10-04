@@ -98,13 +98,12 @@ This script:
 2. **Parses Lyra implementation files**:
    - `lib/lyra/interceptors/crud_interceptor.rb`
    - `lib/lyra/command_handler.rb`
-   - `lib/lyra/event_mapper.rb`
    - `lib/lyra/aggregate.rb`
 3. **Matches formal elements to implementation**:
    - Places → Implementation components
    - Transitions → Handler methods
    - Guards → Pattern matching
-   - Arc expressions → EventMapper
+   - Arc expressions → event construction (`CommandHandler#create_event`, `CrudInterceptor#publish_event`)
 4. **Verifies structural isomorphism**
 
 Output (trimmed):
@@ -121,7 +120,7 @@ Output (trimmed):
 | T_map (T_create ∪ T_update ∪ T_delete) | handle_create/update/destroy | ✓ MATCH  |
 | t_apply                        | aggregate.apply()         | ✓ MATCH  |
 | Guards G(T_x)                  | Commands::*Command pattern matching | ✓ MATCH  |
-| Arc expression E(T_x)          | EventMapper.to_event      | ✓ MATCH  |
+| Arc expression E(T_x)          | CommandHandler#create_event, CrudInterceptor#publish_event | ✓ MATCH  |
 ----------------------------------------------------------------------
 
 ⚠ Mismatches found:

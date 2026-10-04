@@ -38,12 +38,10 @@ reads from the running application is:
 - the monitored models (`Lyra.config.monitored_models`), with their table,
   event prefix and ActiveRecord callback chains
 - the event classes defined under `Lyra::Events`
-- callback names for the lifecycle net, which it looks for in a
-  `Lyra::Monitorable` module and a `lib/lyra/monitorable.rb` file. Neither
-  exists in the current code (the callbacks are registered by
-  `monitor_with_lyra`), so this step finds nothing and the lifecycle
-  transitions use the default triggers `after_create`, `after_update` and
-  `after_destroy`.
+It does not read Lyra's own callback names: those are registered by
+`monitor_with_lyra` (`Lyra::Interceptors::CrudInterceptor`), and the
+lifecycle net's transitions use the triggers `after_create`, `after_update`
+and `after_destroy`.
 
 For the CRUD-to-event mapping check that runs the full set of nets, see
 [Other Verification Nets](#other-verification-nets).

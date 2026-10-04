@@ -8,7 +8,6 @@ module Lyra
 
     def test_default_configuration
       assert_equal :monitor, @config.mode
-      assert_equal :rails_event_store, @config.event_backend
       refute @config.hijack_enabled
       assert_equal [], @config.monitored_models
     end
@@ -16,11 +15,6 @@ module Lyra
     def test_configure_event_store
       @config.event_store = :custom_store
       assert_equal :custom_store, @config.event_store
-    end
-
-    def test_configure_event_backend
-      @config.event_backend = :custom_backend
-      assert_equal :custom_backend, @config.event_backend
     end
 
     def test_monitor_mode_detection

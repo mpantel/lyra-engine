@@ -47,7 +47,7 @@ seven configurations:
 
 ## Requirements and installation
 
-- Ruby >= 3.4.5, Rails >= 8.0, `rails_event_store` ~> 3.0 (from `lyra.gemspec`).
+- Ruby >= 4.0, Rails >= 8.0, `rails_event_store` ~> 3.0 (from `lyra.gemspec`).
 - PostgreSQL. Lyra depends on the `pg` gem; the advisory locks behind Genesis
   and ES-Lazy, and id reservation in Hijack mode, need PostgreSQL.
 

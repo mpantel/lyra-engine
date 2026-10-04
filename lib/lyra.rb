@@ -1,5 +1,9 @@
 require "lyra/version"
 require "rails_event_store"
+# Lyra builds on these at load time (jobs, ActiveRecord errors); require them
+# rather than rely on the host application having loaded rails/all first.
+require "active_record"
+require "active_job"
 require "lyra/optional_dependency"
 
 # PAM DSL is optional - required for privacy features
@@ -31,7 +35,6 @@ require "lyra/correlation"
 require "lyra/event"
 require "lyra/event_store_adapter"
 require "lyra/event_serializer"
-require "lyra/event_mapper"
 require "lyra/projection"
 require "lyra/temporal"
 require "lyra/domain_events"
@@ -48,6 +51,7 @@ require "lyra/id_generator"
 
 # Strict data access (prevents callback-bypassing operations)
 # Loaded before projections because projections use bypass methods
+require "lyra/advisory_lock"
 require "lyra/bypass_events"
 require "lyra/strict_data_access"
 

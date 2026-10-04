@@ -60,8 +60,11 @@ module Lyra
         end
 
         # Apply every event not yet in the tables. Returns the number applied.
-        def catch_up!
-          return 0 unless active?
+        # Only while ES-Lazy is the current configuration, unless +force+: the
+        # mode check catches the tables up before leaving ES-Lazy, and the
+        # process running it may already be configured for the target mode.
+        def catch_up!(force: false)
+          return 0 unless force || active?
           return 0 if Thread.current[:lyra_lazy_catching_up]
 
           Thread.current[:lyra_lazy_catching_up] = true
@@ -199,9 +202,7 @@ module Lyra
         end
 
         def lock!(connection)
-          return unless connection.adapter_name.match?(/postgres/i)
-
-          connection.execute("SELECT pg_advisory_xact_lock(hashtext(#{connection.quote(LOCK)}))")
+          Lyra::AdvisoryLock.xact_lock(connection, LOCK, purpose: "ES-Lazy catch-up")
         end
 
         def save_checkpoint(connection, position, gaps)

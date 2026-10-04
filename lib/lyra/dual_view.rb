@@ -63,12 +63,13 @@ module Lyra
       # record that no longer exists, as Lyra::ModeTransition.compare reads
       # it: a destroyed record whose row is gone compares clean, and one
       # whose row survives is an existence mismatch. state keeps the last
-      # state the events gave the record.
+      # state the events gave the record. A stream with no replayed event at
+      # all (only replay: false domain events) describes no record either.
       replayed = events.select { |e| Lyra::Event.operation_of(e) }
       destroyed = replayed.any? && Lyra::Event.operation_of(replayed.last) == :destroyed
 
       {
-        exists: !destroyed,
+        exists: replayed.any? && !destroyed,
         destroyed: destroyed,
         state: state,
         events_count: events.count,

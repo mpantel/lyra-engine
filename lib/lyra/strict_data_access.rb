@@ -225,9 +225,11 @@ module Lyra
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
       if Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
-        raise ArgumentError, "upsert_all can't be used in event sourcing mode with projections disabled: " \
-                             "its ON CONFLICT check runs against the table, not the event stream. " \
-                             "Use find_or_initialize_by(...).update!(...) per record."
+        raise Lyra::Projections::UnsupportedQuery.new(
+          klass,
+          "upsert_all (its ON CONFLICT check runs against the table, not the event stream; " \
+          "use find_or_initialize_by(...).update!(...) per record)"
+        )
       end
 
       rows = Array(attributes).map { |row| row.to_h.transform_keys(&:to_s) }

@@ -284,9 +284,10 @@ module Lyra
       Lyra.config.mode = :event_sourcing
       Lyra.config.projection_mode = :disabled
 
-      error = assert_raises(ArgumentError) do
+      error = assert_raises(Lyra::Projections::UnsupportedQuery) do
         BypassTestUser.upsert_all([{ email: "bypass-es@example.com", name: "ES" }], unique_by: :email)
       end
+      assert_match(/upsert_all/, error.message)
       assert_match(/ON CONFLICT/, error.message)
     end
 

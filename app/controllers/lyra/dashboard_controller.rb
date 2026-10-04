@@ -84,7 +84,6 @@ module Lyra
         @model_configs[model_class.name] = {
           event_prefix: config.event_prefix,
           aggregate_class: config.aggregate_class,
-          command_handler: config.command_handler,
           privacy_policy: config.privacy_policy
         }
       end

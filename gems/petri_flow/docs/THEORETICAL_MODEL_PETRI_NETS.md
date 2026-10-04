@@ -885,7 +885,7 @@ trans T_CREATE
 | Code Element | CPN Element | Description |
 |--------------|-------------|-------------|
 | `Lyra::Interceptors::CrudInterceptor#lyra_intercept_*` | Transition T_CREATE/UPDATE/DELETE | CRUD operation detection |
-| `Lyra::EventMapper.map_operation` | Arc expression | CRUD → Event transformation |
+| `Lyra::CommandHandler#create_event`, `Lyra::Interceptors::CrudInterceptor#publish_event` (both through `Lyra::DomainEvents.build`) | Arc expression | CRUD → Event transformation |
 | `Lyra::Event` | Token color EventToken | Event data structure |
 | `Lyra::Privacy::PIIDetector.detect` | Transition T_DETECT | PII identification |
 | `Lyra::Privacy::PolicyIntegration` | Guard on T_ENFORCE | Privacy policy application |

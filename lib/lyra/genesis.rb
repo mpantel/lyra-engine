@@ -173,9 +173,7 @@ module Lyra
       end
 
       def lock!(connection, model_class)
-        return unless connection.adapter_name.match?(/postgres/i)
-
-        connection.execute("SELECT pg_advisory_xact_lock(hashtext(#{connection.quote("lyra_genesis/#{model_class.name}")}))")
+        Lyra::AdvisoryLock.xact_lock(connection, "lyra_genesis/#{model_class.name}", purpose: "Genesis")
       end
     end
   end

@@ -25,6 +25,18 @@ module PetriFlow
         net
       end
 
+      # The analysis fires transitions as it explores; verify restores the
+      # marking the net had, so verifying a net does not move its tokens.
+      def test_verify_leaves_the_net_marking_as_it_was
+        net = pipeline
+        before = net.places.transform_values(&:tokens)
+
+        PetriFlow.verify(net, terminal_places: [:p_aggregate])
+
+        assert_equal before, net.places.transform_values(&:tokens)
+        assert_equal 1, net.places[:p_crud].tokens
+      end
+
       def test_plain_deadlock_freedom_counts_the_intended_end_as_a_deadlock
         liveness = PetriFlow.verify(pipeline)[:liveness]
 

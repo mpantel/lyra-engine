@@ -951,19 +951,25 @@ inventory = PamDsl::PIIDetector.extract_pii_from_records(
 
 **Return Value Structure**:
 
-The method returns a hash grouped by PII type:
+The method returns a hash grouped by PII type; each entry also carries the
+metadata the `metadata_extractor` returned (here `event_id`):
 
 ```ruby
 {
   email: [
     { field: :email, value: "alice@example.com", pii_type: :email,
-      sensitivity: :confidential, event_id: "evt-1", ... },
-    { field: :contact_email, value: "bob@example.com", ... }
+      sensitivity: :confidential, event_id: "evt-1" },
+    { field: :contact_email, value: "bob@example.com", pii_type: :email,
+      sensitivity: :confidential, event_id: "evt-2" }
   ],
   name: [
-    { field: :name, value: "Alice", pii_type: :name, sensitivity: :internal, ... }
+    { field: :name, value: "Alice", pii_type: :name, sensitivity: :internal,
+      event_id: "evt-1" }
   ],
-  phone: [...]
+  phone: [
+    { field: :phone, value: "+30 210 1234567", pii_type: :phone,
+      sensitivity: :confidential, event_id: "evt-1" }
+  ]
 }
 ```
 

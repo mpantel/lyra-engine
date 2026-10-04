@@ -6,7 +6,7 @@ Lyra is built as a Rails Engine with a modular architecture that enables both no
 
 ## Technology Stack
 
-- **Ruby**: 3.4.5+ (tested up to 4.0)
+- **Ruby**: 4.0+
 - **Rails**: 8.0+
 - **Rails Event Store**: Event persistence and stream management
 - **PostgreSQL**: Primary database backend
@@ -110,12 +110,13 @@ configuration, not a mode.
 - Dynamic event class creation
 - Event registry for tracking
 
-**EventMapper** (`lib/lyra/event_mapper.rb`)
-- Maps CRUD operations to domain events
-- Pluggable mapper system
-- Default mapper for standard behavior
-- Custom mappers for domain-specific logic
-- Namespaced model support (`Billing::Invoice` → `BillingInvoiceCreated`)
+**Event construction**
+- Monitor: `CrudInterceptor#build_event_data` and `#publish_event`
+- Hijack and event sourcing: `CommandHandler#create_event` and `#create_events`
+- Both hand the write's own event to `Lyra::DomainEvents.build`, which
+  renames it or adds events by the model's `domain_events:` rules
+- Event names from `event_prefix:` / `event_mapping:`; namespaced model
+  support (`Billing::Invoice` → `BillingInvoiceCreated`)
 
 **Event Structure:**
 ```ruby
@@ -166,22 +167,17 @@ configuration, not a mode.
 
 ### Layer 4: Storage Layer
 
-**EventStoreAdapter** (`lib/lyra/event_store_adapter.rb`)
-- Abstraction over event storage
-- Primary: Rails Event Store with PostgreSQL
-- Alternative: SQLite for small deployments
-- Pluggable: Custom adapters supported
-
-**RailsEventStoreAdapter**
-- Uses `RailsEventStore::Client`
+**Event store** (`config.event_store`, a `RailsEventStore::Client`)
+- Lyra uses the client directly; every event is appended through
+  `Lyra.append_events` (`lib/lyra/event_store_adapter.rb`), which raises
+  `Lyra::EventStoreUnavailableError` when the store fails
 - Stores events in `event_store_events` table
 - Maintains stream positions in `event_store_events_in_streams`
-- YAML serialization (configurable)
+- Serialization is the client's (configurable)
 
 **Stream Organization:**
-- One stream per aggregate: `"ModelClass-{id}"`
+- One stream per record: `"#{model_class}$#{id}"`
 - Events appended in order
-- Stream name format: `"#{model_class}-#{id}"`
 
 ### Layer 5: Query Layer
 
@@ -307,9 +303,9 @@ ActiveRecord CRUD Operation
     └─→ after_* callback
         └─→ CrudInterceptor
             └─→ build_event_data
-                └─→ EventMapper
+                └─→ publish_event (Lyra::DomainEvents.build)
                     └─→ Event created
-                        └─→ EventStore.publish
+                        └─→ Lyra.append_events
                             └─→ event_store_events table
                                 └─→ Projections updated (if subscribed)
 ```
@@ -364,7 +360,6 @@ DualView.compare(ModelClass, id)
 - Per-model settings
 - Custom event prefixes
 - Custom aggregate classes
-- Custom command handlers
 - Event name mapping
 
 ## Database Schema
@@ -400,16 +395,14 @@ See `examples/aegean_epay_testbed/db/migrate/*` for complete schema.
 
 ## Extensibility Points
 
-### 1. Custom Event Mappers
+### 1. Event Names and Domain Events
 
 ```ruby
-class CustomMapper < Lyra::EventMapper
-  def event_data
-    super.merge(custom_field: calculate_custom_data)
-  end
-end
-
-Lyra::EventMapper.register_mapper(MyModel, CustomMapper)
+MyModel.monitor_with_lyra(
+  event_mapping: { created: "MyModelOpened" },
+  domain_events: [{ name: "MyModelClosed", on: :update,
+                    if: ->(record, changes) { changes.key?("closed_at") } }]
+)
 ```
 
 ### 2. Custom Aggregates
@@ -442,18 +435,15 @@ end
 MyProjection.subscribe_to(MyEvent)
 ```
 
-### 4. Custom Event Store
+### 4. Event Store Client
 
 ```ruby
-class MyEventStore < Lyra::CustomEventStoreAdapter
-  def publish(event, stream_name:)
-    # Custom implementation
-  end
-end
-
 Lyra.configure do |config|
-  config.event_backend = :custom
-  config.event_store = MyEventStore.new
+  config.event_store = RailsEventStore::Client.new(
+    repository: RubyEventStore::ActiveRecord::EventRepository.new(
+      serializer: RubyEventStore::Serializers::YAML
+    )
+  )
 end
 ```
 

@@ -61,14 +61,9 @@ module Lyra
 
       private
 
-      # Serialise projection of one stream across workers. A PostgreSQL
-      # transaction-level advisory lock is released at commit. Other adapters
-      # get no lock; SQLite serialises writers anyway.
+      # Serialise projection of one stream across workers (Lyra::AdvisoryLock).
       def lock_stream!(model_class, stream)
-        connection = model_class.connection
-        return unless connection.adapter_name.match?(/postgres/i)
-
-        connection.execute("SELECT pg_advisory_xact_lock(hashtext(#{connection.quote(stream)}))")
+        Lyra::AdvisoryLock.xact_lock(model_class.connection, stream, purpose: "ES-Async projection")
       end
 
       def load_event(event_id)

@@ -58,4 +58,22 @@ class DualViewDestroyedTest < Minitest::Test
     assert_equal false, comparison[:event_sourced_view][:destroyed]
     assert_equal({ no_differences: true }, comparison[:differences])
   end
+
+  # Only replay: false events (domain events emitted alongside a write) say
+  # nothing about the record's existence, as ModeTransition.compare reads it.
+  def test_a_stream_of_only_unreplayed_events_describes_no_record
+    id = 987_654
+    Lyra.config.event_store.publish(
+      RubyEventStore::Event.new(data: { replay: false, payload: { note: "domain only" } }),
+      stream_name: "User$#{id}"
+    )
+
+    comparison = Lyra::DualView.new(::User, id).compare
+
+    assert_equal false, comparison[:event_sourced_view][:exists]
+    assert_equal false, comparison[:event_sourced_view][:destroyed]
+    assert_equal({ no_differences: true }, comparison[:differences])
+  ensure
+    Lyra.config.event_store.delete_stream("User$#{id}") rescue nil
+  end
 end

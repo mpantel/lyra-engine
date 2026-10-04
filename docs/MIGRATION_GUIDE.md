@@ -13,10 +13,11 @@ mode switch mechanism is in [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
 
 ## Prerequisites
 
-- Ruby 3.4.5 or later, Rails 8.0 or later.
+- Ruby 4.0 or later, Rails 8.0 or later.
 - PostgreSQL. Lyra depends on the `pg` gem, and several features rely on
   PostgreSQL: the advisory locks that keep Genesis and ES-Lazy correct under
-  concurrency (on other databases the lock is skipped), and safe id
+  concurrency (SQLite needs none; on other databases the step runs unlocked and
+  Lyra logs a warning that it is safe in a single process only), and safe id
   reservation in Hijack mode (integer keys backed by a PostgreSQL sequence;
   elsewhere Hijack falls back to a placeholder id with a warning).
 - RailsEventStore 3 (`rails_event_store ~> 3.0`, pulled in by Lyra).
@@ -335,7 +336,7 @@ until the job runs, so `find` right after `create!` can raise
 aggregates) rebuild records from their streams, cached in `Rails.cache`, and
 evaluate the query in Ruby. Queries it cannot answer exactly (SQL fragments,
 merged relations, some joins) raise `Lyra::Projections::UnsupportedQuery`
-rather than return a wrong answer; `upsert_all` raises `ArgumentError`. It is
+rather than return a wrong answer, `upsert_all` among them. It is
 the slowest way to read, and its cost grows with the log. Use it for audit and
 replay, or code that reads through simple finders, rather than to serve an
 application's reads.

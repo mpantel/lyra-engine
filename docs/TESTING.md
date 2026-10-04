@@ -241,8 +241,8 @@ directories are gitignored.
 ## Continuous Integration
 
 `.github/workflows/test.yml` runs on pushes and pull requests to `master`. It
-runs `bundle exec rake test:all` on Ruby 3.4 (the gemspec's floor is 3.4.5)
-and Ruby 4.0 (the project's `.ruby-version`), against a PostgreSQL 16 service
+runs `bundle exec rake test:all` on Ruby 4.0 (the gemspecs' floor; the project
+runs 4.0.7 from `.ruby-version`), against a PostgreSQL 16 service
 on port 5433 with the `lyra_test` database, and uploads the JUnit XML reports
 as artifacts.
 

@@ -79,7 +79,6 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `mode` | `:monitor` | `:disabled`, `:monitor`, `:hijack` or `:event_sourcing`. The raw setter: no gate, no record (see [Modes and transitions](#modes-and-transitions)). |
 | `projection_mode` | `:sync` | Event sourcing only: `:sync`, `:async`, `:disabled` (ES-NoProj) or `:lazy` (ES-Lazy). |
 | `event_store` | `nil` | The RailsEventStore client. Set by the engine at boot if still `nil`. Also `Lyra.event_store` / `Lyra.event_store=`. |
-| `event_backend` | `:rails_event_store` | Read only by `Lyra::EventStoreAdapter.build`; the engine does not use it. |
 | `hijack_enabled` | `false` | Set by the mode helpers. When true, `hijack_mode?` is true whatever `mode` says. |
 | `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of every event a monitored record's write produces, in every mode. A proc that raises is logged and skipped. |
 | `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. |
@@ -145,7 +144,6 @@ end
 | `event_prefix` | model name | Prefix of generated event names: `"#{prefix}Created"`, `Updated`, `Destroyed`, `Imported`. |
 | `event_mapping` | `{}` | Event name per operation, overriding the prefix: keys `:created`, `:updated`, `:destroyed`, `:imported`. |
 | `aggregate_class` | `nil` (uses `Lyra::GenericAggregate`) | Aggregate used by the command handler in Hijack and event-sourcing modes. See [Commands and aggregates](#commands-and-aggregates). |
-| `command_handler` | `nil` | Stored in the model configuration and shown on the dashboard. The write path always uses `Lyra::CommandHandler`. |
 | `privacy_policy` | `nil` (falls back to `config.privacy_policy`) | Name of the privacy policy that covers the model. |
 | `domain_events` | `[]` | Domain event rules; see below. |
 
@@ -501,7 +499,7 @@ checkpoint lives in `lyra_projection_checkpoints`, created on first use.
 
 | Method | Description |
 |---|---|
-| `LazyProjection.catch_up!` | Apply every pending event now. Returns the number applied. |
+| `LazyProjection.catch_up!(force: false)` | Apply every pending event now. Returns the number applied. Outside ES-Lazy it returns 0 unless `force: true` (as `ModeTransition.to!` passes when leaving ES-Lazy). |
 | `LazyProjection.checkpoint` | `[position, { gap_id => first_seen_epoch }]`. |
 | `LazyProjection.reset!` | Forget the checkpoint (after truncating or rebuilding tables). |
 | `LazyProjection.active?` | Whether ES-Lazy is the current configuration. |
@@ -572,7 +570,7 @@ view.compare
 |---|---|
 | `compare` | Both views and the differences (`{ no_differences: true }`, `{ exists_mismatch: true }`, or `{ attr: { crud:, event_sourced: } }`). A destroyed record whose row is gone compares clean; one whose row remains is an `exists_mismatch`. `created_at`/`updated_at` are ignored; times compare at microseconds. |
 | `crud_state` | `{ exists:, attributes:, timestamps: }` |
-| `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. |
+| `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. A stream of only `replay: false` events has `exists: false`. |
 | `audit_trail` | `AuditProjection.audit_trail` for the record. |
 | `DualView.compare_all(model)` | `compare` for every existing row. |
 | `DualView.find_discrepancies(model)` | Those with differences. |

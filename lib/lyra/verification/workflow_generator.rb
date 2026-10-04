@@ -99,63 +99,10 @@ module Lyra
           destroy: []
         }
 
-        # Introspect the Lyra::Monitorable module for callback definitions
-        if defined?(Lyra::Monitorable)
-          monitorable = Lyra::Monitorable
-
-          # Check instance methods for callback patterns
-          if monitorable.respond_to?(:instance_methods)
-            methods = monitorable.instance_methods(false)
-
-            methods.each do |method_name|
-              name = method_name.to_s
-              if name.include?('create')
-                @analysis[:callbacks][:create] << method_name
-              elsif name.include?('update')
-                @analysis[:callbacks][:update] << method_name
-              elsif name.include?('destroy')
-                @analysis[:callbacks][:destroy] << method_name
-              end
-            end
-          end
-
-          # Check for callback registrations in ClassMethods
-          if monitorable.const_defined?(:ClassMethods)
-            class_methods = monitorable::ClassMethods.instance_methods(false)
-            @analysis[:class_methods] = class_methods
-          end
-        end
-
-        # Analyze the actual callback hooks from ActiveSupport
-        @analysis[:callback_hooks] = extract_callback_hooks
-      end
-
-      # Extract callback hook information from Lyra source
-      def extract_callback_hooks
-        hooks = { before: [], after: [] }
-
-        # Find Lyra gem root from the loaded gem spec
-        lyra_root = Gem.loaded_specs['lyra']&.gem_dir
-        lyra_root ||= File.expand_path('../../../..', __FILE__)
-
-        # Look for callback definitions in Monitorable
-        monitorable_file = File.join(lyra_root, 'lib', 'lyra', 'monitorable.rb')
-
-        if File.exist?(monitorable_file)
-          content = File.read(monitorable_file)
-
-          # Find after_* callbacks
-          content.scan(/after_(create|update|destroy|commit|save)\s+:(\w+)/) do |type, method|
-            hooks[:after] << { type: type, method: method }
-          end
-
-          # Find before_* callbacks
-          content.scan(/before_(create|update|destroy|save)\s+:(\w+)/) do |type, method|
-            hooks[:before] << { type: type, method: method }
-          end
-        end
-
-        hooks
+        # Lyra's callbacks are installed by Lyra::Interceptors::CrudInterceptor,
+        # which this analysis does not introspect: the lists stay empty and the
+        # generated workflow names the generic after_* hooks.
+        @analysis[:callback_hooks] = { before: [], after: [] }
       end
 
       # Analyze monitored models

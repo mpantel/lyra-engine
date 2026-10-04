@@ -102,22 +102,18 @@ aggregate = OrderAggregate.load(order_id)
 # => OrderAggregate instance with state rebuilt from events
 
 # ============================================
-# 6. CUSTOM EVENT MAPPING
+# 6. CUSTOM EVENT NAMES AND METADATA
 # ============================================
 
-# Register a custom event mapper
-class OrderEventMapper < Lyra::EventMapper
-  def event_data
-    super.merge(
-      order_specific_data: {
-        total: data[:attributes]['total'],
-        items_count: data[:attributes]['items_count']
-      }
-    )
-  end
-end
+# Name the events per operation (the default is "#{prefix}Created" etc.)
+Order.monitor_with_lyra(
+  event_mapping: { created: "OrderPlaced", updated: "OrderChanged", destroyed: "OrderCancelled" }
+)
 
-Lyra::EventMapper.register_mapper(Order, OrderEventMapper)
+# Add context to the metadata of every event a monitored record's write produces
+Lyra.configure do |config|
+  config.metadata_proc = ->(_record, _operation) { { user_id: Current.user&.id } }
+end
 
 # ============================================
 # 7. DASHBOARD API
@@ -193,21 +189,11 @@ if discrepancies.empty?
 end
 
 # ============================================
-# 10. PLUGGABLE EVENT BACKEND
+# 10. EVENT STORE CLIENT
 # ============================================
 
-# Use custom event store
-class MyCustomEventStore < Lyra::CustomEventStoreAdapter
-  def publish(event, stream_name:)
-    # Custom implementation
-  end
-
-  def read_stream(stream_name)
-    # Custom implementation
-  end
-end
-
+# Lyra writes to the RailsEventStore client in config.event_store (the engine
+# sets a default one at boot if it is still nil)
 Lyra.configure do |config|
-  config.event_backend = :custom
-  config.event_store = MyCustomEventStore.new
+  config.event_store = RailsEventStore::Client.new
 end

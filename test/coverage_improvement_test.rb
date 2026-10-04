@@ -4,66 +4,9 @@ require "test_helper"
 require "bigdecimal"
 
 # Tests to improve coverage of key files for IEEE TSE paper
-# Targets: event_mapper.rb, aggregate.rb, dual_view.rb, crud_interceptor.rb
+# Targets: aggregate.rb, dual_view.rb, crud_interceptor.rb
 
 module Lyra
-  # ==========================================================================
-  # EventMapper Coverage Tests
-  # ==========================================================================
-  class EventMapperCoverageTest < Minitest::Test
-    def setup
-      @event_store = RailsEventStore::Client.new
-      Lyra.configure do |config|
-        config.event_store = @event_store
-        config.mode = :monitor
-      end
-    end
-
-    def teardown
-      Lyra.reset_config!
-      # Clear registered mappers
-      EventMapper.instance_variable_set(:@mappers, {})
-    end
-
-    # Test register_mapper method (line 14)
-    def test_register_mapper_stores_custom_mapper
-      custom_mapper = Class.new(EventMapper)
-      model_class = Class.new
-      model_class.define_singleton_method(:name) { "CustomModel" }
-
-      EventMapper.register_mapper(model_class, custom_mapper)
-
-      # Verify mapper is registered by using it
-      Lyra.config.monitor_model(model_class)
-      data = { id: 1, attributes: { name: "test" }, changes: {} }
-      event = EventMapper.map_operation(model_class, :create, data)
-
-      assert event.is_a?(Lyra::Event)
-    end
-
-    # Test AuditMapper class (line 98)
-    def test_audit_mapper_includes_audit_info
-      model_class = Class.new
-      model_class.define_singleton_method(:name) { "AuditedModel" }
-      Lyra.config.monitor_model(model_class)
-
-      data = {
-        id: 1,
-        attributes: { name: "test" },
-        changes: {},
-        ip_address: "192.168.1.1",
-        user_agent: "Mozilla/5.0"
-      }
-
-      mapper = AuditMapper.new(model_class, :create, data)
-      event_data = mapper.event_data
-
-      assert event_data[:audit_info]
-      assert_equal "192.168.1.1", event_data[:audit_info][:ip_address]
-      assert_equal "Mozilla/5.0", event_data[:audit_info][:user_agent]
-    end
-  end
-
   # ==========================================================================
   # Aggregate Coverage Tests
   # ==========================================================================

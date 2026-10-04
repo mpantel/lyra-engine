@@ -9,7 +9,7 @@ covered by [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md), and every option by
 
 ## Requirements
 
-- Ruby 3.4.5 or later and Rails 8.0 or later (from `lyra.gemspec`).
+- Ruby 4.0 or later and Rails 8.0 or later (from `lyra.gemspec`).
 - RailsEventStore 3 (`rails_event_store ~> 3.0`), pulled in by Lyra.
 - PostgreSQL. Lyra depends on the `pg` gem. Genesis and ES-Lazy take
   PostgreSQL advisory locks to stay correct under concurrency, and Hijack

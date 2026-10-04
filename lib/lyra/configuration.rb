@@ -7,7 +7,7 @@ module Lyra
     PROJECTION_MODES = [:sync, :async, :disabled, :lazy].freeze
 
     attr_reader :mode, :projection_mode
-    attr_accessor :event_store, :event_backend, :hijack_enabled, :retention_policy
+    attr_accessor :event_store, :hijack_enabled, :retention_policy
     attr_accessor :strict_projections, :projection_error_handler, :async_projections_inline
     attr_accessor :strict_schema, :schema_path
     attr_accessor :strict_data_access  # Raise on callback-bypassing operations
@@ -62,7 +62,6 @@ module Lyra
 
     def initialize
       @mode = :monitor
-      @event_backend = :rails_event_store
       @hijack_enabled = false
       @monitored_models = []
       @model_configs = {}
@@ -255,7 +254,7 @@ module Lyra
   end
 
   class ModelConfiguration
-    attr_accessor :event_prefix, :aggregate_class, :command_handler, :privacy_policy
+    attr_accessor :event_prefix, :aggregate_class, :privacy_policy
     # The model's domain event rules (Lyra::DomainEvents), from its
     # domain_events option.
     attr_reader :model_class, :domain_events
@@ -264,7 +263,6 @@ module Lyra
       @model_class = model_class
       @event_prefix = options[:event_prefix] || model_class.name
       @aggregate_class = options[:aggregate_class]
-      @command_handler = options[:command_handler]
       @custom_event_mapping = options[:event_mapping] || {}
       @privacy_policy = options[:privacy_policy]
       @domain_events = Lyra::DomainEvents.rules(options[:domain_events])

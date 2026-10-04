@@ -336,7 +336,7 @@ The measured overhead of each configuration is in [PERFORMANCE.md](PERFORMANCE.m
 
 ### Core technologies
 
-- **Ruby**: 3.4.5 or later (CI runs 3.4 and 4.0)
+- **Ruby**: 4.0 or later
 - **Rails**: 8.0 or later
 - **RailsEventStore**: `~> 3.0`
 - **PostgreSQL**: the supported database (`pg` gem)
