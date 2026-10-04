@@ -5,6 +5,23 @@ All notable changes to PAM DSL will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **One PII dictionary; detection fixed on a foreign codebase** — `PolicyGenerator` kept its own
+  exact-name patterns and exclusions, separate from `PIIDetector`'s; on Solidus 4.7 the
+  generator found 6 of 26 personal columns and flagged an order's state machine as an address.
+  The generator now detects with `PIIDetector` (its `PII_PATTERNS` and `EXCLUDE_PATTERNS` are
+  gone), scans each table's real columns (a column the model ignores is reported, and the
+  generated policy says the application cannot see or erase it), and counts a bare `name` only
+  in a model that holds other personal data (a product's or a payment plan's name is not a
+  person's). The detector gained `address1`/`address2`, `zipcode`/`postcode`, `state_name`, any
+  `*_ip`, `last_digits`/`last4`, `login`/`username` (an `:identifier`), `bic`/`swift`/account
+  numbers, `birth_date`, and a person's account and session tokens and credentials (password
+  hashes and salts, remember/confirmation/reset/unlock/guest tokens), which the `encrypted_` and
+  `_token` exclusions used to drop; names match name forms and the names of people in a role
+  (`debtor_name`, `approver_name`), not every `*_name`. New exclusions: foreign keys (`*_id`,
+  except identifiers such as `vat_id`, `customer_national_id`), `*_iso`, `*_message`, `*_reason`,
+  `*_notes`; a bare `state` and `rest_income_budget` are no longer personal. On Solidus: 24 of
+  26; on the Aegean testbed: 29 fields (27 personal) where the old generator reported 18; on the
+  labelled evaluation dataset: recall 99.1% (was 97.4%), precision 98.3% (was 98.2%).
 - **Access recorder** (`PamDsl.access_recorder`, `Enforcement::Access`): every
   `validate_access!` call, whatever its outcome, is passed to the recorder before it returns or
   raises, as an `Access` (policy, purpose, legal basis, fields, subject, outcome `:granted`,

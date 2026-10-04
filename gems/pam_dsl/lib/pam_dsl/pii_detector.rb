@@ -57,12 +57,30 @@ module PamDsl
       /\A(id|uuid)\z/i,   # Primary keys
       /\Ais_/i,           # Boolean flags: is_active
       /\Ahas_/i,          # Boolean flags: has_consent
-      /encrypted_/i,      # Already encrypted
-      /_digest\z/i,       # Hashes: password_digest
-      /_token\z/i,        # Tokens: auth_token
-      /_hash\z/i,         # Hashes: password_hash
+      /encrypted_/i,      # Already encrypted (but see PERSONAL_DESPITE_EXCLUSION)
+      /_digest\z/i,       # Hashes: file_digest
+      /_token\z/i,        # Tokens: csrf_token
+      /_hash\z/i,         # Hashes: content_hash
+      /_ids?\z/i,         # Foreign keys: user_id, bill_address_id, country_id
+      /_iso\d?\z/i,       # ISO codes: country_iso, currency_iso3
+      /_message\z/i,      # Gateway and system messages: cvv_response_message
+      /_reason\z/i,       # Reason text: cancellation_reason
+      /_notes?\z/i,       # Free-text notes
       /\A(created|updated|deleted|sent|received)_/i  # Prefixed timestamps
     ].freeze
+
+    # Personal data that an exclusion pattern above would otherwise drop:
+    # identifiers stored as *_id, credentials and the tokens that stand for a
+    # person's session or account. Credentials are personal data too: a
+    # password hash belongs to one person, and its exposure is a breach.
+    PERSONAL_DESPITE_EXCLUSION = /\A(
+      postal_code|zip_code|postcode|birth_date|dob_date|health_status|
+      (?:\w+_)?(?:face|national|vat|tax|passport)_id|
+      gateway_customer_profile_id|gateway_payment_profile_id|stripe_customer_id|paypal_account_id|
+      encrypted_password|password_digest|password_hash|password_salt|
+      (reset_password|remember|confirmation|unlock|authentication|auth|session|
+       guest|persistence|perishable)_token
+    )\z/ix
 
     # Exact match PII patterns (used when partial_match = false)
     # These are specific known field names for each PII type
@@ -80,12 +98,17 @@ module PamDsl
         sensitivity: :confidential
       },
       ip_address: {
-        pattern: /\A(ip|ip_address|remote_ip|client_ip|source_ip)\z/i,
+        pattern: /\A(ip|ip_address|remote_ip|client_ip|source_ip|last_ip_address|current_sign_in_ip|last_sign_in_ip|sign_in_ip)\z/i,
         sensitivity: :internal
       },
       address: {
-        pattern: /\A(address|street|city|state|province|country|postal|zip|postcode|postal_code|zip_code|address_line_?\d?|street_address|billing_address|shipping_address|home_address|work_address)\z/i,
+        pattern: /\A(address|address\d|street|city|state_name|province|country|postal|zip|zipcode|postcode|postal_code|zip_code|address_line_?\d?|street_address|billing_address|shipping_address|home_address|work_address)\z/i,
         sensitivity: :confidential
+      },
+      online_identifier: {
+        pattern: /\A(login|username|user_?name|screen_?name|nickname)\z/i,
+        sensitivity: :internal,
+        type: :identifier
       },
       identifier: {
         pattern: /\A(vat_number|vat_id|tax_id|tin|tax_number|vat_reg_number|afm|passport|passport_number|driver_license|drivers_license|license_number|id_number)\z/i,
@@ -100,7 +123,7 @@ module PamDsl
         sensitivity: :confidential
       },
       credit_card: {
-        pattern: /\A(credit_card|card_number|card_number_first\d|card_number_last\d|cvv|cvc|ccn)\z/i,
+        pattern: /\A(credit_card|card_number|card_number_first\d|card_number_last\d|cc_number|cvv|cvc|ccn|last_digits|last4|last_four|card_last4)\z/i,
         sensitivity: :restricted
       },
       financial: {
@@ -135,26 +158,40 @@ module PamDsl
 
     # Partial match PII patterns (used when partial_match = true)
     # These use boundary patterns to match field names containing PII keywords
-    # NOTE: Order matters - more specific patterns must come before general ones
+    # NOTE: Order matters - the first pattern that matches wins. IP addresses
+    # come before addresses (last_ip_address), addresses and online identifiers
+    # before names (state_name is an address), and tokens before credentials
+    # (reset_password_token is a token).
     PARTIAL_PII_PATTERNS = {
       email: {
-        pattern: /#{START_BOUNDARY}email#{END_BOUNDARY}/i,
+        pattern: /#{START_BOUNDARY}(e_?mail|mail_?(?:from_?)?address)#{END_BOUNDARY}/i,
         sensitivity: :confidential
       },
+      ip_address: {
+        # Any column ending in _ip (current_sign_in_ip, last_sign_in_ip).
+        pattern: /#{START_BOUNDARY}(ip_?[Aa]ddress|[Ii]p)#{END_BOUNDARY}/,
+        sensitivity: :internal
+      },
+      address: {
+        # address1/address2 and zipcode/postcode were missed (Solidus); a bare
+        # "state" is not matched (an order's state machine), "state_name" is.
+        pattern: /#{START_BOUNDARY}([Aa]ddress\d?|address_?[Ll]ine_?\d?|[Ss]treet|[Cc]ity|[Zz]ip(?:_?[Cc]ode)?|[Pp]ost_?[Cc]ode|[Pp]ostal(?:_?[Cc]ode)?|[Cc]ountry|[Pp]rovince|state_?[Nn]ame)#{END_BOUNDARY}/,
+        sensitivity: :confidential
+      },
+      online_identifier: {
+        # A login or username identifies a person online (Art. 4(1)).
+        pattern: /\A(login|username|user_?name|screen_?name|nickname)\z/i,
+        sensitivity: :internal,
+        type: :identifier
+      },
       name: {
-        pattern: /#{START_BOUNDARY}(first_?[Nn]ame|last_?[Nn]ame|full_?[Nn]ame|[Nn]ame)#{END_BOUNDARY}/,
+        # Name forms, and the names of people in a role; not every *_name
+        # (api_name, bank_name, file_name, product_name are not people's).
+        pattern: /#{START_BOUNDARY}((?:[Ff]irst|[Ll]ast|[Ff]ull|[Gg]iven|[Ff]amily|[Mm]iddle|[Mm]aiden|[Dd]isplay|[Ff]ather|[Mm]other|[Pp]arent|[Gg]uardian|[Ss]pouse|[Cc]ustomer|[Uu]ser|[Hh]older|card_?[Hh]older|account_?[Hh]older|[Oo]wner|[Cc]ontact|[Cc]reditor|[Dd]ebtor|[Rr]ecipient|[Ss]ender|[Pp]ayer|[Pp]ayee|[Bb]eneficiary|[Aa]pprover|[Aa]dmin|[Dd]eposit|[Ll]egal)_?[Nn]ame|[Ss]urname)#{END_BOUNDARY}|\A[Nn]ame#{END_BOUNDARY}/,
         sensitivity: :internal
       },
       phone: {
         pattern: /#{START_BOUNDARY}([Pp]hone|[Tt]elephone|[Mm]obile|[Cc]ell)#{END_BOUNDARY}/,
-        sensitivity: :confidential
-      },
-      ip_address: {
-        pattern: /#{START_BOUNDARY}(ip_?[Aa]ddress|remote_?[Ii]p|client_?[Ii]p|source_?[Ii]p)#{END_BOUNDARY}/,
-        sensitivity: :internal
-      },
-      address: {
-        pattern: /#{START_BOUNDARY}([Aa]ddress|[Ss]treet|[Cc]ity|[Zz]ip|[Pp]ostal|[Cc]ountry)#{END_BOUNDARY}/,
         sensitivity: :confidential
       },
       identifier: {
@@ -166,15 +203,17 @@ module PamDsl
         sensitivity: :restricted
       },
       date_of_birth: {
-        pattern: /#{START_BOUNDARY}([Bb]irth|[Dd]ob|[Bb]irthday|date_?[Oo]f_?[Bb]irth)#{END_BOUNDARY}/,
+        pattern: /#{START_BOUNDARY}([Bb]irth|[Dd]ob|[Bb]irthday|[Bb]irth_?[Dd]ate|date_?[Oo]f_?[Bb]irth)#{END_BOUNDARY}/,
         sensitivity: :confidential
       },
       credit_card: {
-        pattern: /#{START_BOUNDARY}(credit_?[Cc]ard|card_?[Nn]umber|[Cc]cn|[Cc]vv|[Cc]vc)#{END_BOUNDARY}/,
+        pattern: /#{START_BOUNDARY}(credit_?[Cc]ard|card_?[Nn]umber|cc_?[Nn]umber|[Cc]cn|[Cc]vv|[Cc]vc|last_?(?:[Dd]igits|4|[Ff]our)|card_?[Ll]ast_?4)#{END_BOUNDARY}/,
         sensitivity: :restricted
       },
       financial: {
-        pattern: /#{START_BOUNDARY}([Ss]alary|[Ii]ncome|bank_?[Aa]ccount|[Ii]ban)#{END_BOUNDARY}/,
+        # salary and income only as a whole name or its end (rest_income_budget
+        # is a budget).
+        pattern: /#{START_BOUNDARY}(bank_?[Aa]ccount(?:_?[Nn]umber)?|account_?[Nn]umber|routing_?[Nn]umber|[Ii]ban|[Bb]ic|[Ss]wift)#{END_BOUNDARY}|#{START_BOUNDARY}([Ss]alary|[Ii]ncome)\z/,
         sensitivity: :restricted
       },
       health: {
@@ -189,12 +228,14 @@ module PamDsl
         pattern: /#{START_BOUNDARY}([Ll]atitude|[Ll]ongitude|[Ll]ocation|[Gg]ps)#{END_BOUNDARY}/,
         sensitivity: :confidential
       },
-      credential: {
-        pattern: /#{START_BOUNDARY}([Pp]assword|[Ss]ecret|api_?[Kk]ey)#{END_BOUNDARY}/,
+      token: {
+        # A person's account and session tokens; access, refresh and bearer tokens
+        # are a service's credentials.
+        pattern: /#{START_BOUNDARY}((?:[Aa]uth|[Aa]uthentication|[Ss]ession|[Rr]emember|[Cc]onfirmation|[Uu]nlock|reset_?[Pp]assword|[Gg]uest|[Pp]ersistence|[Pp]erishable)_?[Tt]oken)#{END_BOUNDARY}/,
         sensitivity: :restricted
       },
-      token: {
-        pattern: /#{START_BOUNDARY}([Aa]uth_?[Tt]oken|[Ss]ession_?[Tt]oken|[Bb]earer_?[Tt]oken|[Aa]ccess_?[Tt]oken|[Rr]efresh_?[Tt]oken)#{END_BOUNDARY}/,
+      credential: {
+        pattern: /#{START_BOUNDARY}([Pp]assword|[Ss]ecret|api_?[Kk]ey)#{END_BOUNDARY}/,
         sensitivity: :restricted
       },
       payment_token: {
@@ -390,7 +431,7 @@ module PamDsl
         # Check each PII pattern
         pii_patterns.each do |type, config|
           if field_name.match?(config[:pattern])
-            return { type: type, sensitivity: config[:sensitivity] }
+            return { type: config[:type] || type, sensitivity: config[:sensitivity] }
           end
         end
 
@@ -398,12 +439,7 @@ module PamDsl
       end
 
       def excluded_field?(field_name)
-        # Special cases that should NOT be excluded even though they match exclusion patterns
-        return false if field_name =~ /postal_code|zip_code|postcode/i  # address codes are PII
-        return false if field_name =~ /\Aface_id\z/i      # face_id is biometric PII
-        return false if field_name =~ /\Anational_id\z/i  # national_id is ssn PII
-        return false if field_name =~ /\Avat_id\z/i       # vat_id is identifier PII
-        return false if field_name =~ /\Atax_id\z/i       # tax_id is identifier PII
+        return false if field_name.match?(PERSONAL_DESPITE_EXCLUSION)
 
         EXCLUSION_PATTERNS.any? { |pattern| field_name.match?(pattern) }
       end

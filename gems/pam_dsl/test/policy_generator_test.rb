@@ -44,72 +44,74 @@ module PamDsl
     def test_excludes_timestamp_fields
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "created_at")
-      assert generator.send(:excluded_field?, "updated_at")
-      assert generator.send(:excluded_field?, "deleted_at")
-      assert generator.send(:excluded_field?, "email_sent_at")
-      assert generator.send(:excluded_field?, "cancelled_at")
+      assert excluded?("created_at")
+      assert excluded?("updated_at")
+      assert excluded?("deleted_at")
+      assert excluded?("email_sent_at")
+      assert excluded?("cancelled_at")
     end
 
     def test_excludes_amount_fields
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "total_amount")
-      assert generator.send(:excluded_field?, "vat_amount")
-      assert generator.send(:excluded_field?, "discount_amount")
+      assert excluded?("total_amount")
+      assert excluded?("vat_amount")
+      assert excluded?("discount_amount")
     end
 
     def test_excludes_reason_fields
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "cancellation_reason")
-      assert generator.send(:excluded_field?, "rejection_reason")
+      assert excluded?("cancellation_reason")
+      assert excluded?("rejection_reason")
     end
 
     def test_excludes_foreign_keys
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "user_id")
-      assert generator.send(:excluded_field?, "order_id")
-      assert generator.send(:excluded_field?, "payment_id")
+      assert excluded?("user_id")
+      assert excluded?("order_id")
+      assert excluded?("payment_id")
     end
 
     def test_excludes_status_fields
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "payment_status")
-      assert generator.send(:excluded_field?, "order_status")
+      assert excluded?("payment_status")
+      assert excluded?("order_status")
     end
 
     def test_excludes_boolean_flags
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      assert generator.send(:excluded_field?, "is_active")
-      assert generator.send(:excluded_field?, "is_verified")
-      assert generator.send(:excluded_field?, "has_consent")
-      assert generator.send(:excluded_field?, "email_verified")
-      assert generator.send(:excluded_field?, "two_factor_enabled")
+      assert excluded?("is_active")
+      assert excluded?("is_verified")
+      assert excluded?("has_consent")
+      assert excluded?("email_verified")
+      assert excluded?("two_factor_enabled")
     end
 
-    def test_excludes_security_fields
-      generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
-
-      assert generator.send(:excluded_field?, "encrypted_password")
-      assert generator.send(:excluded_field?, "password_digest")
-      assert generator.send(:excluded_field?, "reset_token")
-      assert generator.send(:excluded_field?, "password_hash")
+    # Credentials and the tokens that stand for a person's account are
+    # personal data (a breach of them is a personal-data breach); a generic
+    # token is not detected.
+    def test_credentials_and_account_tokens_are_personal_data
+      assert_pii_match(:encrypted_password, :credential, :restricted)
+      assert_pii_match(:password_digest, :credential, :restricted)
+      assert_pii_match(:password_hash, :credential, :restricted)
+      assert_pii_match(:reset_password_token, :token, :restricted)
+      assert excluded?("reset_token")
     end
 
     def test_does_not_exclude_valid_pii_fields
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
 
-      refute generator.send(:excluded_field?, "email")
-      refute generator.send(:excluded_field?, "phone")
-      refute generator.send(:excluded_field?, "firstname")
-      refute generator.send(:excluded_field?, "lastname")
-      refute generator.send(:excluded_field?, "address")
-      refute generator.send(:excluded_field?, "iban")
-      refute generator.send(:excluded_field?, "vat_number")
+      refute excluded?("email")
+      refute excluded?("phone")
+      refute excluded?("firstname")
+      refute excluded?("lastname")
+      refute excluded?("address")
+      refute excluded?("iban")
+      refute excluded?("vat_number")
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -174,7 +176,7 @@ module PamDsl
       assert_pii_match(:ssn, :ssn, :restricted)
       assert_pii_match(:social_security_number, :ssn, :restricted)
       assert_pii_match(:national_id, :ssn, :restricted)
-      assert_pii_match(:passport_number, :ssn, :restricted)
+      assert_pii_match(:passport_number, :identifier, :restricted) # a document number, as PIIDetector types it
     end
 
     def test_detects_date_of_birth_fields
@@ -524,12 +526,13 @@ module PamDsl
       assert_equal expected_sensitivity, match[:sensitivity], "Expected #{field_name} to have sensitivity #{expected_sensitivity}"
     end
 
+    # The generator detects with PIIDetector, PAM's one dictionary.
     def find_pii_match(field_name)
-      PolicyGenerator::PII_PATTERNS.each do |pattern, config|
-        return config if field_name.match?(pattern)
-      end
-      nil
+      type = PIIDetector.pii_type(field_name)
+      type && { type: type, sensitivity: PIIDetector.sensitivity(field_name) }
     end
+
+    def excluded?(column) = PIIDetector.pii_type(column).nil?
 
     def capture_output
       original_stdout = $stdout

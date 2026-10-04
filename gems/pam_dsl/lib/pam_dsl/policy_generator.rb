@@ -15,86 +15,17 @@ module PamDsl
   #   generator.generate_from_models  # Scans models for PII
   #
   class PolicyGenerator
-    # Patterns that should be excluded (timestamps, counts, amounts, flags, etc.)
-    EXCLUDE_PATTERNS = [
-      /_at\z/i,           # Timestamps: created_at, updated_at, email_sent_at, cancelled_at
-      /_on\z/i,           # Date fields: published_on, expires_on
-      /_count\z/i,        # Counters: login_count, failed_attempts_count
-      /_amount\z/i,       # Amounts: vat_amount, total_amount, discount_amount
-      /_total\z/i,        # Totals: grand_total, subtotal
-      /_reason\z/i,       # Reason text: cancellation_reason, rejection_reason
-      /_notes?\z/i,       # Notes: admin_notes, internal_note
-      /_status\z/i,       # Status flags: payment_status, order_status
-      /_type\z/i,         # Type flags: payment_type, user_type
-      /_id\z/i,           # Foreign keys: user_id, order_id
-      /_uuid\z/i,         # UUIDs: order_uuid
-      /_code\z/i,         # Codes: country_code, currency_code (but not postal_code)
-      /\A(id|uuid)\z/i,   # Primary keys
-      /\Ais_/i,           # Boolean flags: is_active, is_verified
-      /\Ahas_/i,          # Boolean flags: has_consent
-      /_enabled\z/i,      # Flags: two_factor_enabled
-      /_verified\z/i,     # Flags: email_verified
-      /_confirmed\z/i,    # Flags: payment_confirmed
-      /encrypted_/i,      # Already encrypted: encrypted_password
-      /_digest\z/i,       # Hashes: password_digest
-      /_token\z/i,        # Tokens: reset_token, auth_token
-      /_hash\z/i,         # Hashes: password_hash
-    ].freeze
+    # PII is detected by PIIDetector, the one dictionary PAM has. The generator
+    # used to keep its own exact-name patterns and exclusions; on Solidus the
+    # two disagreed, and the generator's found 7 fields where 26 were
+    # personal (it never saw address1, zipcode or any IP column, and dropped
+    # vat_id with every other *_id).
 
-    # Common PII field patterns and their types
-    # More specific patterns to reduce false positives
-    PII_PATTERNS = {
-      # Email - must be the actual email field, not email_sent_at, email_verified, etc.
-      /\A(email|e_mail|mail_address|user_email|contact_email|billing_email)\z/i => { type: :email, sensitivity: :confidential },
-
-      # Names - exact matches only
-      /\A(first_?name|given_?name|fname)\z/i => { type: :name, sensitivity: :internal },
-      /\A(last_?name|surname|family_?name|lname)\z/i => { type: :name, sensitivity: :internal },
-      /\A(full_?name|display_?name)\z/i => { type: :name, sensitivity: :internal },
-      /\A(father_?name|fathername|mother_?name|parent_?name)\z/i => { type: :name, sensitivity: :internal },
-      /\A(name|firstname|lastname)\z/i => { type: :name, sensitivity: :internal },
-
-      # Phone - exact field names only
-      /\A(phone|telephone|mobile|cell|fax|phone_number|mobile_number|cell_phone)\z/i => { type: :phone, sensitivity: :confidential },
-
-      # Address - exact matches
-      /\A(address|street|city|state|province|country|postal|zip|postcode|postal_code|zip_code)\z/i => { type: :address, sensitivity: :confidential },
-      /\A(address_line_?\d?|street_address|billing_address|shipping_address|home_address|work_address)\z/i => { type: :address, sensitivity: :confidential },
-
-      # Financial - exact matches for account identifiers
-      /\A(iban|swift|bic|bank_account|account_number|routing_number)\z/i => { type: :financial, sensitivity: :restricted },
-      /\A(credit_card|card_number|card_number_first\d|card_number_last\d|cvv|cvc)\z/i => { type: :credit_card, sensitivity: :restricted },
-
-      # Tax/VAT identifiers - the actual number, not amounts
-      # AFM = Greek tax identification number (ΑΦΜ - Αριθμός Φορολογικού Μητρώου)
-      /\A(vat_number|vat_id|tax_id|tin|tax_number|vat_reg_number|afm)\z/i => { type: :identifier, sensitivity: :restricted },
-
-      # Personal identifiers - exact matches
-      /\A(ssn|social_security|social_security_number|national_id|passport|passport_number|driver_license|drivers_license|license_number)\z/i => { type: :ssn, sensitivity: :restricted },
-      /\A(dob|date_of_birth|birth_date|birthday|birthdate)\z/i => { type: :date_of_birth, sensitivity: :confidential },
-
-      # Technical - IP addresses
-      /\A(ip|ip_address|remote_ip|client_ip|source_ip)\z/i => { type: :ip_address, sensitivity: :internal },
-
-      # Health - exact matches to avoid false positives
-      /\A(health_condition|medical_record|diagnosis|prescription|medical_history)\z/i => { type: :health, sensitivity: :restricted },
-
-      # Biometric - exact matches
-      /\A(fingerprint|face_id|biometric|biometric_data|retina_scan)\z/i => { type: :biometric, sensitivity: :restricted },
-
-      # Location - exact matches for coordinates
-      /\A(latitude|longitude|lat|lng|geo_location|gps_coordinates)\z/i => { type: :location, sensitivity: :confidential },
-      /\A(location)\z/i => { type: :location, sensitivity: :confidential },
-
-      # Credentials and tokens - security sensitive (usually excluded from auto-detection)
-      # These patterns are for manual matching when tokens are explicitly included
-      /\A(encrypted_password|password_salt|password_digest)\z/i => { type: :credential, sensitivity: :restricted },
-      /\A(api_key|spree_api_key|secret_key|access_key)\z/i => { type: :credential, sensitivity: :restricted },
-      /\A(reset_password_token|remember_token|confirmation_token|unlock_token)\z/i => { type: :token, sensitivity: :restricted },
-      /\A(authentication_token|auth_token|session_token|bearer_token)\z/i => { type: :token, sensitivity: :restricted },
-      /\A(guest_token|persistence_token|perishable_token)\z/i => { type: :token, sensitivity: :restricted },
-      /\A(gateway_customer_profile_id|gateway_payment_profile_id)\z/i => { type: :payment_token, sensitivity: :restricted }
-    }.freeze
+    # Types too common to call personal on their own: a bare "name" is a
+    # product's, a programme's or a payment plan's as often as a person's. A
+    # model's name column counts only alongside other personal data in the
+    # same model (an address's name does; a product's does not).
+    CONTEXT_DEPENDENT_TYPES = %i[name].freeze
 
     # Common purposes with sensible defaults
     DEFAULT_PURPOSES = {
@@ -306,37 +237,42 @@ module PamDsl
       RUBY
     end
 
+    # field => { type:, sensitivity:, models: [...], ignored_in: [...] }. The
+    # table's real columns are scanned, not only the model's: a column the
+    # model ignores (ignored_columns) still holds data the application can no
+    # longer see or erase, so it is reported, in ignored_in.
     def scan_models
       detected = {}
+      return detected unless defined?(ActiveRecord::Base)
 
-      if defined?(ActiveRecord::Base)
-        # Get all ActiveRecord models
-        Rails.application.eager_load! if defined?(Rails) && Rails.application
+      Rails.application.eager_load! if defined?(Rails) && Rails.application
+      ActiveRecord::Base.descendants.each do |model|
+        next if model.abstract_class?
+        next if model.name.nil? || model.name.start_with?("ActiveRecord::")
+        next unless model.table_exists?
 
-        ActiveRecord::Base.descendants.each do |model|
-          next if model.abstract_class?
-          next if model.name.start_with?("ActiveRecord::")
-          next unless model.table_exists?
-
-          model.column_names.each do |column|
-            # Skip excluded patterns (timestamps, amounts, flags, etc.)
-            next if excluded_field?(column)
-
-            PII_PATTERNS.each do |pattern, config|
-              if column.match?(pattern)
-                detected[column.to_sym] ||= config.merge(models: [])
-                detected[column.to_sym][:models] << model.name unless detected[column.to_sym][:models].include?(model.name)
-              end
-            end
-          end
+        scan_model(model).each do |column, config|
+          entry = detected[column.to_sym] ||= config.slice(:type, :sensitivity).merge(models: [], ignored_in: [])
+          entry[:models] |= [model.name]
+          entry[:ignored_in] |= [model.name] if config[:ignored]
         end
       end
-
       detected
     end
 
-    def excluded_field?(column)
-      EXCLUDE_PATTERNS.any? { |pattern| column.match?(pattern) }
+    # The personal columns of one model: column => { type:, sensitivity:, ignored: }.
+    def scan_model(model)
+      columns = model.connection.columns(model.table_name).map(&:name) - [model.primary_key.to_s]
+      ignored = model.ignored_columns.map(&:to_s)
+      found = columns.filter_map do |column|
+        type = PIIDetector.pii_type(column)
+        next unless type
+
+        [column, { type: type, sensitivity: PIIDetector.sensitivity(column), ignored: ignored.include?(column) }]
+      end.to_h
+      return found if found.values.any? { |c| !CONTEXT_DEPENDENT_TYPES.include?(c[:type]) }
+
+      found.reject { |_, c| CONTEXT_DEPENDENT_TYPES.include?(c[:type]) }
     end
 
     def generate_policy_from_fields(detected_fields)
@@ -387,6 +323,10 @@ module PamDsl
 
       detected_fields.sort_by { |name, _| name }.each do |name, config|
         models_comment = "# Found in: #{config[:models].join(', ')}"
+        if config[:ignored_in].to_a.any?
+          models_comment += "\n# Ignored by #{config[:ignored_in].join(', ')} (ignored_columns): the application cannot " \
+                            "see or erase what this column holds; empty it by migration"
+        end
         field_def = "  field :#{name}, type: :#{config[:type]}, sensitivity: :#{config[:sensitivity]}"
 
         # Add masking transforms for sensitive fields

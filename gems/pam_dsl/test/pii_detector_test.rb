@@ -318,15 +318,18 @@ module PamDsl
       refute PIIDetector.contains_pii?(:metaphone)     # contains "phone" but not at boundary
     end
 
-    def test_partial_match_id_suffix_does_not_exclude_pii
-      # Note: _id suffix does NOT automatically exclude a field
-      # Fields like telephone_id still match because they contain PII keywords
-      assert PIIDetector.contains_pii?(:telephone_id)  # matches "telephone" (phone pattern)
-      assert PIIDetector.contains_pii?(:email_id)      # matches "email"
-
-      # Only exact "id" or "uuid" are excluded
+    # A *_id column is a foreign key (bill_address_id, country_id,
+    # stock_location_id were flagged on Solidus), except the identifiers that
+    # are personal data themselves.
+    def test_partial_match_id_suffix_is_a_foreign_key_unless_a_known_identifier
+      refute PIIDetector.contains_pii?(:telephone_id)
+      refute PIIDetector.contains_pii?(:bill_address_id)
+      refute PIIDetector.contains_pii?(:country_id)
       refute PIIDetector.contains_pii?(:id)
       refute PIIDetector.contains_pii?(:uuid)
+
+      assert_equal :identifier, PIIDetector.pii_type(:vat_id)
+      assert_equal :payment_token, PIIDetector.pii_type(:gateway_customer_profile_id)
     end
 
     def test_partial_match_handles_edge_cases
@@ -352,7 +355,7 @@ module PamDsl
         # But prefixed/suffixed variants should NOT be detected in exact mode
         refute PIIDetector.contains_pii?(:customer_email)
         refute PIIDetector.contains_pii?(:billing_phone)
-        refute PIIDetector.contains_pii?(:user_name)
+        refute PIIDetector.contains_pii?(:customer_name)
       ensure
         # Reset to default
         PIIDetector.reset!
@@ -478,7 +481,7 @@ module PamDsl
         # Second call - setting should persist
         refute PIIDetector.contains_pii?(:billing_phone)
         # Third call
-        refute PIIDetector.contains_pii?(:user_name)
+        refute PIIDetector.contains_pii?(:customer_name)
 
         # Exact matches still work
         assert PIIDetector.contains_pii?(:email)
