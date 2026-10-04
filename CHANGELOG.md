@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-05
+
 ### Added
 - **`LYRA_DISABLE_PETRI_FLOW=true`** — runs Lyra as without petri_flow, as
   `LYRA_DISABLE_PAM_DSL=true` does for PAM DSL.
@@ -286,6 +288,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **Ruby 4.0 or later is required** (`required_ruby_version >= 4.0`, was `>= 3.4.5`); CI tests
+  Ruby 4.0. The project runs 4.0.7.
 - **Article 30 register (PAM)** — `pam_dsl:report:article_30` states only what the policy declares (data subjects, recipients, transfers, security measures) and lists the rest as not declared; see `gems/pam_dsl/CHANGELOG.md`.
 - **PII detection (PAM)** — Lyra's detector fallback (`Lyra::Privacy::PIIDetector`, `PolicyIntegration`) uses PAM's merged dictionary: more personal columns found (street, postal code, IP columns, card digits, account tokens), foreign keys and generic `*_name` columns no longer flagged. See `gems/pam_dsl/CHANGELOG.md`.
 - **Hijack fails a write whose event cannot be stored with `EventStoreUnavailableError`**, as event
@@ -352,7 +356,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of one). The name is now looked up once per table and cached; only `nextval`
   runs per ID.
 
+### Removed
+Dead code, none of it on the write path. Initializers that set `config.event_backend`, or models
+that pass `command_handler:`, must drop it: the former now raises `NoMethodError`, the latter is
+ignored like any unknown option.
+- **`Lyra::EventMapper` and `Lyra::AuditMapper`** (`lib/lyra/event_mapper.rb`). The interceptor
+  and the command handler build their events themselves (`CrudInterceptor#publish_event`,
+  `CommandHandler#create_event`, both through `Lyra::DomainEvents.build`); nothing called the
+  mappers.
+- **`Lyra::EventStoreAdapter`, `RailsEventStoreAdapter`, `CustomEventStoreAdapter` and
+  `config.event_backend`**, read only by `EventStoreAdapter.build`. Lyra uses the RailsEventStore
+  client in `config.event_store` directly; `Lyra.append_events` and `EventStoreUnavailableError`
+  stay.
+- **The `command_handler` model option** (`monitor_with_lyra command_handler:`,
+  `ModelConfiguration#command_handler`) and its dashboard line. It was stored and shown, but the
+  write path always uses `Lyra::CommandHandler`.
+
 ### Fixed
+- **Leaving ES-Lazy skipped its catch-up** — `ModeTransition.to!` from `event_sourcing/lazy`
+  calls `LazyProjection.catch_up!(force: true)`. Without `force:`, `catch_up!` returns 0 outside
+  ES-Lazy, and the mode had already changed by the time the transition ran it, so the tables
+  could be left behind the log.
+- **Locks on databases other than PostgreSQL** — Genesis, ES-Lazy catch-up and ES-Async
+  projection take their transaction-level advisory lock through `Lyra::AdvisoryLock.xact_lock`.
+  On SQLite (which serialises writers) it does nothing; on other adapters it logs once per
+  purpose that the step runs unlocked and is safe in a single process only. Before, those
+  adapters ran unlocked silently.
+- **`upsert_all` under ES-NoProj raised `ArgumentError`**; it now raises
+  `Lyra::Projections::UnsupportedQuery`, like every other query ES-NoProj cannot answer, naming
+  the reason (the `ON CONFLICT` check runs against the table, not the event stream) and the
+  per-record alternative.
+- **`DualView` reported a record for a stream of only `replay: false` events** — such a stream
+  describes no record, so `exists` is now false.
+- **`lyra.rb` required ActiveRecord and ActiveJob implicitly**, relying on the host to load them
+  first; loading the gem after only `require "rails"` raised `NameError`. It now requires both.
 - **`Lyra::Projection.subscribe_to` raised `RubyEventStore::InvalidHandler`** — RailsEventStore
   3.1 subscribers must respond to `call`. A projection class now does (`call(event)` hands the
   event to a new instance's `handle`), and `subscribe_to` returns the unsubscribe procs.

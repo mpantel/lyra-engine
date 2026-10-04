@@ -1,7 +1,7 @@
 PATH
   remote: ../../gems/petri_flow
   specs:
-    orfeas_petri_flow (0.6.0)
+    orfeas_petri_flow (0.8.0)
       activesupport (>= 6.0)
       matrix (~> 0.4)
       rexml (~> 3.2)
@@ -10,7 +10,7 @@ PATH
   remote: ../..
   glob: lyra.gemspec
   specs:
-    orfeas_lyra (0.6.0)
+    orfeas_lyra (0.8.0)
       pg (~> 1.0)
       rails (>= 8.0)
       rails_event_store (~> 3.0)
@@ -328,8 +328,8 @@ CHECKSUMS
   nokogiri (1.19.4-x86_64-darwin) sha256=7fd17057d3e1f00e9954a74b3cd76595d3d4a5ef233b7ed9599047c204f70551
   nokogiri (1.19.4-x86_64-linux-gnu) sha256=379fae440b28915e3f19d752ce2dcf8465ed2b2fbefd2a7ca0dd497bc981a06a
   nokogiri (1.19.4-x86_64-linux-musl) sha256=17dfb7c1fa194ae02fbf7c51a7afc8d278045ab3fdacfd86f91d02d7b274470b
-  orfeas_lyra (0.6.0)
-  orfeas_petri_flow (0.6.0)
+  orfeas_lyra (0.8.0)
+  orfeas_petri_flow (0.8.0)
   pg (1.7.0) sha256=f7b536501284e883d4c9ef86dbde0313063e4aaafc23575b0017b0d572a26afb
   pg (1.7.0-aarch64-linux) sha256=101dd3a261000eb64b03ff41a5890674b735b626dbdce88652969b59fb0b1157
   pg (1.7.0-aarch64-linux-musl) sha256=5ca4d4619a1a39fb22de47350130956ece69cf0512858ee68dca926e46f65e4a

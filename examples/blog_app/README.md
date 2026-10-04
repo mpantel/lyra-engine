@@ -22,7 +22,7 @@ production) is in the Lyra guides linked at the end.
 
 ## Requirements
 
-- Ruby 3.4.5 or later (developed on Ruby 4.0.7), Bundler.
+- Ruby 4.0 or later (developed on Ruby 4.0.7), Bundler.
 - PostgreSQL. The app uses the PostgreSQL container from the repository's
   `docker-compose.yml` (`lyra_postgres`, `localhost:5433`, user and password
   `postgres`) and creates the databases `blog_app_development` and
