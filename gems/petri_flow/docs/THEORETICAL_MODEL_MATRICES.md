@@ -43,7 +43,9 @@ DELETE   │    1    │   1   │      1       │      0      │
 
 **Practical Example from Lyra:**
 ```ruby
-# When Order.create! executes in Monitor mode:
+# Order.create! stores one event of its own (OrderCreated, or the domain event a
+# matching domain_events rule names). Further events come only from domain_events
+# rules marked also: true, e.g. with such rules configured:
 # - OrderCreated event (Primary)
 # - AuditLogCreated event (Audit)
 # - NotificationSent event (Notification)
@@ -193,16 +195,18 @@ Now we see OrderCreated transitively causes Shipped (through PaymentProcessed).
 ### Lyra Implementation
 
 ```ruby
-# Track causation in event metadata
+# Lyra writes the causing event's id to metadata[:causation_id]
+# (Lyra::Causation.with_id sets it; an additional domain event carries the id of
+# the write's own event)
 Lyra::Causation.track(cause_event_id, effect_event_id)
 
 # Build causation matrix from event store
 def build_causation_matrix
-  events = RailsEventStore.client.read.stream('all').to_a
+  events = Lyra.event_store.read.to_a
   matrix = {}
 
   events.each do |effect|
-    cause_id = effect.metadata[:caused_by_event_id]
+    cause_id = effect.metadata[:causation_id]
     if cause_id
       matrix[cause_id] ||= []
       matrix[cause_id] << effect.event_id
@@ -254,14 +258,21 @@ L_email = [
 ```ruby
 lineage = Lyra::EventFlow.new.data_lineage('email', 'Student')
 # => {
-#   field_name: "email",
+#   field: "email",
 #   model_class: "Student",
+#   total_modifications: 3,
+#   first_seen: ...,
+#   last_modified: ...,
 #   lineage: [
 #     {
-#       event_id: "...",
 #       timestamp: "2025-01-15T10:30:00Z",
+#       event_id: "...",
+#       model: "Student",
+#       record_id: 7,
+#       operation: :updated,
 #       old_value: "alice@old.com",
 #       new_value: "alice@new.com",
+#       source: "lyra_command_handler",
 #       user_id: 42,
 #       action: { controller: "students", action: "update" }
 #     },
@@ -316,6 +327,8 @@ risk_score(Event3) = 2×1 + 2×1 = 4
 ### Lyra Implementation
 
 ```ruby
+# Assumes a per-event metadata[:pii_detected] hash, which Lyra does not write
+# (its opt-in privacy stamp is metadata[:privacy])
 def compute_privacy_risk(event)
   pii = event.metadata[:pii_detected] || {}
   risk = 0
@@ -377,7 +390,7 @@ P_transition[pending][cancelled] = 12 / (45+12) = 0.21 (21% probability)
 
 ```ruby
 def build_state_transition_matrix(model_class, state_field)
-  events = RailsEventStore.client.read.of_type("#{model_class}Updated")
+  events = Lyra.event_store.read.of_type("#{model_class}Updated")
   transitions = Hash.new { |h, k| h[k] = Hash.new(0) }
 
   events.each do |event|
@@ -739,7 +752,7 @@ class MatrixAnalyzerSketch  # hypothetical
     matrix = Hash.new { |h, k| h[k] = Hash.new(0) }
 
     @events.each do |event|
-      cause_id = event.metadata[:caused_by_event_id]
+      cause_id = event.metadata[:causation_id]
       if cause_id
         matrix[cause_id][event.event_id] = 1
       end
@@ -791,7 +804,7 @@ class MatrixAnalyzerSketch  # hypothetical
   private
 
   def load_events
-    scope = RailsEventStore.client.read.stream('all')
+    scope = Lyra.event_store.read
     scope = scope.of_type(@model_class) if @model_class
     scope = scope.between(@time_range) if @time_range
     scope.to_a

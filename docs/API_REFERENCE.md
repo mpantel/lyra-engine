@@ -5,7 +5,7 @@ mode switches, events, reads in each configuration, and the privacy layer.
 Everything here is defined in `lib/lyra.rb`, `lib/lyra/**`, `lib/tasks/lyra_*.rake`
 or, for PAM, `gems/pam_dsl/lib`. For how the parts fit together see
 [ARCHITECTURE.md](ARCHITECTURE.md); for switching modes in production see
-[MODE_TRANSITIONS.md](MODE_TRANSITIONS.md); for GDPR workflows see
+[MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes); for GDPR workflows see
 [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md).
 
 ## Contents
@@ -81,6 +81,7 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `event_store` | `nil` | The RailsEventStore client. Set by the engine at boot if still `nil`. Also `Lyra.event_store` / `Lyra.event_store=`. |
 | `hijack_enabled` | `false` | Set by the mode helpers. When true, `hijack_mode?` is true whatever `mode` says. |
 | `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of every event a monitored record's write produces, in every mode. A proc that raises is logged and skipped. |
+| `monitor_append_failure` | `:log` | What Monitor does when a write's event cannot be stored: `:log` lets the write stand and logs the failure; `:fail_write` raises `EventStoreUnavailableError` and rolls the write back, as Hijack and event sourcing always do (bulk writes included). Validated on assignment. |
 | `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. |
 | `projection_error_handler` | `nil` | `->(error, record, operation)`, called when a projection fails and `strict_projections` is off. |
 | `async_projections_inline` | `nil` | ES-Async: `nil` projects inline in the test environment only; `true` always; `false` never. |
@@ -213,7 +214,7 @@ attribution metadata a write by that record would carry.
 
 ## Modes and transitions
 
-See [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md) for the procedure. This section
+See [MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes) for the procedure. This section
 lists the API.
 
 ### `Lyra::ModeTransition`
@@ -266,7 +267,8 @@ store: config.event_store)`, which wraps any store error in
 - Hijack and the event-sourcing modes are fail-closed: the write raises and its
   transaction rolls back.
 - Monitor is log-and-continue: the write stands, the error is logged, and the
-  stream falls behind its row until `Lyra::Repair` brings it back.
+  stream falls behind its row until `Lyra::Repair` brings it back. With
+  `config.monitor_append_failure = :fail_write`, Monitor is fail-closed too.
 
 ### `Lyra::Repair`
 
@@ -355,7 +357,7 @@ not loaded yet resolves only through the schema store.
 | Genesis | `genesis: true` |
 | Repair | `source: "lyra_repair"`, `repaired`, `correlation_id` |
 | Erasure | `source: "lyra_erasure"`, `erased_by`, `correlation_id` (on `ErasureApplied`) |
-| any, with `annotate_privacy` | `privacy` (see [Privacy stamps](#privacy-stamps)) |
+| any, with `annotate_privacy` | `privacy` (see [Privacy stamps](#privacy-stamps-opt-in)) |
 
 `metadata_proc` applies to every mode's events.
 
@@ -891,7 +893,7 @@ Lyra::Causation.with_id(event.event_id) { Shipment.create!(order: order) }
 | `Lyra::Causation.with_id(id) { \|id\| ... }` | Set the causation id for the block. |
 | `Lyra::Causation.current_id`, `Lyra::Causation.clear` | |
 | `Lyra::Causation.track(cause_id, effect_id)`, `chain_for(event_id)`, `cause_of(event_id)` | An in-process, in-memory causation map. |
-| `Lyra::UserActionContext.with_context(action_type:, user_id: nil, **options) { \|ctx\| ... }` | Set the user action for the block (and its id as the correlation id); Monitor events record it as `action_id` and `user_action`. Options: `controller:`, `action_name:`, `params:`. |
+| `Lyra::UserActionContext.with_context(action_type:, user_id: nil, **options) { \|ctx\| ... }` | Set the user action for the block (and its id as the correlation id); events record it as `action_id` and `user_action` in every mode. Options: `controller:`, `action_name:`, `params:`. |
 
 All are thread-local.
 
@@ -979,7 +981,7 @@ monitored model.
 
 | Error | Raised when |
 |---|---|
-| `Lyra::EventStoreUnavailableError` | An event could not be stored (fails the write in Hijack and event sourcing). |
+| `Lyra::EventStoreUnavailableError` | An event could not be stored (fails the write in Hijack and event sourcing, and in Monitor with `monitor_append_failure = :fail_write`). |
 | `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate; `#report`. |
 | `Lyra::Repair::Refused` | `Repair.run` outside Monitor/Disabled. |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. |
@@ -990,7 +992,7 @@ monitored model.
 | `Lyra::Retention::Disabled` | `Retention.apply!` without `retention_executor` (and not a dry run). |
 | `Lyra::MappingVerificationError` | `verify_mapping!` failed, or petri_flow is missing. |
 | `Lyra::Schema::SchemaValidationError` | `strict_schema` found a breaking schema change at boot. |
-| `ArgumentError` | Unknown `reads_without_purpose` value, bad `domain_events` rule, or an unresolvable name in `config.models`. |
+| `ArgumentError` | Unknown `mode`, `projection_mode`, `monitor_append_failure` or `reads_without_purpose` value, bad `domain_events` rule, or an unresolvable name in `config.models`. |
 | `PamDsl::PolicyNotFoundError`, `InvalidFieldError`, `UndeclaredPurposeError`, `PurposeFieldMismatchError`, `ConsentRequiredError`, `SensitivityViolationError` | PAM validation (all subclasses of `PamDsl::Error`). |
 
 `Lyra::Error` is defined but not raised by the engine.

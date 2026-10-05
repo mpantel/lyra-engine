@@ -47,8 +47,11 @@ PetriFlow is a Ruby gem that provides a complete toolkit for modeling, analyzing
 Add to your Gemfile:
 
 ```ruby
-gem 'petri_flow', path: 'gems/petri_flow'
+gem "orfeas_petri_flow", require: "petri_flow"
 ```
+
+The gem is published as `orfeas_petri_flow`; the library is required as
+`petri_flow`. It needs Ruby 4.0 or later.
 
 Then:
 ```bash
@@ -137,8 +140,8 @@ analyzer.analyze_events(events)
 # Get CRUD mapping
 puts analyzer.crud_mapping.to_table
 
-# Get data lineage
-lineage = analyzer.field_history("email")
+# Get data lineage (fields are keyed as given in :changes, here symbols)
+lineage = analyzer.field_history(:email)
 lineage.each do |mod|
   puts "#{mod[:timestamp]}: #{mod[:old_value]} → #{mod[:new_value]}"
 end
@@ -326,10 +329,12 @@ so its results include `liveness[:terminates_properly]`.
 Reports are saved to `reports/petri_flow_<timestamp>/`:
 
 - `verification_report.md` - Summary of all workflows
-- `<workflow_name>.md` - Individual workflow report
-- `<workflow_name>_petri.png` - Petri net diagram
-- `<workflow_name>_petri.dot` - GraphViz source
-- `<workflow_name>_petri.mmd` - Mermaid diagram
+- `<workflow_id>.md` - Individual workflow report
+- `<workflow_id>_petri.dot` - GraphViz source
+- `<workflow_id>_petri.mmd` - Mermaid diagram
+- `<workflow_id>_petri.png`, `.pdf`, `.svg` - Petri net diagram (only when GraphViz's `dot` is installed)
+
+`<workflow_id>` is the underscored workflow name (`refund_request_workflow` for the example above).
 
 ### Configuration
 
@@ -382,15 +387,20 @@ class FlawedApprovalWorkflow < PetriFlow::Workflow
 end
 ```
 
-Running verification will detect this:
+Running verification (`rake petri_flow:verify`) will detect this:
 
 ```
-Terminal State Reachability:
-  completed    ✓ REACHABLE
-  rejected     ✓ REACHABLE
-  escalated    ✗ UNREACHABLE
+  Terminal State Reachability:
+    completed            ✓ REACHABLE
+    rejected             ✓ REACHABLE
+    escalated            ✗ UNREACHABLE
+```
 
-> WARNING: Some terminal states are unreachable from the initial state.
+and the workflow's report is marked `✗ UNREACHABLE STATES DETECTED`, with:
+
+```
+> **WARNING:** Some terminal states are unreachable from the initial state.
+> This indicates a workflow design issue that should be investigated.
 ```
 
 This is valuable for GDPR compliance - proving that the `anonymized` state IS reachable
@@ -463,20 +473,25 @@ end
 ### 3. Event Flow Analysis
 
 ```ruby
-# Build causation matrix from event store
+# Build causation matrix from events. Each event is a hash; causation is
+# recorded between event ids, from :event_id and :caused_by_event_id.
 analyzer = PetriFlow.create_analyzer
 
-events = EventStore.read_all_events
+events = [
+  { event_id: "order-created-1" },
+  { event_id: "invoice-issued-1", caused_by_event_id: "order-created-1" },
+  { event_id: "email-sent-1", caused_by_event_id: "invoice-issued-1" }
+]
 analyzer.analyze_events(events)
 
 # Find causation chain
-chain = analyzer.find_causation_chain("OrderCreated", "EmailSent")
+chain = analyzer.find_causation_chain("order-created-1", "email-sent-1")
 puts "Causation chain: #{chain.join(' → ')}"
 
 # Get transitive causation
 closure = analyzer.causation.transitive_closure
-puts "Events caused by OrderCreated (transitively):"
-puts closure.effects_of("OrderCreated")
+puts "Events caused by order-created-1 (transitively):"
+puts closure.effects_of("order-created-1")
 
 # Identify most influential events
 centrality = analyzer.causation.centrality_scores
@@ -518,28 +533,30 @@ puts "Total modifications: #{impact[:total_modifications]}"
 
 ## Architecture Integration with Lyra
 
+Lyra uses PetriFlow at verification time; PetriFlow enforces nothing while the
+application runs. Lyra builds Petri nets of its own write paths and hands them
+to PetriFlow for analysis:
+
 ```
-┌─────────────────────────────────────────────────┐
-│              Lyra Framework                     │
-│                                                 │
-│  ┌─────────────┐         ┌─────────────┐      │
-│  │   CRUD      │────────▶│   Events    │      │
-│  │ Operations  │         │   Store     │      │
-│  └─────────────┘         └──────┬──────┘      │
-│                                  │             │
-│                                  ▼             │
-│                          ┌──────────────┐     │
-│                          │  PetriFlow   │     │
-│                          │   Analysis   │     │
-│                          └──────────────┘     │
-│                                  │             │
-│            ┌─────────────────────┼──────────┐ │
-│            ▼                     ▼          ▼ │
-│     ┌──────────┐        ┌──────────┐  ┌──────────┐
-│     │ CPN      │        │ Matrix   │  │ Verify   │
-│     │ Model    │        │ Analysis │  │ Props    │
-│     └──────────┘        └──────────┘  └──────────┘
-└─────────────────────────────────────────────────┘
+┌──────────────────────────── Lyra ─────────────────────────────┐
+│                                                               │
+│  CRUD lifecycle and Create/Update/Destroy mode nets           │
+│  (Lyra::Verification::CrudLifecycleWorkflow and friends)      │
+│  Bypass-write net (Lyra::Verification::BypassWorkflow)        │
+│  Per-mode nets (Lyra::Verification::WorkflowGenerator,        │
+│  app/workflows/*_workflow.rb)                                 │
+│                                                               │
+└───────────────────────────────┬───────────────────────────────┘
+                                │ PetriFlow::Workflow nets
+                                ▼
+                 ┌────────────────────────────┐
+                 │         PetriFlow          │
+                 │ reachability, boundedness, │
+                 │ liveness, invariants,      │
+                 │ simulation, export         │
+                 └──────────────┬─────────────┘
+                                ▼
+  Lyra.verify_mapping!, rake lyra:workflows:verify, rake petri_flow:verify
 ```
 
 ## Research Foundation
@@ -642,6 +659,6 @@ MIT License. See MIT-LICENSE file.
   author={Pantelelis, Michail},
   year={2026},
   note={Part of ORFEAS PhD Thesis},
-  url={https://github.com/mpantel/lyra-engine/gems/petri-flow}
+  url={https://github.com/mpantel/lyra-engine/tree/main/gems/petri_flow}
 }
 ```

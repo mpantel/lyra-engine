@@ -104,7 +104,8 @@ events.last.attributes    # the row after the write, without created_at/updated_
 
 If an append fails in Monitor, the write stands and the error is logged
 (`Lyra: Failed to publish event ... run bin/rails lyra:repair ...`). Step 7
-finds and repairs such records.
+finds and repairs such records. `config.monitor_append_failure = :fail_write`
+fails the write instead.
 
 ## 5. Compare the row with its events
 
@@ -185,7 +186,7 @@ bin/rails lyra:mode:check TO=hijack
 Run the check, fix what it reports, and deploy the new mode within the
 certificate's lifetime (an hour by default). The whole procedure, and how to
 step back, is in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#phase-4-hijack) and
-[MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+[MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes).
 
 ## Where next
 
@@ -193,9 +194,9 @@ step back, is in [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#phase-4-hijack) and
   sourcing, through the mode check, with recovery steps.
 - [API_REFERENCE.md](API_REFERENCE.md): every configuration option, method and
   rake task.
-- [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md): how mode switches are checked
+- [MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes): how mode switches are checked
   and certified.
-- [ADOPTION.md](ADOPTION.md): what adoption costs, and when it is not worth it.
+- [MIGRATION_GUIDE.md, Adopting Lyra](MIGRATION_GUIDE.md#adopting-lyra-in-an-existing-application): what adoption costs, and when it is not worth it.
 - [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md): privacy policies with PAM
   DSL, erasure, retention and access logging.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the engine is built.

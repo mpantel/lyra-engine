@@ -169,28 +169,52 @@ net.export_to_file('model.pnml')
   - `highlevelnet` - Colored Petri nets
 - Includes:
   - Places with initial markings
-  - Transitions with guards
-  - Arcs with weights and expressions
+  - Transitions with guards (as a `condition` holding the guard's name)
+  - Arcs with weights (an `inscription` only when the weight is not 1) and expressions (by name)
   - Color declarations (for CPNs)
   - Graphics positions (for layout)
 
-**Example Output:**
+**Example Output** (a net with places `p1` (2 tokens) and `p2`, transition `t1`, arcs `p1 → t1 → p2`):
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<pnml xmlns="http://www.pnml.org/version-2009/grammar/pnml">
-  <net id="mynet" type="http://www.pnml.org/version-2009/grammar/ptnet">
-    <name><text>MyNet</text></name>
-    <page id="page1">
-      <place id="p1">
-        <name><text>Place 1</text></name>
-        <initialMarking><text>2</text></initialMarking>
+<?xml version='1.0' encoding='UTF-8'?>
+<pnml xmlns='http://www.pnml.org/version-2009/grammar/pnml'>
+  <net id='mynet' type='http://www.pnml.org/version-2009/grammar/ptnet'>
+    <name>
+      <text>MyNet</text>
+    </name>
+    <page id='page1'>
+      <place id='p1'>
+        <name>
+          <text>Place 1</text>
+        </name>
+        <initialMarking>
+          <text>2</text>
+        </initialMarking>
+        <graphics>
+          <position x='0' y='0'/>
+          <dimension x='40' y='40'/>
+        </graphics>
       </place>
-      <transition id="t1">
-        <name><text>Transition 1</text></name>
+      <place id='p2'>
+        <name>
+          <text>Place 2</text>
+        </name>
+        <graphics>
+          <position x='0' y='0'/>
+          <dimension x='40' y='40'/>
+        </graphics>
+      </place>
+      <transition id='t1'>
+        <name>
+          <text>Transition 1</text>
+        </name>
+        <graphics>
+          <position x='0' y='0'/>
+          <dimension x='40' y='25'/>
+        </graphics>
       </transition>
-      <arc id="arc_0" source="p1" target="t1">
-        <inscription><text>1</text></inscription>
-      </arc>
+      <arc id='arc_0' source='p1' target='t1'/>
+      <arc id='arc_1' source='t1' target='p2'/>
     </page>
   </net>
 </pnml>
@@ -229,26 +253,31 @@ net.export_to_file('model.cpn')
 
 **Example Output:**
 ```xml
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <workspaceElements>
-  <generator tool="PetriFlow" version="1.0" format="CPN"/>
+  <generator tool='PetriFlow' version='1.0' format='CPN'/>
   <cpnet>
     <globbox>
-      <block id="id1">
-        <color id="id2">
+      <block id='id1'>
+        <color id='id2'>
           <id>INT</id>
           <int/>
         </color>
       </block>
     </globbox>
-    <page id="page1">
-      <pageattr name="MyNet"/>
-      <place id="place_1">
+    <page id='page1'>
+      <pageattr name='MyNet'/>
+      <place id='place_1'>
         <text>Place 1</text>
-        <type><text>INT</text></type>
-        <initmark><text>2</text></initmark>
+        <type>
+          <text>INT</text>
+        </type>
+        <initmark>
+          <text>2</text>
+        </initmark>
+        <posattr x='250' y='100'/>
       </place>
-      <!-- ... -->
+      <!-- place_2, trans_1 and the two arcs ... -->
     </page>
   </cpnet>
 </workspaceElements>
@@ -293,7 +322,7 @@ net.export_to_file('model.json')
   "meta": {
     "format": "PetriFlow JSON Export",
     "version": "1.0",
-    "exported_at": "2025-11-05T10:30:00Z",
+    "exported_at": "2026-10-05T06:30:20Z",
     "net_type": "petri_net"
   },
   "net": {
@@ -303,11 +332,18 @@ net.export_to_file('model.json')
     "transition_count": 1,
     "arc_count": 2
   },
+  "colors": [],
   "places": [
     {
       "id": "p1",
       "name": "Place 1",
       "tokens": 2,
+      "capacity": "infinite"
+    },
+    {
+      "id": "p2",
+      "name": "Place 2",
+      "tokens": 0,
       "capacity": "infinite"
     }
   ],
@@ -323,14 +359,40 @@ net.export_to_file('model.json')
   "arcs": [
     {
       "id": "arc_0",
-      "source": {"id": "p1", "name": "Place 1", "type": "Place"},
-      "target": {"id": "t1", "name": "Transition 1", "type": "Transition"},
+      "source": {
+        "id": "p1",
+        "name": "Place 1",
+        "type": "Place"
+      },
+      "target": {
+        "id": "t1",
+        "name": "Transition 1",
+        "type": "Transition"
+      },
       "weight": 1,
       "direction": "place_to_transition"
+    },
+    {
+      "id": "arc_1",
+      "source": {
+        "id": "t1",
+        "name": "Transition 1",
+        "type": "Transition"
+      },
+      "target": {
+        "id": "p2",
+        "name": "Place 2",
+        "type": "Place"
+      },
+      "weight": 1,
+      "direction": "transition_to_place"
     }
   ],
   "marking": {
-    "tokens_by_place": {"p1": 2, "p2": 0},
+    "tokens_by_place": {
+      "p1": 2,
+      "p2": 0
+    },
     "total_tokens": 2
   },
   "statistics": {
@@ -339,7 +401,9 @@ net.export_to_file('model.json')
     "arcs": 2,
     "total_tokens": 2,
     "enabled_transitions": 1,
-    "enabled_transitions_list": ["t1"],
+    "enabled_transitions_list": [
+      "t1"
+    ],
     "deadlocked": false
   }
 }
@@ -374,10 +438,11 @@ net.export_to_file('model.yaml')
 
 **Example Output:**
 ```yaml
+---
 meta:
   format: PetriFlow YAML Export
   version: '1.0'
-  exported_at: '2025-11-05T10:30:00Z'
+  exported_at: '2026-10-05T06:30:20Z'
   net_type: petri_net
 net:
   name: MyNet
@@ -385,29 +450,45 @@ net:
   place_count: 2
   transition_count: 1
   arc_count: 2
+colors: []
 places:
-  - id: p1
-    name: Place 1
-    tokens: 2
-    capacity: infinite
+- id: p1
+  name: Place 1
+  tokens: 2
+  capacity: infinite
+- id: p2
+  name: Place 2
+  tokens: 0
+  capacity: infinite
 transitions:
-  - id: t1
-    name: Transition 1
-    input_arcs: 1
-    output_arcs: 1
-    enabled: true
+- id: t1
+  name: Transition 1
+  input_arcs: 1
+  output_arcs: 1
+  enabled: true
 arcs:
-  - id: arc_0
-    source:
-      id: p1
-      name: Place 1
-      type: Place
-    target:
-      id: t1
-      name: Transition 1
-      type: Transition
-    weight: 1
-    direction: place_to_transition
+- id: arc_0
+  source:
+    id: p1
+    name: Place 1
+    type: Place
+  target:
+    id: t1
+    name: Transition 1
+    type: Transition
+  weight: 1
+  direction: place_to_transition
+- id: arc_1
+  source:
+    id: t1
+    name: Transition 1
+    type: Transition
+  target:
+    id: p2
+    name: Place 2
+    type: Place
+  weight: 1
+  direction: transition_to_place
 marking:
   tokens_by_place:
     p1: 2
@@ -420,7 +501,7 @@ statistics:
   total_tokens: 2
   enabled_transitions: 1
   enabled_transitions_list:
-    - t1
+  - t1
   deadlocked: false
 ```
 
@@ -766,8 +847,5 @@ Guards and expressions are exported as metadata (name/type), but the actual Proc
 
 ## License
 
-Part of the PetriFlow gem. See main LICENSE file.
+Part of the PetriFlow gem (MIT License). See the gem's MIT-LICENSE file.
 
-## Contributing
-
-See main CONTRIBUTING.md for guidelines.

@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.8.0] - 2026-10-05
 
 ### Added
+- **`config.monitor_append_failure`** (opt-in; default `:log`, unchanged). With `:fail_write`,
+  Monitor fails a write whose event cannot be stored, raising `EventStoreUnavailableError` and
+  rolling the write back (bulk writes included), as Hijack and the event-sourcing modes always
+  do. Row and event already commit together; the setting decides only what a failed append
+  does. Validated on assignment.
+- **Trace conformance test** (`test/verification/trace_conformance_test.rb`). It records the
+  steps Lyra takes on real writes in every mode (event built, applied to the aggregate, stored;
+  row written; commit) and replays each trace token by token on a PetriFlow net: the paper's
+  core net with the row write placed as each mode places it. Every trace must be a firing
+  sequence ending in the net's final place, each operation must build exactly one event of its
+  own type, and a trace in another order is rejected. It found that Hijack and the
+  event-sourcing modes apply the event to the aggregate before storing it, the order the formal
+  model now uses.
 - **`LYRA_DISABLE_PETRI_FLOW=true`** — runs Lyra as without petri_flow, as
   `LYRA_DISABLE_PAM_DSL=true` does for PAM DSL.
 - **`lyra:workflows:generate OUTPUT_DIR=... REPORTS_DIR=...`** — write the workflow files and
@@ -137,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write to a monitored model, never inside an open transaction. A runtime switch
   (`ModeTransition.to!`) used to change only the process that made it. `to!` now logs what the
   switch reaches. On wherever the Mode Transition Safety gate is (not in the test environment);
-  the raw `config.mode =` setter is left alone. `docs/MODE_TRANSITIONS.md` documents the
+  the raw `config.mode =` setter is left alone. the migration guide (`docs/MIGRATION_GUIDE.md`, Switching modes) documents the
   deploy-time rule.
 - **Mode Transition Safety** (`Lyra::ModeTransition`, `rake lyra:mode:check`; FEATURE_GAP_PLAN F3)
   — a mode switch that changes the authoritative store is allowed only when rows and events
@@ -288,6 +301,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accompanying papers.
 
 ### Changed
+- **Documentation regrouped.** `docs/ADOPTION.md` and `docs/MODE_TRANSITIONS.md` are now
+  sections of `docs/MIGRATION_GUIDE.md` (Adopting Lyra in an existing application; Switching
+  modes); `docs/ORFEAS_FRAMEWORK_OVERVIEW.md` is the opening of `docs/ARCHITECTURE.md` (About
+  ORFEAS); `docs/PROJECTIONS_DATA_ACCESS_MONITORING.md` is split between `ARCHITECTURE.md`
+  (projections, write-side monitoring) and `docs/PRIVACY_COMPLIANCE.md` (read-side monitoring).
+  Claims were checked against the code on the way. `docs/PERFORMANCE.md` no longer presents the
+  withdrawn July 2026 figures: it explains each mode's cost in SQL statements per write, and
+  the throughput is being re-measured.
+- **The workflow generator's mode nets name what Lyra does.** Their steps were labelled with
+  methods that do not exist (`CommandHandler.validate`, `CommandHandler.execute`,
+  `Projection.apply`, `EventStore.append_to_stream`) or with `Aggregate.apply(command)`, and
+  the Monitor net called the event store through `Lyra::Event.publish`. Each step now names the
+  method Lyra calls, in the order the trace conformance test observes; the generator no longer
+  claims to introspect the implementation (the mode nets are written by hand). The shipped
+  `app/workflows/*_mode_workflow.rb` files are regenerated.
 - **Ruby 4.0 or later is required** (`required_ruby_version >= 4.0`, was `>= 3.4.5`); CI tests
   Ruby 4.0. The project runs 4.0.7.
 - **Article 30 register (PAM)** — `pam_dsl:report:article_30` states only what the policy declares (data subjects, recipients, transfers, security measures) and lists the rest as not declared; see `gems/pam_dsl/CHANGELOG.md`.

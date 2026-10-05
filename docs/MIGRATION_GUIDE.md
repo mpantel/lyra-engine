@@ -6,10 +6,99 @@ switching back to the previous mode.
 
 It is written for developers who maintain a Rails 8 application on PostgreSQL
 and want an event history of it, and possibly event sourcing, without
-rewriting its models or controllers. For what adoption costs and when it is
-not worth it, read [ADOPTION.md](ADOPTION.md) first. Method signatures and
-every configuration option are in [API_REFERENCE.md](API_REFERENCE.md); the
-mode switch mechanism is in [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+rewriting its models or controllers. Read
+[Adopting Lyra in an existing application](#adopting-lyra-in-an-existing-application)
+first: it says what adoption costs and when it is not worth it. How a mode
+switch works is in [Switching modes](#switching-modes). Method signatures and
+every configuration option are in [API_REFERENCE.md](API_REFERENCE.md).
+
+## Adopting Lyra in an existing application
+
+What "non-intrusive" means for Lyra, what adopting it costs, and what to check
+in your own codebase before relying on it. Written from the real-data replays
+(BPI Challenge 2017, and Olist orders through an unmodified Solidus 4.7) and the
+Aegean ePay testbed, all part of the research evaluation behind Lyra.
+
+### What "non-intrusive" means here
+
+**It holds in two senses:**
+
+- **No application code changes.** Solidus needed only the gem, an
+  initializer, and `monitor_with_lyra` added to its models from outside
+  (`class_eval`). No Solidus source was edited.
+- **The same results as plain ActiveRecord**, in Monitor, Hijack, ES-Sync and
+  ES-Lazy. On both replays these modes ended in the state an independent
+  oracle expects (computed from the source data alone) and matched Disabled
+  mode, with DualView finding every row consistent with its events.
+
+**It does not mean:**
+
+- **Zero cost.** Every mode costs throughput (below).
+- **Unchanged behaviour in every mode.** ES-NoProj answers reads differently.
+- **That Lyra sees every write.** Writes that bypass ActiveRecord never reach
+  it.
+
+### Is it worth it?
+
+**Yes, when you want what only it gives you:**
+
+- a complete event history of an application you cannot or will not rewrite;
+- a migration path toward event sourcing in which every step is checked
+  (DualView, and an oracle where you can build one) and can be undone by
+  switching mode.
+
+Its costs are the price of those two things, and each one can be measured
+before you commit: start in Monitor against real traffic, which changes no
+results.
+
+**Probably not, if:**
+
+- you need neither a history nor a migration, and your hot path is
+  write-heavy and latency-critical;
+- a large share of your writes are raw SQL or database triggers (Lyra cannot
+  see them);
+- you want to replay on every read (ES-NoProj) in code that reads through
+  joins and merged relations. Use ES-Lazy, or stay with a projected mode.
+
+### Costs, and what to do about each
+
+| Caveat | Effect | What to do |
+|---|---|---|
+| **Throughput** | Every mode costs throughput against plain ActiveRecord; how much is being re-measured. The mechanism is countable: every event adds two inserts, Monitor also opens a savepoint on every write, and Hijack avoids it on updates ([PERFORMANCE.md](PERFORMANCE.md)). | Measure on your workload in Monitor first. The cost is per write, so it scales with your write share. |
+| **ES-NoProj changes read semantics** | Reads come from event streams. Joins on plain associations are evaluated in memory, as SQL would. Queries it cannot answer exactly (merged relations, SQL fragments, nested, `:through` or scoped joins) raise `UnsupportedQuery` rather than guess. It cannot run Solidus. | Use **ES-Lazy** (`projection_mode :lazy`): it brings tables up to date from the log before each read and runs real SQL. |
+| **ES-NoProj read cost** | Every answer is rebuilt from streams, from cached entries that are each checked against their stream's last event. Collection reads touch every stream of the model. A delete that nullifies children must find them by attribute: 0.1–0.4 s in the Aegean smoke runs. A filter on a `belongs_to` association compares foreign keys, as ActiveRecord does, but every collection read still assembles the whole model from the cache: about 1.3 s per query over 10,000 rows in the mode-comparison benchmark, against 1–6 ms with real SQL. | Keep ES-NoProj for code that reads through simple finders, or use ES-Lazy. |
+| **Monitor and failed appends** | By default (`config.monitor_append_failure = :log`), if the event append fails in Monitor, the write still succeeds and the failure is only logged. | Alert on the log and run `lyra:repair` ([Phase 3](#phase-3-verify-and-repair-in-monitor)). If losing events is unacceptable, set `config.monitor_append_failure = :fail_write`, or use Hijack or an event-sourcing mode, where the append is the write. |
+| **Global hooks** | Hijack and the event-sourcing modes take over writes through modules prepended to `ActiveRecord::Persistence` and `ActiveRecord::Relation`. They act only on monitored models, and they switch PaperTrail off for those models. | Expect them in stack traces. If you rely on PaperTrail versions for monitored models, rely on Lyra's events instead. |
+| **Bulk writes record events** | `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify` on a monitored model publish one event per affected row. | Wrap seeding, fixtures and table wipes in `Lyra.projection_write { … }`, which publishes nothing. |
+| **Rows that predate Lyra** | In event-sourcing modes, a model's first use imports every row that has no stream yet (Genesis), so it can be slow once. | Run `bin/rails lyra:genesis MODEL=…` before switching modes on large tables ([Phase 2](#phase-2-genesis-rows-that-predate-lyra)). |
+| **Writes Lyra cannot see** | Raw SQL (`connection.execute`), database triggers, other applications writing the same tables. | Find them before you rely on the history. DualView reports the rows they changed as discrepancies. |
+| **Unverified codebases** | Each real-data replay found Lyra defects that broke these guarantees until fixed: namespaced models could not use Hijack or event sourcing at all, events were built before the model's own callbacks ran, and `update_columns`/`touch` writes went unrecorded. | Treat "the hook sees every write" as something to verify for your codebase, not to assume. See the checklist. |
+
+### Checklist for a new codebase
+
+1. **Start in Monitor** against real traffic. Nothing changes but cost and
+   the event log.
+2. **Run DualView** over the monitored models (`Lyra::DualView`,
+   `bin/rails lyra:repair DRY_RUN=1`). A discrepancy means a write Lyra did not
+   see, or a defect.
+3. **Search for writes outside ActiveRecord**: `execute`, `exec_update`,
+   triggers in the schema, other writers to the database.
+4. **Wrap housekeeping bulk writes** in `Lyra.projection_write`.
+5. **Import existing rows** with `bin/rails lyra:genesis` before an
+   event-sourcing mode.
+6. **Pick the event-sourcing variant by how the code reads.** ES-Sync for
+   table-shaped reads. ES-Lazy if reads use joins or merged relations.
+   ES-NoProj only for simple finders.
+7. **Where you can, replay a real workload with an oracle**
+   ([Testing during the migration](#testing-during-the-migration)). An oracle
+   catches writes that never reached the database, which DualView cannot,
+   because both of its views come from the same system.
+
+### Evidence
+
+- [PERFORMANCE.md](PERFORMANCE.md): per-mode cost, why, and how to measure it.
+- [CHANGELOG.md](../CHANGELOG.md): what changed and why, entry by entry,
+  including the defects the real-data replays found and their fixes.
 
 ## Prerequisites
 
@@ -44,7 +133,8 @@ modes, which gives seven configurations:
 
 The path this guide follows is Disabled → Monitor → Hijack → one of the
 event-sourcing configurations. Every switch that makes the events
-authoritative is checked first (Mode Transition Safety).
+authoritative is checked first (Mode Transition Safety); see
+[Switching modes](#switching-modes).
 
 ## Phase 0: Install
 
@@ -143,7 +233,9 @@ an event is appended inside the write's transaction (in a savepoint, opened by
 the event store's repository). The table stays authoritative. If the append
 fails, the error is logged (`Lyra: Failed to publish event ... run bin/rails
 lyra:repair`) and the write stands; its stream then falls behind its row until
-repaired. Alert on that log line.
+repaired. Alert on that log line. To fail the write instead, as Hijack and
+event sourcing do, set `config.monitor_append_failure = :fail_write`; an
+event-store failure then becomes a failed write.
 
 Writes that skip callbacks are recorded as bypass events, one per affected
 row: `update_column(s)`, `touch`, `delete`, `update_all`, `delete_all`,
@@ -284,24 +376,16 @@ event-sourcing mode is checked: every row must agree with its events.
    ```bash
    bin/rails lyra:mode:check TO=hijack
    ```
-   It first imports rows without a stream (Genesis), then compares every row
-   and stream, re-checks records that changed while it ran, prints up to 20
-   discrepancies and exits non-zero, or stores a certificate valid for
-   `config.mode_transition_certificate_ttl` seconds (3600 by default).
 2. Deploy `config.mode = :hijack`.
-3. At boot each process compares the configured mode with the one the
-   application last ran in (`lyra_mode_transitions`). Without a fresh
-   certificate for that switch the process refuses to start
-   (`Lyra::ModeTransition::Refused`) and names the check to run. With one, it
-   re-checks only what changed since and records the new mode.
-4. `Lyra::ModeSync` brings processes still on the old configuration into the
-   new mode within `config.mode_sync_interval` seconds (5 by default).
+3. The boot gate lets each process start in Hijack only with a fresh
+   certificate from that check; ModeSync brings processes still on the old
+   configuration into the new mode.
 
-`LYRA_FORCE_MODE_TRANSITION=1` lets a process boot into an uncertified mode.
-Rake tasks are not gated at boot. At run time, `Lyra::ModeTransition.to!(:hijack)`
-or `Lyra.config.enable_hijack!` runs the same gate in the current process and
-records the switch for the others; prefer the deploy for planned changes.
-Details: [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+At run time, `Lyra::ModeTransition.to!(:hijack)` or
+`Lyra.config.enable_hijack!` runs the same gate in the current process. What
+each step does, and the overrides, are in
+[The rule: switch modes with a deploy](#the-rule-switch-modes-with-a-deploy),
+[Switching at run time](#switching-at-run-time) and [Overrides](#overrides).
 
 **How to verify.** `bin/rails lyra:mode:status` shows the configured mode, the
 last applied one and whether the gate is on. Sampled DualView (Phase 3) keeps
@@ -351,7 +435,8 @@ not covered.
 
 Cost, from cheapest read to dearest: ES-Sync and ES-Async read plain tables;
 ES-Lazy pays for the events since the last read; ES-NoProj rebuilds from
-streams. See [PERFORMANCE.md](PERFORMANCE.md) and [ADOPTION.md](ADOPTION.md).
+streams. See [PERFORMANCE.md](PERFORMANCE.md) and
+[Costs, and what to do about each](#costs-and-what-to-do-about-each).
 
 **How to switch (gated).**
 
@@ -363,10 +448,10 @@ streams. See [PERFORMANCE.md](PERFORMANCE.md) and [ADOPTION.md](ADOPTION.md).
 - From Hijack to any event-sourcing configuration, from ES-Sync to any other,
   and between ES-NoProj and ES-Lazy: not checked; the events stay
   authoritative. Deploy the new settings.
-- Leaving ES-NoProj, ES-Lazy or ES-Async for a configuration that reads tables
-  (Monitor, Hijack, ES-Sync, ES-Async): checked, because those tables lag the
-  log. Run the check before deploying, while the application still runs the
-  mode you are leaving.
+- Leaving ES-NoProj, ES-Lazy or ES-Async for any configuration other than
+  ES-NoProj or ES-Lazy (Disabled, Monitor, Hijack, ES-Sync, ES-Async): checked,
+  because those tables lag the log. Run the check before deploying, while the
+  application still runs the mode you are leaving.
   - ES-Async: let the projection queue drain, then check.
   - ES-Lazy: the check catches the tables up first (only in a process that
     runs ES-Lazy).
@@ -387,6 +472,112 @@ them is the verification.
 log first, or compare every record in a console with
 `Lyra::ModeTransition.check(to: "monitor").discrepancies`, and rebuild if any
 (Recovery). From the lagging modes, follow the gated route above.
+
+## Switching modes
+
+How Lyra keeps an application in one mode, and how to move it to another
+safely. The safety rule comes from the thesis (Mode Transition Safety): a
+switch that changes which store is authoritative is allowed only when the
+rows and the events agree, for every monitored record.
+
+### Who holds the mode
+
+- **Each process holds the mode it runs in**, in its own memory
+  (`Lyra.config.mode`, `Lyra.config.projection_mode`), set by the
+  application's initializer (`config/initializers/lyra.rb`).
+- **The database holds the application's mode**: the latest `applied` row in
+  `lyra_mode_transitions`. A process writes one when it boots into a new mode,
+  or when none is recorded yet (after the boot gate, and only while the gate
+  is on), and on every gated switch (`ModeTransition.to!`). The table also
+  keeps the certificates of clean checks. Lyra creates it on first use; it
+  needs no migration.
+- **`Lyra::ModeSync` keeps the two in step.** At most every
+  `config.mode_sync_interval` seconds (default 5) each process looks for a
+  newer `applied` row and adopts its mode, without running the gate again
+  (the process that recorded it already passed it). It looks before each web
+  request, each background job and each `save`, `update` or `destroy` of a
+  monitored model (which covers consoles and scripts), and never inside an
+  open transaction, so a mode cannot change half-way through a write.
+
+### Which switches are checked
+
+| From | To | Checked? | Why |
+|---|---|---|---|
+| Disabled or Monitor | Hijack or any event-sourcing mode | yes | the events become authoritative, so they must reproduce every row |
+| ES-NoProj, ES-Lazy or ES-Async | Disabled, Monitor, Hijack, ES-Sync, or ES-Async | yes | those tables lag the log by design; they must catch up first |
+| anything else (Monitor → Disabled, ES-Sync → ES-NoProj, ES-NoProj ↔ ES-Lazy, …) | | no | the authoritative store does not change |
+
+A check imports rows that predate Lyra first (Genesis, on a switch out of
+Disabled or Monitor), compares every row and every stream, re-checks what
+changed while it ran, and stores a clean result as a certificate for that
+switch (valid for `config.mode_transition_certificate_ttl`, 1 hour by
+default). Leaving ES-Lazy, it catches the tables up first; leaving ES-NoProj,
+it rebuilds them when asked (`REBUILD=1`, or `rebuild: true`).
+
+### The rule: switch modes with a deploy
+
+Switching is a deploy, not a console command:
+
+1. **Check ahead**, on the running application:
+   ```bash
+   bin/rails lyra:mode:check TO=hijack
+   bin/rails lyra:mode:check TO=event_sourcing PROJECTION=sync
+   bin/rails lyra:mode:check TO=monitor REBUILD=1   # leaving ES-NoProj
+   ```
+   It checks the switch from the mode the application last ran in (`FROM=`
+   names another), and says so when the switch needs no check. It prints up
+   to 20 discrepancies and exits non-zero, or certifies the switch when there
+   are none. On a large table this is the slow part; it runs while the
+   application keeps serving.
+2. **Deploy the new configuration** (`config.mode = :hijack`, or the
+   environment variable your initializer reads).
+3. **The boot gate** compares each process's configured mode with the one the
+   application last ran in, and lets it start in the new mode only with a
+   fresh certificate for that switch, after re-checking just what changed
+   since the check. It then records the new mode. Without a certificate, the
+   process refuses to start (`Lyra::ModeTransition::Refused`) and says which
+   check to run.
+4. **ModeSync** brings any process still running the old configuration (during
+   a rolling deploy) into the new mode within seconds of the first new process
+   recording it.
+
+`bin/rails lyra:mode:status` shows the configured mode, the last applied one,
+and whether the gate is on.
+
+### Switching at run time
+
+`Lyra::ModeTransition.to!(:hijack)` (and the `config.enable_*!` helpers after
+boot) runs the same gate in the current process: a fresh certificate is
+re-checked for what changed since, otherwise a full check runs, and
+discrepancies refuse the switch (`Refused`, with the report). A clean switch
+is recorded as the application's mode, so the other processes adopt it through
+ModeSync; the log line says so. With ModeSync off, it says the switch reached
+this process only. Use it for single-process work (a console during an
+incident, a maintenance script, tests); for a planned change, prefer the deploy
+above.
+
+### Overrides
+
+- `ModeTransition.to!(mode, force: true)` switches without the check.
+- `LYRA_FORCE_MODE_TRANSITION=1` lets a process boot into an uncertified mode.
+- Rake tasks are not gated at boot, so migrations and the check itself can run
+  in any configuration.
+- `config.mode = ...` is the raw setter: no gate, no record, and ModeSync does
+  not override it unless another process records a new switch. Tests and the
+  benchmark harnesses use it. `config.disable!` is not gated either.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `mode_transition_gate` | `nil` | `nil` gates everywhere but the test environment; `true`; `false` |
+| `mode_transition_certificate_ttl` | `3600` | seconds a clean check certifies a switch |
+| `mode_sync` | `nil` | `nil` follows the gate; `true`; `false` |
+| `mode_sync_interval` | `5` | seconds between a process's checks for a switch made elsewhere |
+
+The sampled DualView settings (`dual_view_sample_rate`,
+`dual_view_discrepancy_handler`) are in
+[Phase 3](#phase-3-verify-and-repair-in-monitor).
 
 ## Privacy (optional, PAM)
 
@@ -414,8 +605,7 @@ models. Everything here is opt-in except what the policy itself declares.
   `bin/rails lyra:retention:apply` on a schedule (`DRY_RUN=1` lists what would
   happen, with the executor on or off).
 
-Details: [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md) and
-[ADOPTION.md](ADOPTION.md).
+Details: [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md).
 
 ## Point-in-time reads
 
@@ -462,7 +652,8 @@ replays each stream onto the table in place.
 under `strict_data_access`), so they become part of the history. Make
 corrections as ordinary writes, which are recorded as such.
 
-**Undoing a mode switch.** Switch back by the routes in Phases 4 and 5. Use
+**Undoing a mode switch.** Switch back by the routes in Phases 4 and 5 and
+[Switching modes](#switching-modes). Use
 `ModeTransition.to!(mode, force: true)` or `LYRA_FORCE_MODE_TRANSITION=1` only
 when you accept that the stores may disagree.
 

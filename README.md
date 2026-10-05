@@ -32,9 +32,10 @@ seven configurations:
 - **Hijack and event sourcing** build the event in hooks prepended to
   ActiveRecord's persistence, after the model's `before_*` callbacks.
 - **Callback-bypassing writes** (`update_columns`, `update_column`, `touch`,
-  `delete`, `update_all`, `delete_all`, `insert_all`, `upsert_all`) on a
-  monitored model publish bypass events; with `config.strict_data_access = true`
-  they raise instead (except `touch`).
+  `delete`, `update_all`, `delete_all`, `insert_all`, `insert_all!`, `upsert_all`,
+  and the updates of `dependent: :nullify`) on a monitored model publish bypass
+  events; with `config.strict_data_access = true` they raise instead (except
+  `touch` and the `dependent: :nullify` updates).
 - Each record has its own stream, named `"Model$id"` (for example `"Order$42"`).
 - **ES-NoProj** writes no rows; it answers a query exactly from the events or
   raises `Lyra::Projections::UnsupportedQuery`.
@@ -43,7 +44,7 @@ seven configurations:
   that rows and events agree before a switch that changes the authoritative
   store, and the engine refuses to boot into such a switch without a
   certificate from `rake lyra:mode:check`. See
-  [Switching Modes](docs/MODE_TRANSITIONS.md).
+  [Switching Modes](docs/MIGRATION_GUIDE.md#switching-modes).
 
 ## Requirements and installation
 
@@ -81,8 +82,9 @@ Beyond the modes above (see the [API Reference](docs/API_REFERENCE.md) for each)
   an access log, privacy stamps in event metadata, erasure of one record's
   personal data from its row and its events (`rake lyra:erase`), and retention
   rules (`rake lyra:retention:apply`).
-- **Formal verification** (needs petri_flow): generate Petri net workflows
-  from Lyra's model mapping and verify them.
+- **Formal verification** (needs petri_flow): Petri net models of each mode's
+  write path, checked with PetriFlow (`rake lyra:workflows:verify`), and a
+  check of the CRUD-to-event mapping (`Lyra.verify_mapping!`).
 - **Dashboard**: `mount Lyra::Engine, at: "/lyra"`. Outside development and
   test it answers 403 until `config.dashboard_authorization` (a proc run on the
   controller, e.g. `->(controller) { controller.current_user&.admin? }`) says
@@ -120,7 +122,7 @@ individual calls.
 - **CQRS Support**: Commands and aggregates alongside the projected tables
 
 ### For Operations
-- **Few code changes**: A model is monitored by one line or by naming it in the initializer; controllers and queries stay as they are (see [Adopting Lyra](docs/ADOPTION.md) for what this costs)
+- **Few code changes**: A model is monitored by one line or by naming it in the initializer; controllers and queries stay as they are (see [Adopting Lyra](docs/MIGRATION_GUIDE.md#adopting-lyra-in-an-existing-application) for what this costs)
 - **Rollback**: Every mode can be switched back to the previous one
 - **Monitoring**: Compare table and event-sourced state (DualView)
 - **Validation**: A switch that makes the events authoritative is checked first
@@ -135,15 +137,15 @@ individual calls.
 - **[Migration Guide](docs/MIGRATION_GUIDE.md)** - Installation and the step-by-step move from CRUD to event sourcing
 - **[API Reference](docs/API_REFERENCE.md)** - Configuration options, methods, rake tasks and errors
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
-- **[Switching Modes](docs/MODE_TRANSITIONS.md)** - Who holds the mode, and how to switch safely (the deploy-time rule)
-- **[Adopting Lyra](docs/ADOPTION.md)** - What "non-intrusive" means, the costs, and a checklist for a new codebase
-- **[Performance](docs/PERFORMANCE.md)** - Overhead per mode, from the July 2026 baseline, which is being re-measured
+- **[Switching Modes](docs/MIGRATION_GUIDE.md#switching-modes)** - Who holds the mode, and how to switch safely (the deploy-time rule)
+- **[Adopting Lyra](docs/MIGRATION_GUIDE.md#adopting-lyra-in-an-existing-application)** - What "non-intrusive" means, the costs, and a checklist for a new codebase
+- **[Performance](docs/PERFORMANCE.md)** - What each mode costs and why (counted in SQL statements per write; throughput being re-measured)
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common problems
-- **[Monorepo Structure](docs/MONOREPO.md)** - Repository organization
+- **[Workflow Generator](docs/WORKFLOW_GENERATOR.md)** - The Petri net workflow models of Lyra's modes and their verification
 - **[Changelog](CHANGELOG.md)**
 
 ### Theoretical Foundation
-- **[ORFEAS Framework Overview](docs/ORFEAS_FRAMEWORK_OVERVIEW.md)** - Complete framework description
+- **[ORFEAS Framework Overview](docs/ARCHITECTURE.md#about-orfeas)** - The framework: naming, vision, components and migration path (the opening of ARCHITECTURE.md)
 - **[Petri Nets Model](gems/petri_flow/docs/THEORETICAL_MODEL_PETRI_NETS.md)** - P/T nets for verification, CPNs for data modeling
 - **[Matrix Analysis Model](gems/petri_flow/docs/THEORETICAL_MODEL_MATRICES.md)** - Linear algebra approach
 

@@ -486,8 +486,9 @@ Order.create!(email: "customer@example.com", credit_card: "4111111111111111")
 
 ### The privacy stamp
 
-With the policy declaring `email` and `credit_card`, the event's metadata
-includes (string keys; values illustrative):
+With the `:ecommerce` policy of `config/privacy_policies.rb` (which declares
+`email` and `credit_card`, each with a `:display` transformation, and keeps
+orders for 7 years), the event's metadata includes (string keys):
 
 ```ruby
 {
@@ -497,12 +498,13 @@ includes (string keys; values illustrative):
     "fields" => {
       "email" => {
         "type" => "email", "sensitivity" => "internal",
-        "purposes" => ["order_fulfillment"], "retention" => "P7Y"
+        "purposes" => ["account_management", "order_fulfillment", "marketing"],
+        "retention" => "P7Y", "transformations" => ["display"]
       },
       "credit_card" => {
         "type" => "credit_card", "sensitivity" => "restricted",
         "purposes" => ["payment_processing"], "retention" => "P7Y",
-        "transformations" => ["display", "log"]
+        "transformations" => ["display"]
       }
     }
   }

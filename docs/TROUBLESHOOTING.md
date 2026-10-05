@@ -3,7 +3,7 @@
 Problems you may meet with Lyra, what causes them, and how to fix them. For
 the API see [API_REFERENCE.md](API_REFERENCE.md); for the migration path and
 its pitfalls see [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md); for switching modes
-see [MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+see [MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes).
 
 ## Table of Contents
 
@@ -160,6 +160,7 @@ What happened to the write depends on the mode:
 |---|---|---|
 | Hijack, event sourcing (any projection mode) | fail-closed | raises `EventStoreUnavailableError` and rolls back: nothing in the table, nothing in the log |
 | Monitor | log-and-continue | stands; the error is logged ("Lyra: Failed to publish event … the write stands"), and the record's stream falls behind its row |
+| Monitor, `monitor_append_failure = :fail_write` | fail-closed | as Hijack and event sourcing |
 
 **Fix:** fix the cause (look at `error.cause`). In Monitor, then bring the
 lagging streams back in line from the tables:
@@ -263,7 +264,7 @@ head: the record predates Lyra and was not imported (Genesis, above).
 
 Mode switches are gated: a switch that changes the authoritative store needs a
 clean check of every row against its stream. The full procedure is in
-[MODE_TRANSITIONS.md](MODE_TRANSITIONS.md).
+[MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes).
 
 ### `Lyra::ModeTransition::Refused`: "Lyra will not start in hijack: the application last ran in monitor, and no clean check certifies that switch"
 
@@ -321,7 +322,7 @@ default.
 
 This is expected. In Hijack the event is stored first and then the row is
 written, in the same transaction; reads still come from the tables. Only
-ES-NoProj and ES-Lazy defer or skip the row write.
+ES-Async, ES-Lazy and ES-NoProj defer or skip the row write.
 
 ---
 
@@ -551,7 +552,7 @@ The full list of errors Lyra raises is in
 
 | Error | Cause | Fix |
 |---|---|---|
-| `Lyra::EventStoreUnavailableError` | An event could not be stored; the write rolled back (Hijack, event sourcing). | [Above](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair) |
+| `Lyra::EventStoreUnavailableError` | An event could not be stored; the write rolled back (Hijack, event sourcing, and Monitor with `monitor_append_failure = :fail_write`). | [Above](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair) |
 | `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate. | [Mode Switching Issues](#mode-switching-issues) |
 | `Lyra::Repair::Refused` | `lyra:repair` outside Monitor/Disabled. | Rebuild the tables instead: `bin/rails lyra:projections:rebuild`. |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. | [Above](#lyraprojectionsunsupportedquery-es-noproj) |
@@ -609,6 +610,6 @@ its stack trace, and the reproduction steps.
 - [Getting Started](GETTING_STARTED.md)
 - [API Reference](API_REFERENCE.md)
 - [Migration Guide](MIGRATION_GUIDE.md)
-- [Switching Modes](MODE_TRANSITIONS.md)
+- [Switching Modes](MIGRATION_GUIDE.md#switching-modes)
 - [Architecture](ARCHITECTURE.md)
 - [Main Documentation](../README.md)

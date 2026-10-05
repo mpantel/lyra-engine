@@ -9,7 +9,10 @@ PetriFlow is a Ruby-based Colored Petri Net (CPN) library that provides:
 - Structural property verification (boundedness, safety)
 - Reachability analysis
 - Simulation of token flow
-- Correspondence verification between formal model and implementation
+
+The correspondence check between the formal model and Lyra's code is done by
+`verify_model_correspondence.rb` (below), by text matching; it is not part of
+PetriFlow.
 
 ## Prerequisites
 
@@ -40,16 +43,16 @@ This script:
    - Reachable states (expected: 4)
    - Boundedness (expected: 1-bounded/safe)
    - Terminal states (expected: 1 - intentional completion)
-3. **Simulates token flow**: P_crud → P_event → P_published → P_aggregate
+3. **Simulates token flow**: P_crud → P_event → P_aggregate → P_published
 4. **Writes** `figures/formal_crud_to_event_model.dot` and `figures/crud_to_event_petri.dot`
 
 Output (trimmed):
 ```
 📋 Creating Colored Petri Net Model...
   ✓ Token colors defined (Definitions 1-3)
-  ✓ Places defined: P_crud, P_event, P_published, P_aggregate, P_orm
+  ✓ Places defined: P_crud, P_event, P_aggregate, P_published, P_orm
   ✓ Guards defined: G(T_create), G(T_update), G(T_delete)
-  ✓ Transitions defined: T_create, T_update, T_delete, T_publish, T_apply
+  ✓ Transitions defined: T_create, T_update, T_delete, T_apply, T_publish
   ✓ Arcs connected with expressions
 
 📊 Structural Verification Results:
@@ -66,7 +69,7 @@ Property 2: Deterministic Mapping
 
 Property 4: Liveness
   "All transitions can eventually fire (no deadlock)"
-  ⚠ Terminal state exists (expected: aggregate updated is final state)
+  ⚠ Terminal state exists (expected: event stored is the final state)
 
 Invariant Check Summary
   Total invariants: 2
@@ -75,7 +78,7 @@ Invariant Check Summary
 
 📊 Simulation Results:
   Steps executed:    3
-  Firing sequence:   t_map → t_publish → t_apply
+  Firing sequence:   t_map → t_apply → t_publish
   States visited:    4
 
 Properties Verified:
@@ -98,6 +101,7 @@ This script:
 2. **Parses Lyra implementation files**:
    - `lib/lyra/interceptors/crud_interceptor.rb`
    - `lib/lyra/command_handler.rb`
+   - `lib/lyra/domain_events.rb`
    - `lib/lyra/aggregate.rb`
 3. **Matches formal elements to implementation**:
    - Places → Implementation components
@@ -116,27 +120,22 @@ Output (trimmed):
 | Formal (CPN)                   | Lyra Implementation       | Status   |
 ----------------------------------------------------------------------
 | p_crud                         | CrudInterceptor callbacks | ✓ MATCH  |
+| p_event                        | Lyra::Event objects (create_events) | ✓ MATCH  |
+| p_published                    | Rails Event Store streams | ✓ MATCH  |
 | p_aggregate                    | Aggregate state           | ✓ MATCH  |
 | T_map (T_create ∪ T_update ∪ T_delete) | handle_create/update/destroy | ✓ MATCH  |
+| t_publish                      | Lyra.append_events()      | ✓ MATCH  |
 | t_apply                        | aggregate.apply()         | ✓ MATCH  |
 | Guards G(T_x)                  | Commands::*Command pattern matching | ✓ MATCH  |
 | Arc expression E(T_x)          | CommandHandler#create_event, CrudInterceptor#publish_event | ✓ MATCH  |
 ----------------------------------------------------------------------
-
-⚠ Mismatches found:
-  p_event: ✗ NOT FOUND
-  p_published: ✗ NOT FOUND
-
-  Total checks:  9
-  Passed:        9
+...
+  Total checks:  12
+  Passed:        12
   Failed:        0
 
   🎉 FORMAL MODEL AND IMPLEMENTATION ARE STRUCTURALLY ISOMORPHIC
 ```
-
-The script's text matching does not locate `p_event` or `p_published` in the
-parsed files and reports them as mismatches; these two are not among the nine
-counted checks, so the summary still reads 9/9.
 
 ## Understanding the Formal Model
 
@@ -144,8 +143,8 @@ counted checks, so the summary still reads 9/9.
 
 | Color | Attributes | Purpose |
 |-------|-----------|---------|
-| `crud_token` | operation, model_class, model_id, attributes | CRUD operation data |
-| `event_token` | event_type, event_id, data, metadata | Generated event |
+| `crud_token` | operation, model_class, model_id, attributes, correlation_id | CRUD operation data |
+| `event_token` | event_type, event_id, stream_name, data, metadata | Generated event |
 | `aggregate_token` | aggregate_id, state, version | Aggregate state |
 
 ### Places
@@ -154,8 +153,8 @@ counted checks, so the summary still reads 9/9.
 |-------|-------------|----------------|
 | P_crud | CRUD operation initiated | CrudInterceptor callbacks |
 | P_event | Event generated | Lyra::Event objects |
-| P_published | Event stored | Rails Event Store streams |
 | P_aggregate | Aggregate updated | GenericAggregate state |
+| P_published | Event stored | Rails Event Store streams |
 
 ### Transitions
 
@@ -164,8 +163,8 @@ counted checks, so the summary still reads 9/9.
 | T_create | op == :create | ModelCreated event | handle_create |
 | T_update | op == :update | ModelUpdated event | handle_update |
 | T_delete | op == :delete | ModelDestroyed event | handle_destroy |
-| T_publish | (none) | Store event | event_store.publish() |
 | T_apply | (none) | Apply to aggregate | aggregate.apply() |
+| T_publish | (none) | Store event | Lyra.append_events() (via aggregate.store) |
 
 ### Verified Properties
 
@@ -174,14 +173,14 @@ counted checks, so the summary still reads 9/9.
 | **Operation Completeness** | Every CRUD generates event | All 3 handlers present |
 | **Deterministic Mapping** | Guards mutually exclusive | case/when pattern |
 | **State Consistency** | Aggregate matches ORM | dual-view verification |
-| **Reachability/Termination** | Terminal state reachable | Simulation reaches P_aggregate |
+| **Reachability/Termination** | Terminal state reachable | Simulation reaches P_published |
 
 ## Interpreting Results
 
 ### "Deadlock-free: false" - Is This a Problem?
 
 Not by itself. `liveness[:deadlock_free]` counts every reachable dead marking
-as a deadlock, including the intended end of the net (here, P_aggregate with
+as a deadlock, including the intended end of the net (here, P_published with
 one token), so it is false for any net with a defined endpoint. The
 formal-model script prints this raw value.
 
@@ -189,7 +188,7 @@ To check deadlock-freedom except at the intended end, pass the terminal
 places to `PetriFlow.verify`:
 
 ```ruby
-results = PetriFlow.verify(net, terminal_places: [:p_aggregate])
+results = PetriFlow.verify(net, terminal_places: [:p_published])
 results[:liveness][:terminates_properly]     # true when every dead marking marks a terminal place
 results[:liveness][:improper_dead_markings]  # number of dead markings that mark none
 ```
@@ -225,19 +224,16 @@ net.add_arc(source_id: :p_start, target_id: :t_process)
 net.add_arc(source_id: :t_process, target_id: :p_end)
 
 # Verify (p_end is the intended end, not a deadlock)
-initial = net.current_marking
 results = PetriFlow.verify(net, terminal_places: [:p_end])
 puts results
 ```
 
 ### Simulate Execution
 
-`PetriFlow.verify` explores the state space on the net itself and leaves it in
-the last marking it visited, so restore the initial marking before firing:
+`PetriFlow.verify` explores the state space on the net itself, then restores
+the marking the net had before the call, so the net can be fired straight away:
 
 ```ruby
-net.set_marking(initial)
-
 # Fire transitions manually
 net.fire_transition(:t_process)
 
@@ -267,11 +263,13 @@ class AsyncWorkflow < PetriFlow::Workflow
 end
 ```
 
-**Mermaid diagram shows:**
+**Mermaid diagram shows** (`AsyncWorkflow.new.to_mermaid`, edges only):
 ```
-start --> async_fork
-async_fork --> response_sent
-async_fork --> background_job
+start --> t_async_fork_from_start
+t_async_fork_from_start -->|∥ Response sent| response_sent
+t_async_fork_from_start -->|∥ Background job| background_job
+background_job --> t_process_job_from_background_job
+t_process_job_from_background_job --> job_complete
 ```
 
 ### Join Pattern (Synchronization)

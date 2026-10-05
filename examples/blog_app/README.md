@@ -29,11 +29,11 @@ production) is in the Lyra guides linked at the end.
   `blog_app_test` in it. For another server, set `DATABASE_HOST`,
   `DATABASE_PORT`, `DATABASE_USER` and `DATABASE_PASSWORD`.
 
-The Gemfile loads Lyra (`orfeas_lyra`) and PetriFlow (`orfeas_petri_flow`)
-from this checkout (`../..`), and pins Rails 8.1.3.1 and RailsEventStore 3.1,
-the versions Lyra is tested with. PetriFlow is optional for Lyra itself, but
-Lyra's rake tasks (`lyra:repair`, `lyra:genesis`, ...) eager load the engine,
-which needs it.
+The Gemfile loads Lyra (`orfeas_lyra`, from `../..`) and PetriFlow
+(`orfeas_petri_flow`, from `../../gems/petri_flow`) from this checkout, and pins
+Rails 8.1.3.1 and RailsEventStore 3.1, the versions Lyra is tested with.
+PetriFlow is optional for Lyra itself, but Lyra's rake tasks (`lyra:repair`,
+`lyra:genesis`, ...) eager load the engine, which needs it.
 
 ## Setup
 

@@ -50,8 +50,8 @@ bundle exec rake test:all   # Lyra, then PAM DSL, then PetriFlow
 bin/test                    # PetriFlow, PAM DSL, then Lyra; exits non-zero if any fails
 ```
 
-At the time of writing the engine suite has 1112 tests, PAM DSL 445 and
-PetriFlow 406.
+At the time of writing the engine suite has 1168 tests, PAM DSL 448 and
+PetriFlow 407.
 
 ### One gem
 
@@ -92,6 +92,16 @@ the gem: the engine then neither autoloads nor eager-loads `app/workflows`, and
 formal verification is unavailable. It parallels `LYRA_DISABLE_PAM_DSL`; no
 rake task runs the suite with it. `test/integration/lyra_without_petri_flow_test.rb`
 boots the dummy app with the switch in a subprocess and eager-loads it.
+
+### Trace conformance
+
+`test/verification/trace_conformance_test.rb` records the steps Lyra takes on
+real writes in Monitor, Hijack and the four event-sourcing projection modes
+(the event built, applied to the aggregate, stored, the row written, the
+commit) and replays each trace with PetriFlow on that mode's Petri net: every
+step must fire an enabled transition and the last must leave the token in the
+net's final place. It runs as part of `rake test` and is skipped without
+PetriFlow.
 
 ### Specific files and methods
 
@@ -145,9 +155,9 @@ These tasks are defined in `lib/tasks/testbed.rake` (root) and
 | `bundle exec rake test:comprehensive` | Four phases: the engine suite once; PAM DSL and PetriFlow; the testbed suite in all seven configurations (resetting the test database between them); the engine suite once without PAM DSL. Writes a Markdown report to `examples/aegean_epay_testbed/reports/comprehensive_test_<timestamp>.md`. |
 
 The engine suite runs once because its tests set their own mode: run once
-per configuration, it gave the same 1174 tests each time.
+per configuration, it gave the same tests, all passing, each time.
 
-The testbed suite has 563 tests. For each configuration,
+The testbed suite has 567 tests (plus 76 system tests). For each configuration,
 `lyra:test:all_modes` prints a line with the test, assertion, failure, error
 and skip counts and the duration, then a table of the results by
 configuration, the totals, any failing configurations with their
@@ -171,7 +181,7 @@ bin/rails test
 The tests replay `test/fixtures/files/mini_bpi2017.xes`, a hand-written
 miniature log; no real data is in the repository.
 
-**Solidus case study** (`examples/solidus_case_study`, RSpec, 343 examples).
+**Solidus case study** (`examples/solidus_case_study`, RSpec, 346 examples).
 Its database is PostgreSQL on port 5434. The asset pipeline needs a
 JavaScript runtime such as Node (ExecJS), and the JavaScript system specs need
 Chrome. Where a local headless Chrome cannot start, `bin/rspec-chrome-docker`
@@ -201,7 +211,7 @@ test/                               # Lyra
 ├── projections/
 ├── schema/
 ├── tasks/                          # rake tasks (erase, workflow generator)
-├── verification/                   # bypass and CRUD lifecycle nets
+├── verification/                   # bypass and CRUD lifecycle nets; trace conformance of each mode
 ├── fixtures/
 └── dummy/                          # minimal Rails application (config, db/schema.rb)
 

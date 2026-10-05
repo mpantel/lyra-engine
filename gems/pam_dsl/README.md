@@ -15,11 +15,16 @@ PAM DSL provides a fluent, expressive way to define privacy policies using the P
 
 ## Installation
 
-Add to your Gemfile:
+The gem is published as `orfeas_pam_dsl`; the library it loads is `pam_dsl`. Add to your Gemfile:
 
 ```ruby
-gem 'pam_dsl', path: 'gems/pam_dsl'  # For monorepo
+gem 'orfeas_pam_dsl', require: 'pam_dsl'
+
+# Inside the Lyra monorepo
+gem 'orfeas_pam_dsl', path: 'gems/pam_dsl', require: 'pam_dsl'
 ```
+
+Ruby 4.0 or later is required. There are no runtime dependencies: ActiveSupport is used when it is loaded (as in a Rails app), and otherwise a small standard-library polyfill provides the duration helpers (`7.years`, `2.days.ago`) with a fixed 30-day month and 365-day year.
 
 ## Quick Start
 
@@ -353,8 +358,8 @@ policy.consent_policy.grant_consent(
   granted_at: 6.months.ago
 )
 
-# Subject 42 withdraws consent
-policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 42)
+# Subject 43 withdraws consent
+policy.consent_policy.withdraw_consent(purpose: :marketing, subject: 43)
 ```
 
 `validate_access!` then looks up the store automatically — no need to pass a boolean. The check applies when the purpose's basis is `:consent` and its consent requirement is `required!` (the default once `for_purpose` declares one):
@@ -382,8 +387,8 @@ Add organization-wide or policy-specific attributes:
 ```ruby
 PamDsl.define_policy :my_app do
   # Policy-level custom attributes
-  meta :organization, "University of the Aegean"
-  meta :dpo_email, "dpo@aegean.gr"
+  meta :organization, "Example University"
+  meta :dpo_email, "dpo@example.com"
   meta :policy_version, "2.1"
   meta :gdpr_compliant, true
   meta :last_review_date, "2026-06-02"
@@ -394,7 +399,7 @@ end
 
 # Access policy metadata
 policy = PamDsl.policy(:my_app)
-policy.metadata[:organization]      # => "University of the Aegean"
+policy.metadata[:organization]      # => "Example University"
 policy.metadata[:gdpr_compliant]    # => true
 ```
 
@@ -1106,7 +1111,7 @@ report = compliance.data_export
 # Right to be forgotten analysis
 erasure = compliance.right_to_be_forgotten_report
 # => { total_events: 47, events_with_pii: 23, affected_models: ['User', 'Order'],
-#      deletion_strategy: :batch_deletion }
+#      deletion_strategy: :direct_deletion }
 
 # Data portability export
 json = compliance.portable_export(format: :json)
@@ -1193,7 +1198,7 @@ report = compliance.data_export
 
 `generate_from_models` creates a draft policy file with:
 - Field definitions with the detected type and sensitivity, each commented with the models it was found in
-- `:display` and `:log` transformations for confidential and restricted fields
+- A `:log` transformation for confidential and restricted fields, and a `:display` one as well for emails, phones, identifiers, SSNs, card numbers, credentials and tokens
 - Suggested processing purposes, chosen by the detected types, with `lia_documented!` left commented out for legitimate-interests purposes
 - A 7-year default retention, and 10 years for models whose names contain payment, transaction, invoice or order
 - Rails configuration boilerplate (`default_policy`, `organization`, `dpo_contact`)
@@ -1656,7 +1661,7 @@ end
 
 ## License
 
-MIT License - see LICENSE file
+MIT License - see MIT-LICENSE
 
 ## Contributing
 

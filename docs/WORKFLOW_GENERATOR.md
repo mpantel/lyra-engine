@@ -1,7 +1,7 @@
 # Lyra Workflow Generator
 
-Petri net workflow models generated from the Lyra implementation, and the
-other verification nets that ship with Lyra.
+Petri net models of Lyra's modes and of its records' lifecycle, written out
+by the generator, and the other verification nets that ship with Lyra.
 
 ## Table of Contents
 
@@ -145,48 +145,58 @@ States: nonexistent → created → persisted → updated → destroyed → dele
 The `persisted ↔ updated` cycle is intentional: a record can be updated any
 number of times. The terminal place is `deleted`.
 
+The four mode nets below are written by hand in the generator, one step per
+method Lyra calls, in the order `test/verification/trace_conformance_test.rb`
+observes on real writes (that test replays recorded traces on the paper's net,
+placed per mode).
+
 ### 2. Monitor Mode Workflow
 
 ```
-idle → crud_executing → crud_completed → event_building → event_publishing → completed
+idle → row_written → event_built → completed
 ```
 
-The write runs as usual; the event is built and stored after it.
+ActiveRecord writes the row; an `after_*` callback builds the event
+(`CrudInterceptor#publish_event`, through `Lyra::DomainEvents.build`) and
+`Lyra.append_events` stores it in a savepoint of the same transaction.
 
 ### 3. Hijack Mode Workflow
 
 ```
-idle → crud_intercepted → command_created → command_validating →
-command_valid → event_created → event_stored → projecting → completed
+idle → command_built → event_built → event_applied → event_stored → completed
 ```
 
-The write is turned into a command, its event is stored first, and the row is
-written from it.
+After the model's own `before_*` callbacks, the write becomes a `Lyra::Command`
+(a create first reserves its id). `Lyra::CommandHandler.handle` builds the
+event (`create_events`), applies it to the aggregate (`aggregate.apply(event)`,
+which adds it to the aggregate's pending events) and stores it
+(`aggregate.store`, through `Lyra.append_events`). ActiveRecord then writes the
+row with the event's attributes.
 
 ### 4. ES Sync Mode Workflow
 
 ```
-idle → command_received → aggregate_loading → aggregate_loaded →
-command_applying → events_generated → events_storing → events_stored →
-projecting_sync → projection_complete → completed
+idle → command_built → event_built → event_applied → event_stored → completed
 ```
 
-The projection runs before the write returns.
+As Hijack, except that the row write is withheld: the `after_*` callback
+`lyra_finalize_event_source` stores the event, and the synchronous projection
+writes the row from it before the write returns.
 
 ### 5. ES Async Mode Workflow
 
 Asynchronous projection, modelled with a **fork**:
 
 ```
-idle → command_received → aggregate_loading → aggregate_loaded →
-command_applying → events_generated → events_storing → events_stored →
+idle → command_built → event_built → event_applied → event_stored →
 async_fork ──┬──→ response_returned (terminal: immediate response)
-             └──→ job_processing → projecting_async → projection_complete (terminal: eventual)
+             └──→ job_enqueued → projection_complete (terminal: eventual)
 ```
 
 The `async_fork` transition puts a token in two places at once:
 - `response_returned`: the caller gets its response without waiting
-- `job_processing`: the background projection starts
+- `job_enqueued`: `AsyncProjectionJob` is enqueued after commit; it writes the
+  row from the record's stream, under a per-stream lock
 
 Both `response_returned` and `projection_complete` are terminal places.
 
@@ -203,7 +213,7 @@ transition :cancel, from: :order, to: :cancelled
 transition :complete, from: :order, to: :completed
 
 # Fork: one transition to several places
-transition :async_fork, from: :events_stored, to: [:response_returned, :job_processing]
+transition :async_fork, from: :event_stored, to: [:response_returned, :job_enqueued]
 ```
 
 ---
@@ -247,23 +257,18 @@ Written to `REPORTS_DIR` if set, otherwise to `<Rails.root>/reports/`:
 # Generated at: <time>
 
 # Monitor Mode Workflow
-# Passively observes CRUD operations without modification
+# The row is written as usual; the event follows in the same transaction
 class MonitorModeWorkflow < PetriFlow::Workflow
   workflow_name "Monitor Mode Workflow"
 
-  places :idle, :crud_executing, :crud_completed, :event_building, :event_publishing, :completed
+  places :idle, :row_written, :event_built, :completed
   initial_place :idle
   terminal_places :completed
 
-  transition :receive_crud,
+  transition :write_row,
              from: :idle,
-             to: :crud_executing,
-             trigger: "ActiveRecord callback triggered"
-
-  transition :crud_success,
-             from: :crud_executing,
-             to: :crud_completed,
-             trigger: "CRUD operation completes successfully"
+             to: :row_written,
+             trigger: "ActiveRecord writes the row"
 
   # ... more transitions
 end
@@ -452,9 +457,10 @@ Use one of the listed modes.
 
 ### "No callbacks detected in source"
 
-Expected with the current code: the generator looks for callbacks in
-`lib/lyra/monitorable.rb`, which does not exist. The lifecycle net then uses
-the default triggers; the nets are otherwise unaffected.
+Expected with the current code: the generator does not introspect Lyra's own
+callbacks (installed by `Lyra::Interceptors::CrudInterceptor`), so the
+report's callback lists stay empty. The lifecycle net uses the generic
+`after_*` triggers; the nets are otherwise unaffected.
 
 ### "Don't know how to build task 'environment'"
 

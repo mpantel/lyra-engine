@@ -30,7 +30,7 @@ P₂: Event_Generated        - Event(s) created from CRUD operation
 P₃: PII_Detected          - PII analysis completed
 P₄: Policy_Evaluated      - Privacy policy checked
 P₅: Event_Published       - Event stored in event store
-P₆: Aggregate_Updated     - Aggregate state modified (Hijack mode)
+P₆: Aggregate_Updated     - Aggregate state modified (Hijack and event-sourcing modes)
 P₇: ORM_Updated           - Database state modified (Monitor mode)
 P₈: Correlation_Grouped   - Events grouped by correlation_id
 ```
@@ -43,9 +43,10 @@ T_UPDATE:  Update operation → UpdatedEvent
 T_DELETE:  Delete operation → DestroyedEvent
 T_DETECT:  Analyze event data → Identify PII
 T_ENFORCE: Apply privacy policy → Mask/transform data
+T_APPLY:   Event → Update aggregate state (before the event is stored)
 T_PUBLISH: Validated event → Event store
-T_APPLY:   Event → Update aggregate state
-T_SYNC:    Aggregate → Update ORM (Hijack mode)
+T_SYNC:    Stored event → Update ORM (Hijack: row written from the event;
+           event-sourcing modes: projection)
 ```
 
 ### Token Colors (Data Carried by Tokens)
@@ -159,30 +160,37 @@ output: applyPolicyTransforms(input_event, policy)
            │  CRUD_Initiated     │ (P₁)
            └──────────┬──────────┘
                       │
-          ┌───────────┴──────────┐
-          │                      │
-          ▼                      ▼
-   ┌──────────┐           ┌──────────────┐
-   │   ORM    │           │  Event Gen   │ (T_CREATE/UPDATE/DELETE)
-   │  Updated │           │              │
-   └─────┬────┘           └──────┬───────┘
-         │                       │
-         │                       ▼
-         │                ┌──────────────┐
-         │                │Event_Generated│ (P₂)
-         │                └──────┬────────┘
-         │                       │
-         │                   [PII Detection & Policy paths...]
-         │                       │
-         │                       ▼
-         │                ┌──────────────┐
-         │                │Event_Published│ (P₅)
-         │                └──────────────┘
-         │
-         └───── Both complete independently ─────┘
+                      ▼
+              ┌───────────────┐
+              │   Write row   │ (ActiveRecord, as usual)
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │  ORM_Updated  │ (P₇)
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │   Event Gen   │ (T_CREATE/UPDATE/DELETE, after_* callback)
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │Event_Generated│ (P₂)
+              └───────┬───────┘
+                      │
+              [PII Detection & Policy paths...]
+                      │
+                      ▼
+              ┌───────────────┐
+              │Event_Published│ (P₅)
+              └───────────────┘
 ```
 
-**Key Property**: Two parallel paths - ORM and Event Store are independent
+**Key Property**: Sequential flow - the row is written first and the table stays
+authoritative; the event follows in the same transaction (a failed append is
+logged and the write stands, unless `config.monitor_append_failure = :fail_write`)
 
 ### Hijack Mode Net
 
@@ -205,11 +213,6 @@ output: applyPolicyTransforms(input_event, policy)
                       │
                       ▼
               ┌───────────────┐
-              │Event_Published│ (P₅)
-              └───────┬───────┘
-                      │
-                      ▼
-              ┌───────────────┐
               │  Apply Event  │ (T_APPLY)
               │ to Aggregate  │
               └───────┬───────┘
@@ -222,7 +225,17 @@ output: applyPolicyTransforms(input_event, policy)
                       │
                       ▼
               ┌───────────────┐
-              │  Sync to ORM  │ (T_SYNC)
+              │  Store Event  │ (T_PUBLISH)
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │Event_Published│ (P₅)
+              └───────┬───────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │  Sync to ORM  │ (T_SYNC: the row is written from the event)
               └───────┬───────┘
                       │
                       ▼
@@ -243,7 +256,7 @@ A fork occurs when one transition produces tokens in multiple output places simu
 
 ```
                ┌─────────────────┐
-               │ Events_Stored   │ (P)
+               │  Event_Stored   │ (P)
                └────────┬────────┘
                         │
                         ▼
@@ -255,7 +268,7 @@ A fork occurs when one transition produces tokens in multiple output places simu
          │                           │
          ▼                           ▼
 ┌─────────────────┐       ┌─────────────────┐
-│ Response_Sent   │       │ Job_Processing  │
+│Response_Returned│       │  Job_Enqueued   │
 │   (terminal)    │       │  (continues)    │
 └─────────────────┘       └─────────────────┘
 ```
@@ -268,7 +281,7 @@ A fork occurs when one transition produces tokens in multiple output places simu
 **PetriFlow DSL:**
 ```ruby
 # Fork: one transition → multiple output places
-transition :async_fork, from: :events_stored, to: [:response_sent, :job_processing]
+transition :async_fork, from: :event_stored, to: [:response_returned, :job_enqueued]
 ```
 
 #### Join Pattern (AND-join / Synchronization)
@@ -329,15 +342,15 @@ Only T1 OR T2 fires            T fires, both P1 AND P2 get tokens
 The Event Sourcing Async Mode uses a **fork pattern** to model true async behavior:
 
 ```ruby
-# After events are stored, response returns AND background job starts simultaneously
-transition :async_fork, from: :events_stored,
-           to: [:response_returned, :job_processing],
-           trigger: "Enqueue job & return response (parallel)"
+# After the event is stored, the response returns AND the projection job is enqueued
+transition :async_fork, from: :event_stored,
+           to: [:response_returned, :job_enqueued],
+           trigger: "AsyncProjectionJob.perform_later, after commit"
 ```
 
 This correctly models that:
 1. **Response returns immediately** to the caller (non-blocking)
-2. **Background job starts** processing independently
+2. **Projection job is enqueued** and later writes the row independently
 3. Both happen **simultaneously** after the fork fires
 
 ---
