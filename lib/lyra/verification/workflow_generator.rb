@@ -2,8 +2,11 @@
 
 module Lyra
   module Verification
-    # Generates Petri net workflows by introspecting Lyra's actual implementation.
-    # Uses metaprogramming to analyze callbacks, modes, and model configurations.
+    # Generates Petri net workflows for Lyra's modes and the lifecycle of its
+    # monitored models. The mode nets are written by hand below, one step per
+    # method Lyra calls, in the order test/verification/trace_conformance_test.rb
+    # observes on real writes; the lifecycle net uses the monitored models'
+    # configuration (event prefixes).
     class WorkflowGenerator
       attr_reader :analysis, :options
 
@@ -322,28 +325,17 @@ module Lyra
       def generate_monitor_workflow
         {
           name: "Monitor Mode Workflow",
-          description: "Passively observes CRUD operations without modification",
-          places: [
-            :idle,
-            :crud_executing,
-            :crud_completed,
-            :event_building,
-            :event_publishing,
-            :completed
-          ],
+          description: "The row is written as usual; the event follows in the same transaction",
+          places: [:idle, :row_written, :event_built, :completed],
           initial_place: :idle,
           terminal_places: [:completed],
           transitions: [
-            { name: :receive_crud, from: :idle, to: :crud_executing,
-              trigger: "ActiveRecord callback triggered" },
-            { name: :crud_success, from: :crud_executing, to: :crud_completed,
-              trigger: "CRUD operation completes successfully" },
-            { name: :build_event, from: :crud_completed, to: :event_building,
-              trigger: "Extract changes from model" },
-            { name: :publish_event, from: :event_building, to: :event_publishing,
-              trigger: "Lyra::Event.publish" },
-            { name: :store_event, from: :event_publishing, to: :completed,
-              trigger: "RailsEventStore.publish" }
+            { name: :write_row, from: :idle, to: :row_written,
+              trigger: "ActiveRecord writes the row" },
+            { name: :build_event, from: :row_written, to: :event_built,
+              trigger: "after_* callback: CrudInterceptor#publish_event builds it (Lyra::DomainEvents.build)" },
+            { name: :append_event, from: :event_built, to: :completed,
+              trigger: "Lyra.append_events, in a savepoint of the same transaction" }
           ],
           generated_at: Time.current,
           source: "Lyra::Verification::WorkflowGenerator"
@@ -355,37 +347,21 @@ module Lyra
       def generate_hijack_workflow
         {
           name: "Hijack Mode Workflow",
-          description: "Intercepts CRUD operations and converts to event sourcing",
-          places: [
-            :idle,
-            :crud_intercepted,
-            :command_created,
-            :command_validating,
-            :command_valid,
-            :event_created,
-            :event_stored,
-            :projecting,
-            :completed
-          ],
+          description: "The event is built and stored before the row, which is written from it",
+          places: [:idle, :command_built, :event_built, :event_applied, :event_stored, :completed],
           initial_place: :idle,
           terminal_places: [:completed],
           transitions: [
-            { name: :intercept_crud, from: :idle, to: :crud_intercepted,
-              trigger: "before_* callback intercepts operation" },
-            { name: :create_command, from: :crud_intercepted, to: :command_created,
-              trigger: "Convert CRUD to Lyra::Command" },
-            { name: :validate_command, from: :command_created, to: :command_validating,
-              trigger: "CommandHandler.validate" },
-            { name: :command_passes, from: :command_validating, to: :command_valid,
-              trigger: "Validation passes" },
-            { name: :emit_event, from: :command_valid, to: :event_created,
-              trigger: "CommandHandler.execute creates event" },
-            { name: :store_event, from: :event_created, to: :event_stored,
-              trigger: "RailsEventStore.publish" },
-            { name: :project_state, from: :event_stored, to: :projecting,
-              trigger: "Projection.apply(event)" },
-            { name: :projection_complete, from: :projecting, to: :completed,
-              trigger: "Model state updated from event" }
+            { name: :intercept_write, from: :idle, to: :command_built,
+              trigger: "WriteHooks, after the model's before_* callbacks: a Lyra::Command (a create first reserves its id)" },
+            { name: :build_event, from: :command_built, to: :event_built,
+              trigger: "Lyra::CommandHandler.handle: create_events" },
+            { name: :apply_event, from: :event_built, to: :event_applied,
+              trigger: "aggregate.apply(event): the event joins the aggregate's pending events" },
+            { name: :store_event, from: :event_applied, to: :event_stored,
+              trigger: "aggregate.store: Lyra.append_events" },
+            { name: :write_row, from: :event_stored, to: :completed,
+              trigger: "ActiveRecord writes the row with the event's attributes" }
           ],
           generated_at: Time.current,
           source: "Lyra::Verification::WorkflowGenerator"
@@ -397,43 +373,21 @@ module Lyra
       def generate_es_sync_workflow
         {
           name: "Event Sourcing Sync Mode Workflow",
-          description: "Full event sourcing with synchronous (blocking) projection",
-          places: [
-            :idle,
-            :command_received,
-            :aggregate_loading,
-            :aggregate_loaded,
-            :command_applying,
-            :events_generated,
-            :events_storing,
-            :events_stored,
-            :projecting_sync,
-            :projection_complete,
-            :completed
-          ],
+          description: "The event is stored, then projected into the table in the same transaction",
+          places: [:idle, :command_built, :event_built, :event_applied, :event_stored, :completed],
           initial_place: :idle,
           terminal_places: [:completed],
           transitions: [
-            { name: :receive_command, from: :idle, to: :command_received,
-              trigger: "CommandHandler receives command" },
-            { name: :load_aggregate, from: :command_received, to: :aggregate_loading,
-              trigger: "Load aggregate from event stream" },
-            { name: :aggregate_ready, from: :aggregate_loading, to: :aggregate_loaded,
-              trigger: "Aggregate hydrated from events" },
-            { name: :apply_command, from: :aggregate_loaded, to: :command_applying,
-              trigger: "Aggregate.apply(command)" },
-            { name: :generate_events, from: :command_applying, to: :events_generated,
-              trigger: "Domain events created" },
-            { name: :store_events, from: :events_generated, to: :events_storing,
-              trigger: "EventStore.append_to_stream" },
-            { name: :events_persisted, from: :events_storing, to: :events_stored,
-              trigger: "Events committed to store" },
-            { name: :project_sync, from: :events_stored, to: :projecting_sync,
-              trigger: "ModelProjection.apply (synchronous)" },
-            { name: :sync_complete, from: :projecting_sync, to: :projection_complete,
-              trigger: "Read model updated" },
-            { name: :finalize, from: :projection_complete, to: :completed,
-              trigger: "Response returned to caller" }
+            { name: :intercept_write, from: :idle, to: :command_built,
+              trigger: "WriteHooks: a Lyra::Command (a create first reserves its id); the row write is withheld" },
+            { name: :build_event, from: :command_built, to: :event_built,
+              trigger: "Lyra::CommandHandler.handle: create_events" },
+            { name: :apply_event, from: :event_built, to: :event_applied,
+              trigger: "aggregate.apply(event)" },
+            { name: :store_event, from: :event_applied, to: :event_stored,
+              trigger: "after_* callback lyra_finalize_event_source: Lyra.append_events" },
+            { name: :project_row, from: :event_stored, to: :completed,
+              trigger: "synchronous projection writes the row from the event" }
           ],
           generated_at: Time.current,
           source: "Lyra::Verification::WorkflowGenerator"
@@ -445,51 +399,31 @@ module Lyra
       #
       # Uses Petri net FORK pattern to model true parallelism:
       # After events are stored, a single fork transition places tokens in
-      # BOTH response_returned AND job_processing simultaneously.
+      # BOTH response_returned AND job_enqueued simultaneously.
       def generate_es_async_workflow
         {
           name: "Event Sourcing Async Mode Workflow",
-          description: "Full event sourcing with asynchronous (non-blocking) projection",
-          places: [
-            :idle,
-            :command_received,
-            :aggregate_loading,
-            :aggregate_loaded,
-            :command_applying,
-            :events_generated,
-            :events_storing,
-            :events_stored,
-            :response_returned,      # Terminal: caller gets response immediately
-            :job_processing,         # Background job starts
-            :projecting_async,
-            :projection_complete     # Terminal: projection eventually completes
-          ],
+          description: "The event is stored; a job projects it into the table after commit",
+          places: [:idle, :command_built, :event_built, :event_applied, :event_stored,
+                   :response_returned, :job_enqueued, :projection_complete],
           initial_place: :idle,
+          # The caller's write ends at response_returned; the row follows when the
+          # job runs. Both are terminal.
           terminal_places: [:response_returned, :projection_complete],
           transitions: [
-            { name: :receive_command, from: :idle, to: :command_received,
-              trigger: "CommandHandler receives command" },
-            { name: :load_aggregate, from: :command_received, to: :aggregate_loading,
-              trigger: "Load aggregate from event stream" },
-            { name: :aggregate_ready, from: :aggregate_loading, to: :aggregate_loaded,
-              trigger: "Aggregate hydrated from events" },
-            { name: :apply_command, from: :aggregate_loaded, to: :command_applying,
-              trigger: "Aggregate.apply(command)" },
-            { name: :generate_events, from: :command_applying, to: :events_generated,
-              trigger: "Domain events created" },
-            { name: :store_events, from: :events_generated, to: :events_storing,
-              trigger: "EventStore.append_to_stream" },
-            { name: :events_persisted, from: :events_storing, to: :events_stored,
-              trigger: "Events committed to store" },
-            # FORK: Parallel split - produces tokens in TWO places simultaneously
-            # Models async behavior: response returns AND background job starts
-            { name: :async_fork, from: :events_stored, to: [:response_returned, :job_processing],
-              trigger: "Enqueue job & return response (parallel)" },
-            # Background projection flow (runs independently after fork)
-            { name: :project_async, from: :job_processing, to: :projecting_async,
-              trigger: "ModelProjection.apply (async)" },
-            { name: :async_complete, from: :projecting_async, to: :projection_complete,
-              trigger: "Read model eventually consistent" }
+            { name: :intercept_write, from: :idle, to: :command_built,
+              trigger: "WriteHooks: a Lyra::Command (a create first reserves its id); the row write is withheld" },
+            { name: :build_event, from: :command_built, to: :event_built,
+              trigger: "Lyra::CommandHandler.handle: create_events" },
+            { name: :apply_event, from: :event_built, to: :event_applied,
+              trigger: "aggregate.apply(event)" },
+            { name: :store_event, from: :event_applied, to: :event_stored,
+              trigger: "after_* callback lyra_finalize_event_source: Lyra.append_events" },
+            # FORK: the write returns while the projection job is pending
+            { name: :async_fork, from: :event_stored, to: [:response_returned, :job_enqueued],
+              trigger: "AsyncProjectionJob.perform_later, after commit" },
+            { name: :project_row, from: :job_enqueued, to: :projection_complete,
+              trigger: "AsyncProjectionJob writes the row from the event, under a per-stream lock" }
           ],
           generated_at: Time.current,
           source: "Lyra::Verification::WorkflowGenerator"
