@@ -19,9 +19,10 @@ module Lyra
       # every change (in ES-NoProj the only one), so a write whose event
       # cannot be stored must not happen: it fails, and is rolled back. In
       # Monitor the table stays authoritative and the event is a copy, so a
-      # failed publish is logged and the write stands.
+      # failed publish is logged and the write stands, unless
+      # config.monitor_append_failure is :fail_write.
       def required?
-        Lyra.hijack_mode? || Lyra.event_sourcing_mode?
+        Lyra.config.events_required?
       end
 
       # Run a bypass write together with the publishing of its events: in

@@ -645,8 +645,12 @@ module Lyra
 
         Lyra.append_events(events, stream_name: lyra_stream_name)
       rescue => e
-        # Monitor's policy, log-and-continue: the table is authoritative, so
-        # the write stands and its stream falls behind until lyra:repair.
+        # Monitor with monitor_append_failure :fail_write: fail the write, which
+        # rolls back with its transaction, as Hijack and event sourcing do.
+        raise if Lyra.config.events_required?
+
+        # Monitor's default policy, log-and-continue: the table is authoritative,
+        # so the write stands and its stream falls behind until lyra:repair.
         Rails.logger.error("Lyra: Failed to publish event - #{e.message}; the write stands, " \
                            "run bin/rails lyra:repair to bring #{lyra_stream_name} back in line")
       end

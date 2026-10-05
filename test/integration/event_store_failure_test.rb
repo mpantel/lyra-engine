@@ -32,6 +32,7 @@ class EventStoreFailureTest < Minitest::Test
     return unless defined?(FailingUser)
 
     Lyra.config.projection_mode = :sync
+    Lyra.config.monitor_append_failure = :log
     clean
   end
 
@@ -122,6 +123,53 @@ class EventStoreFailureTest < Minitest::Test
     end
     assert_match(/the write stands, run bin\/rails lyra:repair to bring FailingUser\$\d+ back in line/, log.string)
   end
+
+# config.monitor_append_failure: opt-in fail-closed Monitor. The default
+# (:log) is the policy above, unchanged.
+def test_monitor_append_failure_defaults_to_log_and_is_validated
+  assert_equal :log, Lyra::Configuration.new.monitor_append_failure
+  Lyra.config.monitor_append_failure = "fail_write"
+  assert_equal :fail_write, Lyra.config.monitor_append_failure
+  assert_raises(ArgumentError) { Lyra.config.monitor_append_failure = :retry }
+end
+
+def test_monitor_with_fail_write_fails_a_create_and_leaves_nothing
+  Lyra.config.enable_monitor!
+  Lyra.config.monitor_append_failure = :fail_write
+  store_fails do
+    assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.create!(name: "Ann", email: "ann@example.com") }
+  end
+  assert_nothing_written
+end
+
+def test_monitor_with_fail_write_leaves_the_row_unchanged_when_an_update_fails
+  Lyra.config.enable_monitor!
+  user = FailingUser.create!(name: "Ann", email: "ann@example.com")
+  Lyra.config.monitor_append_failure = :fail_write
+  store_fails do
+    assert_raises(Lyra::EventStoreUnavailableError) { user.update!(name: "Bea") }
+  end
+  assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}")
+end
+
+def test_monitor_with_fail_write_rolls_back_a_bulk_write_with_its_events
+  Lyra.config.enable_monitor!
+  user = FailingUser.create!(name: "Ann", email: "ann@example.com")
+  Lyra.config.monitor_append_failure = :fail_write
+  store_fails do
+    assert_raises(Lyra::EventStoreUnavailableError) { FailingUser.where(id: user.id).update_all(name: "Bea") }
+    assert_raises(Lyra::EventStoreUnavailableError) { user.update_columns(name: "Cy") }
+  end
+  assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}")
+end
+
+def test_monitor_with_fail_write_still_writes_normally_when_the_store_works
+  Lyra.config.enable_monitor!
+  Lyra.config.monitor_append_failure = :fail_write
+  user = FailingUser.create!(name: "Ann", email: "ann@example.com")
+  assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}")
+  assert_equal 1, raw("SELECT count(*) FROM event_store_events").to_i
+end
 
   private
 

@@ -9,6 +9,8 @@ module Lyra
   # - log-and-continue (Monitor): the table is authoritative, so the write
   #   stands, the failure is logged, and the stream falls behind its row
   #   until Lyra::Repair (bin/rails lyra:repair) brings it back in line.
+  #   config.monitor_append_failure = :fail_write gives Monitor the
+  #   fail-closed policy instead.
   #
   # There is no in-memory retry queue: the store shares the application's
   # database, so an unreachable store fails the write itself; a queue would

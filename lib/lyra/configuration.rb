@@ -46,6 +46,13 @@ module Lyra
     # What a read of a model with a privacy policy does when no purpose is
     # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
     attr_reader :reads_without_purpose
+    # What Monitor does when a write's event cannot be stored: :log (default)
+    # lets the write stand and logs the failure, the stream falling behind its
+    # row until lyra:repair; :fail_write fails the write and rolls it back, as
+    # Hijack and the event-sourcing modes always do. Row and event commit
+    # together either way; this decides only what a failed append does.
+    MONITOR_APPEND_FAILURES = %i[log fail_write].freeze
+    attr_reader :monitor_append_failure
     # Apply the privacy policy's retention rules (Lyra::Retention). Off by
     # default: deleting data on a timer is the deployment's decision.
     attr_accessor :retention_executor
@@ -95,6 +102,7 @@ module Lyra
       @record_access_events = false
       @access_metadata_proc = nil
       @reads_without_purpose = :allow
+      @monitor_append_failure = :log
       @retention_executor = false
       @retention_anchors = {}
       @dashboard_authorization = nil
@@ -112,6 +120,24 @@ module Lyra
 
     def reads_without_purpose=(mode)
       @reads_without_purpose = Lyra::PurposeBoundReads.validate_mode!(mode)
+    end
+
+    # One of MONITOR_APPEND_FAILURES; a string (from ENV, say) is taken as its symbol.
+    def monitor_append_failure=(policy)
+      policy = policy.to_sym if policy.is_a?(String)
+      unless MONITOR_APPEND_FAILURES.include?(policy)
+        raise ArgumentError, "monitor_append_failure must be one of #{MONITOR_APPEND_FAILURES.join(', ')}, got #{policy.inspect}"
+      end
+
+      @monitor_append_failure = policy
+    end
+
+    # Whether a write whose event cannot be stored must fail: always in Hijack
+    # and the event-sourcing modes, in Monitor when monitor_append_failure is
+    # :fail_write.
+    def events_required?
+      Lyra.hijack_mode? || Lyra.event_sourcing_mode? ||
+        (Lyra.monitor_mode? && monitor_append_failure == :fail_write)
     end
 
     # Declare the models to monitor by name, in the initializer, before they
