@@ -35,7 +35,6 @@ lyra/
 │   ├── baselines/m4-2026-07/   # frozen archive of the July 2026 Apple M4 runs (do not edit; figures withdrawn, see PERFORMANCE.md)
 │   └── runs/                   # output of bin/run_benchmarks (gitignored)
 ├── docs/                       # documentation (this file)
-├── docs-site/                  # Jekyll documentation site
 ├── papers/                     # papers, the PhD thesis (papers/thesis) and the proposal (papers/proposal)
 ├── lyra-engine/                # gitignored: checkout of the separate public lyra-engine repository
 ├── Gemfile, Gemfile.lock       # monorepo Gemfile
@@ -54,8 +53,7 @@ lyra/
 built from a subset of this one by `rake public:build` / `rake public:sync`
 (`lib/tasks/public_release.rake`). It is ignored here and committed
 separately. It leaves out the testbed, the Solidus and BPI applications,
-`papers/`, `benchmarks/`, `docs-site/`, and several monorepo-only rake task
-files.
+`papers/`, `benchmarks/`, and several monorepo-only rake task files.
 
 ## Gems in this Monorepo
 
