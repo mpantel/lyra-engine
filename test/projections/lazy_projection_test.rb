@@ -158,6 +158,40 @@ class LazyProjectionTest < Minitest::Test
     assert LazyAuthor.create!(name: "Ann", email: "ann@example.com") && LazyAuthor.count == 1
   end
 
+  # Two threads that both find the checkpoint table missing both create it;
+  # the second CREATE fails, and must not fail the write that triggered it.
+  def test_concurrent_first_reads_both_create_the_checkpoint_table
+    conn = ActiveRecord::Base.connection
+    conn.drop_table(LazyProjection::TABLE, if_exists: true)
+    LazyProjection.instance_variable_set(:@table_ready, nil)
+    # Both threads pass the existence check before either creates the table.
+    gate = Queue.new
+    exists = ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.instance_method(:table_exists?)
+    checks = 0
+    ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.define_method(:table_exists?) do |table|
+      result = exists.bind_call(self, table)
+      if table == LazyProjection::TABLE && !result && (checks += 1) <= 2
+        gate << true
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+        sleep 0.01 until gate.size >= 2 || Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      end
+      result
+    end
+
+    errors = Array.new(2) do
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection { LazyProjection.checkpoint && nil }
+      rescue StandardError => e
+        e
+      end
+    end.map(&:value).compact
+
+    assert_empty errors
+    assert conn.table_exists?(LazyProjection::TABLE)
+  ensure
+    ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.define_method(:table_exists?, exists) if exists
+  end
+
   def test_lazy_mode_needs_event_sourcing_mode
     Lyra.config.enable_monitor!
     author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")

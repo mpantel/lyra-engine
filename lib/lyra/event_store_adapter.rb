@@ -36,16 +36,30 @@ module Lyra
   # created, and every later use failed on a missing table. With a
   # transaction open, the table is created on a connection of its own, which
   # commits at once.
-  def self.create_own_table(connection, name)
+  #
+  # Two threads or processes can both find the table missing and both create
+  # it; the second CREATE then fails (PostgreSQL: a unique violation on
+  # pg_type), and the write that triggered it failed with it (the full BPI
+  # 2017 replay under ES-Lazy, two threads, lost one write this way). The
+  # definition runs in one transaction, so a table that exists is complete,
+  # and a failure is ignored once the table exists: someone else made it.
+  def self.create_own_table(connection, name, &definition)
     return if connection.table_exists?(name)
-    return yield(connection) unless connection.transaction_open?
+    return create_own_table_on(connection, name, &definition) unless connection.transaction_open?
 
     own = connection.pool.db_config.new_connection
     begin
-      yield(own) unless own.table_exists?(name)
+      create_own_table_on(own, name, &definition) unless own.table_exists?(name)
     ensure
       own.disconnect!
     end
   end
+
+  def self.create_own_table_on(connection, name)
+    connection.transaction(requires_new: true) { yield(connection) }
+  rescue ActiveRecord::StatementInvalid
+    raise unless connection.table_exists?(name)
+  end
+  private_class_method :create_own_table_on
 
 end
