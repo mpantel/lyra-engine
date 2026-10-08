@@ -78,8 +78,21 @@ module Lyra
         # @param model_class [Class] The ActiveRecord model class
         # @param conditions [Hash] Query conditions
         # @return [CachedRelation] A relation containing matching records
+        # A foreign-key condition is answered from the reference links
+        # (ReferenceLinks), not by building every record of the model.
         def where(model_class, conditions)
-          relation(model_class).where(conditions)
+          linked_where(model_class, conditions) || relation(model_class).where(conditions)
+        end
+
+        # The records matching +conditions+, built from the reference links'
+        # candidates; nil when the conditions name no foreign-key value.
+        def linked_where(model_class, conditions)
+          Genesis.first_use(model_class)
+          candidates = ReferenceLinks.lookup(model_class, conditions)
+          return nil unless candidates
+
+          records = candidates.map { |attrs| build_instance(model_class, attrs) }.compact
+          CachedRelation.new(model_class, records).where(conditions)
         end
 
         # Count records (cached)

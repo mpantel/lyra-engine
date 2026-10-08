@@ -13,6 +13,7 @@ module Lyra
     attr_accessor :strict_data_access  # Raise on callback-bypassing operations
     attr_accessor :metadata_proc  # Custom metadata proc for events
     attr_accessor :genesis  # Imported events for pre-existing rows (see Lyra::Genesis)
+    attr_accessor :reference_links  # Foreign-key links for ES-NoProj lookups (see Lyra::Projections::ReferenceLinks)
     attr_reader :monitored_models
     # Default privacy policy for monitored models that name none of their
     # own (monitor_with_lyra privacy_policy: ...). See Lyra::Privacy.policy_for.
@@ -92,6 +93,9 @@ module Lyra
       # Genesis: :auto (event-sourcing mode only), true (every event-producing
       # mode) or false. See Lyra::Genesis.
       @genesis = :auto
+      # Reference links: :auto (ES-NoProj only), true (every event-producing
+      # mode) or false. See Lyra::Projections::ReferenceLinks.
+      @reference_links = :auto
       @mode_transition_gate = nil
       @mode_transition_certificate_ttl = 3600
       @dual_view_sample_rate = 0.0

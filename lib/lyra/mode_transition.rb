@@ -14,7 +14,8 @@ module Lyra
   #   for one that reads them: the tables must catch up first. ES-Lazy
   #   catches up on read; ES-NoProj needs a Rebuild (rebuild: true).
   # Every other switch (Monitor to Disabled, ES-Sync to ES-NoProj, ...) keeps
-  # the authoritative store as it is and passes freely.
+  # the authoritative store as it is and passes freely. Entering ES-NoProj
+  # also links the events' foreign keys (Lyra::Projections::ReferenceLinks).
   #
   # A check compares every row with the state replayed from its stream, and
   # every stream with its row, in batches, reading the real table (never the
@@ -107,6 +108,7 @@ module Lyra
           end
         end
 
+        link_references if to == "event_sourcing/disabled" && from != to
         apply(mode, projection_mode)
         id = record_applied(to)
         ModeSync.seen!(id)
@@ -206,6 +208,18 @@ module Lyra
       def discrepancy(model, id) = compare(model, id)
 
       private
+
+      # Entering ES-NoProj: link every event that sets a foreign key
+      # (ReferenceLinks), so its lookups by foreign key are complete from the
+      # first one. Other modes do not link under config.reference_links :auto;
+      # a full pass here, rare like the switch itself, also covers events that
+      # committed late. The per-process catch-up before a first lookup stays
+      # as a safety net (a harness that sets config.mode directly).
+      def link_references
+        return if Lyra.config.reference_links == false
+
+        Lyra.config.monitored_models.each { |model| Lyra::Projections::ReferenceLinks.catch_up(model, force: true) }
+      end
 
       def apply(mode, projection_mode)
         Lyra.config.mode = mode.to_sym

@@ -234,9 +234,15 @@ module Lyra
 
         # Override where to use cached projections in disabled mode
         # Returns a CachedRelation that supports method chaining
-        def where(...)
+        def where(*args, **kwargs, &block)
           if lyra_read_from_events?
-            Lyra::Projections::EventStoreReader.relation(self).where(...)
+            # A plain hash of conditions can use the reference links (a
+            # foreign-key lookup, as dependent associations make); anything
+            # else is evaluated on every record.
+            conditions = kwargs if args.empty?
+            conditions = args.first if args.size == 1 && args.first.is_a?(Hash) && kwargs.empty?
+            linked = Lyra::Projections::EventStoreReader.linked_where(self, conditions) if block.nil? && conditions.present?
+            linked || Lyra::Projections::EventStoreReader.relation(self).where(*args, **kwargs, &block)
           else
             super
           end

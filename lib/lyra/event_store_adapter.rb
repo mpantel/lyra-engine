@@ -23,6 +23,7 @@ module Lyra
   # goes through here.
   def self.append_events(events, stream_name:, store: config.event_store)
     store.publish(events, stream_name: stream_name)
+    Projections::ReferenceLinks.after_append(events, stream_name, store)
   rescue EventStoreUnavailableError
     raise
   rescue => e

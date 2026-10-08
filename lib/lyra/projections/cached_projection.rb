@@ -123,7 +123,8 @@ module Lyra
         # @param conditions [Hash] Query conditions
         # @return [Array<Hash>] Matching record attributes
         def where(model_class, conditions)
-          all(model_class).select { |record| matches_conditions?(record, conditions) }
+          candidates = ReferenceLinks.lookup(model_class, conditions) || all(model_class)
+          candidates.select { |record| matches_conditions?(record, conditions) }
         end
 
         # Count records
