@@ -4,7 +4,7 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-05
+## [0.9.0] - 2026-10-10
 
 ### Added
 - **Terminal-aware deadlock-freedom** — `PetriFlow.verify` and `Verification::LivenessChecker`
@@ -27,6 +27,11 @@ All notable changes to the PetriFlow gem will be documented in this file.
   as "PetriFlow not installed", leaving `PetriFlow` half-defined (no `PetriFlow::Workflow`);
   any app that eager-loads Lyra's `app/workflows` then failed to boot. `rexml` is now a
   runtime dependency.
+
+## [0.8.0] - 2026-08-09
+
+No changes since 0.6.0 apart from the gem's name (`orfeas_petri_flow`); released with Lyra and
+PAM DSL 0.8.0.
 
 ## [0.6.0] - 2026-01-05
 

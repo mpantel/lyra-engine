@@ -59,9 +59,9 @@ separately. It leaves out the testbed, the Solidus and BPI applications,
 
 | Gem | Location | Entry file | Version file |
 |---|---|---|---|
-| `orfeas_lyra` | root | `lyra` | `lib/lyra/version.rb` (0.8.0) |
-| `orfeas_pam_dsl` | `gems/pam_dsl/` | `pam_dsl` | `gems/pam_dsl/lib/pam_dsl/version.rb` (0.8.0) |
-| `orfeas_petri_flow` | `gems/petri_flow/` | `petri_flow` | `gems/petri_flow/lib/petri_flow/version.rb` (0.8.0) |
+| `orfeas_lyra` | root | `lyra` | `lib/lyra/version.rb` (0.9.0) |
+| `orfeas_pam_dsl` | `gems/pam_dsl/` | `pam_dsl` | `gems/pam_dsl/lib/pam_dsl/version.rb` (0.9.0) |
+| `orfeas_petri_flow` | `gems/petri_flow/` | `petri_flow` | `gems/petri_flow/lib/petri_flow/version.rb` (0.9.0) |
 
 `bundle exec rake gems:version` prints the current versions.
 
@@ -285,7 +285,7 @@ PetriFlow is a Petri net and matrix analysis gem for modeling, analyzing,
 visualizing and verifying event sourcing systems.
 
 **Location:** `gems/petri_flow/`
-**Version:** 0.8.0
+**Version:** 0.9.0
 **Purpose:** Formal verification and analysis of the CRUD-to-event mapping
 
 ### Key Features

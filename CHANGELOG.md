@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-05
+## [0.9.0] - 2026-10-10
+
+Everything since 0.8.0, the version the PAM article describes.
 
 ### Added
+- **Reference links for ES-NoProj** (`Lyra::Projections::ReferenceLinks`, `config.reference_links`,
+  default `:auto`). An event that sets a `belongs_to` foreign key is also linked into the stream
+  `Model.foreign_key$value`, the way Rails Event Store links events by metadata. A lookup by that
+  key, including the dependent-association lookups Active Record makes on destroy, reads the
+  stream for candidates and keeps those whose current state still matches, so moved and destroyed
+  children drop out and the answer is exact, without rebuilding every record of the model.
+  `:auto` writes links in ES-NoProj only, so no other mode pays; `true` and `false` force it.
+  Events stored while linking was off are linked before a model's first lookup in a process, from
+  a checkpoint kept in the store (`$lyra_reference_links$Model`). On the Aegean testbed this made
+  an ES-NoProj delete about 30 times faster at 16 threads and about 250 times at 64.
 - **`config.monitor_append_failure`** (opt-in; default `:log`, unchanged). With `:fail_write`,
   Monitor fails a write whose event cannot be stored, raising `EventStoreUnavailableError` and
   rolling the write back (bulk writes included), as Hijack and the event-sourcing modes always
@@ -279,28 +291,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EventRepository.new(serializer: Lyra::EventSerializer)`. Lyra's default client (RES's
   YAML serializer) was not affected. Found by replaying the BPI Challenge 2017 log
   (`examples/bpi2017_loan_app`), whose timestamps carry milliseconds.
-- **Projection rebuild from the event log** (`Lyra::Projections::Rebuild`) - Reconstruct
-  read-model tables from the event streams alone, the load-bearing invariant of event
-  sourcing (log is source of truth; tables are a derived projection):
-  - `Lyra::Projections::Rebuild.rebuild(Model)` clears the read model and replays each
-    stream through the same `ModelProjection.project` path used by live sync/async
-    projection, so a rebuilt table matches what live projection would have produced.
-  - `Lyra::Projections::Rebuild.rebuild_all` rebuilds every monitored model (or an
-    explicit list); `truncate: false` reconstructs streamed rows in place.
-  - `rake lyra:projections:rebuild [MODEL=Namespace::Model[,Other]] [TRUNCATE=false]`
-    rake task wrapping the above.
-  - Invalidates ES-NoProj cached reconstructions so reads reflect the rebuild.
-  - Integration tests (`test/projections/rebuild_test.rb`) covering surviving-record
-    reconstruction, destroyed-record omission, dual-view consistency after rebuild, and
-    `rebuild_all` over monitored models.
-- **PAM DSL** aligned with its formal foundations — see `gems/pam_dsl/CHANGELOG.md`.
-- **Performance characterization** (`docs/PERFORMANCE.md`) — measured overhead of every
-  Lyra mode against a plain-ORM baseline: throughput and P95 latency across 1–64 threads,
-  the measurement controls used, and a SQL-level account of why Hijack mode outperforms
-  Monitor mode. The benchmark harness itself is published on acceptance of the
-  accompanying papers.
-
 ### Changed
+- **`ModeTransition.to!` links before switching into ES-NoProj.** Entering `event_sourcing`
+  with `projection_mode: :disabled` first runs a full reference-link pass over the monitored
+  models, so lookups are complete from the first one.
 - **Documentation regrouped.** `docs/ADOPTION.md` and `docs/MODE_TRANSITIONS.md` are now
   sections of `docs/MIGRATION_GUIDE.md` (Adopting Lyra in an existing application; Switching
   modes); `docs/ORFEAS_FRAMEWORK_OVERVIEW.md` is the opening of `docs/ARCHITECTURE.md` (About
@@ -401,6 +395,11 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **ES-Lazy: concurrent first reads no longer fail creating the checkpoint table.** Two threads
+  that both found `lyra_projection_checkpoints` missing both created it, and the second `CREATE`
+  failed the write that triggered it (one write of the full BPI 2017 replay at two threads).
+  `Lyra.create_own_table` now defines the table in one transaction and ignores a failed create
+  once the table exists.
 - **Leaving ES-Lazy skipped its catch-up** — `ModeTransition.to!` from `event_sourcing/lazy`
   calls `LazyProjection.catch_up!(force: true)`. Without `force:`, `catch_up!` returns 0 outside
   ES-Lazy, and the mode had already changed by the time the transition ran it, so the tables
@@ -661,6 +660,35 @@ ignored like any unknown option.
   `enqueue_after_transaction_commit`, so it runs only once its event is visible and is
   never enqueued after a rollback. Eventual consistency itself is unchanged. The test dummy
   app now loads `active_job/railtie`.
+
+## [0.8.0] - 2026-08-09
+
+The version the PAM article (Requirements Engineering, 2026) describes, released from
+lyra-engine commit `b863d2e`. Not published to RubyGems until 2026-10-10.
+
+### Added
+- **Projection rebuild from the event log** (`Lyra::Projections::Rebuild`) - Reconstruct
+  read-model tables from the event streams alone, the load-bearing invariant of event
+  sourcing (log is source of truth; tables are a derived projection):
+  - `Lyra::Projections::Rebuild.rebuild(Model)` clears the read model and replays each
+    stream through the same `ModelProjection.project` path used by live sync/async
+    projection, so a rebuilt table matches what live projection would have produced.
+  - `Lyra::Projections::Rebuild.rebuild_all` rebuilds every monitored model (or an
+    explicit list); `truncate: false` reconstructs streamed rows in place.
+  - `rake lyra:projections:rebuild [MODEL=Namespace::Model[,Other]] [TRUNCATE=false]`
+    rake task wrapping the above.
+  - Invalidates ES-NoProj cached reconstructions so reads reflect the rebuild.
+  - Integration tests (`test/projections/rebuild_test.rb`) covering surviving-record
+    reconstruction, destroyed-record omission, dual-view consistency after rebuild, and
+    `rebuild_all` over monitored models.
+- **PAM DSL** aligned with its formal foundations — see `gems/pam_dsl/CHANGELOG.md`.
+- **Performance characterization** (`docs/PERFORMANCE.md`) — measured overhead of every
+  Lyra mode against a plain-ORM baseline: throughput and P95 latency across 1–64 threads,
+  the measurement controls used, and a SQL-level account of why Hijack mode outperforms
+  Monitor mode. The benchmark harness itself is published on acceptance of the
+  accompanying papers.
+
+### Fixed
 - **`:disabled` mode emitted events** (`Lyra::Interceptors::CrudInterceptor`) — the monitor
   callbacks were gated on `lyra_monitored?`, a class attribute carrying no mode check, so a
   model that had ever called `monitor_with_lyra` kept writing to the event store after Lyra

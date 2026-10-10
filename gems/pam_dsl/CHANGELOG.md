@@ -4,10 +4,7 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-10-05
-
-The first release to RubyGems since 0.6.0. It also contains 0.7.0 (below), which was never
-published.
+## [0.9.0] - 2026-10-10
 
 ### Added
 - **`online_identifier` is a declarable field type** — the detector had a pattern by that name
@@ -61,17 +58,24 @@ published.
   strict mode the first violation raised is the same, in the same order, as before.
   `Policy#access_violations` returns them all without raising. `PamDsl.reset!` also resets the
   mode and the handlers.
-- `PAM_DSL_FORCE_POLYFILL` environment variable forces the stdlib polyfill even when ActiveSupport is installed, so both code paths can be tested.
-- Rake tasks `test:polyfill` (run the suite forcing the polyfill) and `test:both` (run it under both ActiveSupport and the polyfill). The same 425 tests pass under both paths; `test_duration_formatting` was made tolerant of the 30-day month boundary (the only assertion that differs between the calendar and fixed-length duration models).
-
 ### Changed
 - **Ruby 4.0 or later is required** (`required_ruby_version >= 4.0`; none was declared before).
+### Fixed
+- `PamDsl.reporter` dropped the `output:` option, so reports always went to standard output.
+
+## [0.8.0] - 2026-06-15
+
+The first release to RubyGems since 0.6.0, and the version the PAM article (Requirements
+Engineering, 2026) cites. It also contains 0.7.0 (below), which was never published.
+
+### Changed
 - **ActiveSupport is now optional.** `pam_dsl` previously declared a hard runtime dependency on `activesupport` and unconditionally `require`d it. It now loads ActiveSupport only if present and otherwise falls back to a minimal standard-library polyfill (`lib/pam_dsl/core_ext.rb`), so the gem is self-contained when used standalone (outside Rails). `activesupport` moved from a runtime to a development dependency (still exercised by the test suite). The ActiveSupport surface the gem uses is small: `Numeric` duration helpers (`.years`/`.months`/`.weeks`/`.days`, `.ago`/`.from_now`), `Time.current`, `String#underscore`/`#titleize`, and `Object#present?`.
 - The polyfill durations use a **fixed-length approximation** (30-day month, 365-day year), matching the gem's report tooling. When ActiveSupport is present its calendar-aware durations are used instead, unchanged.
 - `Reporter#format_duration` now matches `PamDsl::DURATION_CLASS` (`ActiveSupport::Duration` when available, else `Numeric`) instead of referencing `ActiveSupport::Duration` directly, so it works under both paths.
 
-### Fixed
-- `PamDsl.reporter` dropped the `output:` option, so reports always went to standard output.
+### Added
+- `PAM_DSL_FORCE_POLYFILL` environment variable forces the stdlib polyfill even when ActiveSupport is installed, so both code paths can be tested.
+- Rake tasks `test:polyfill` (run the suite forcing the polyfill) and `test:both` (run it under both ActiveSupport and the polyfill). The same 425 tests pass under both paths; `test_duration_formatting` was made tolerant of the 30-day month boundary (the only assertion that differs between the calendar and fixed-length duration models).
 
 ## [0.7.0] - 2026-06-02 (never published; part of 0.8.0)
 
