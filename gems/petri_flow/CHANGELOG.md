@@ -4,6 +4,11 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-09
+
+No changes since 0.6.0 apart from the gem's name (`orfeas_petri_flow`); released with Lyra and
+PAM DSL 0.8.0.
+
 ## [0.6.0] - 2026-01-05
 
 ### Added

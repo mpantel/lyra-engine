@@ -2,7 +2,12 @@
 
 All notable changes to PAM DSL will be documented in this file.
 
+## [Unreleased]
+
 ## [0.8.0] - 2026-06-15
+
+The first release to RubyGems since 0.6.0, and the version the PAM article (Requirements
+Engineering, 2026) cites. It also contains 0.7.0 (below), which was never published.
 
 ### Changed
 - **ActiveSupport is now optional.** `pam_dsl` previously declared a hard runtime dependency on `activesupport` and unconditionally `require`d it. It now loads ActiveSupport only if present and otherwise falls back to a minimal standard-library polyfill (`lib/pam_dsl/core_ext.rb`), so the gem is self-contained when used standalone (outside Rails). `activesupport` moved from a runtime to a development dependency (still exercised by the test suite). The ActiveSupport surface the gem uses is small: `Numeric` duration helpers (`.years`/`.months`/`.weeks`/`.days`, `.ago`/`.from_now`), `Time.current`, `String#underscore`/`#titleize`, and `Object#present?`.
@@ -13,7 +18,7 @@ All notable changes to PAM DSL will be documented in this file.
 - `PAM_DSL_FORCE_POLYFILL` environment variable forces the stdlib polyfill even when ActiveSupport is installed, so both code paths can be tested.
 - Rake tasks `test:polyfill` (run the suite forcing the polyfill) and `test:both` (run it under both ActiveSupport and the polyfill). The same 425 tests pass under both paths; `test_duration_formatting` was made tolerant of the 30-day month boundary (the only assertion that differs between the calendar and fixed-length duration models).
 
-## [0.7.0] - 2026-06-02
+## [0.7.0] - 2026-06-02 (never published; part of 0.8.0)
 
 ### Added
 - `ConsentRecord` class: full four-state lifecycle (P0 Pending, P1 Granted, P2 Expired, P3 Withdrawn) matching the formal consent state diagram (paper §4.2). `expires_at` is stored on the record at grant time so `state` derives `:expired` autonomously without external requirement lookup. `grant!` (P0→P1) and `withdraw!` (P1→P3) enforce valid transitions; P2 and P3 are absorbing.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-09
+
+The version the PAM article (Requirements Engineering, 2026) describes.
+
 ### Added
 - **Projection rebuild from the event log** (`Lyra::Projections::Rebuild`) - Reconstruct
   read-model tables from the event streams alone, the load-bearing invariant of event
