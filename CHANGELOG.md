@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-11
+## [0.9.0] - 2026-10-14
 
 Everything since 0.8.0, the version the PAM article describes.
 
@@ -16,13 +16,24 @@ Everything since 0.8.0, the version the PAM article describes.
   aggregate before appending. Two writers of one record could append in one order and write the
   row in the other, leaving the row at a value its log does not replay to; seen in the wild, 2
   rounds of 120 with 8 threads on one record, and reproduced deterministically
-  (`test/concurrent_same_record_test.rb`). An update or destroy now takes a PostgreSQL advisory
-  lock on the record's stream before its event is appended, held to the end of the transaction
-  (assumption L of Theorem 5). Creates, Monitor, ES-Async, ES-Lazy and ES-NoProj are unchanged
-  (`test/aggregate_lock_statements_test.rb`). Cost: an update or destroy issues three more SQL
-  statements (the lock, then the savepoint pair the append now needs), so Hijack and ES-Sync
-  updates go from 5 to 8 statements; on one contended record Hijack's throughput falls from
-  about 90 to about 52 ops/s. Set `false` for the previous behaviour and its numbers.
+  (`test/concurrent_same_record_test.rb`). An update or destroy now locks the record's row before
+  its event is appended, held to the end of the transaction (assumption L of Theorem 5), in the
+  strength the write takes anyway (PostgreSQL `FOR NO KEY UPDATE` for an update, `FOR UPDATE` for
+  a destroy), so a write takes the locks plain ActiveRecord takes, in the same order, and adds no
+  deadlock. A first version took an advisory lock on the stream before the row lock; it deadlocked
+  against a writer that holds the row first (`record.lock!`, `with_lock`) and then updates it,
+  where plain ActiveRecord only makes the update wait. The advisory lock remains for a record with
+  no row. `test/aggregate_lock_deadlock_test.rb`: writes to several records in one order never
+  deadlock, opposite orders deadlock exactly as plain ActiveRecord does, a row lock held first
+  does not deadlock a plain writer. SQLite needs no lock: it serialises writers from the first
+  write, which is the append (`test/sqlite_same_record_test.rb`). Creates, Monitor, ES-Async,
+  ES-Lazy and ES-NoProj are unchanged (`test/aggregate_lock_statements_test.rb`). Cost: an update
+  issues three more SQL statements (the lock, then the savepoint pair the append now needs), so
+  Hijack and ES-Sync updates go from 5 to 8 statements, and a destroy one more; on one contended
+  record Hijack's throughput falls from about 90 to about 52 ops/s. Set `false` for the previous
+  behaviour and its numbers.
+- `test/projections/cached_projection_concurrency_test.rb`: readers and writers of one record under
+  ES-NoProj see only states the stream had, never go back, and converge.
 - **Reference links for ES-NoProj** (`Lyra::Projections::ReferenceLinks`, `config.reference_links`,
   default `:auto`). An event that sets a `belongs_to` foreign key is also linked into the stream
   `Model.foreign_key$value`, the way Rails Event Store links events by metadata. A lookup by that
@@ -303,6 +314,12 @@ Everything since 0.8.0, the version the PAM article describes.
   YAML serializer) was not affected. Found by replaying the BPI Challenge 2017 log
   (`examples/bpi2017_loan_app`), whose timestamps carry milliseconds.
 ### Changed
+- **ES-NoProj reads**: a stale cache entry is brought up to date from the events after its stamp
+  instead of a full replay; cache entries have a process-local copy in front of the shared cache;
+  an association's records are read when first needed, and a reference-link lookup intersects
+  every indexed key and takes candidate ids from the stream table; `Model.new` reads no record.
+  A replay of 640 Olist orders through Solidus took 855 s where it took 2,229 s, with the same
+  end state.
 - **`ModeTransition.to!` links before switching into ES-NoProj.** Entering `event_sourcing`
   with `projection_mode: :disabled` first runs a full reference-link pass over the monitored
   models, so lookups are complete from the first one.
@@ -406,6 +423,9 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **ES-NoProj: a named scope called on an association was ignored** (`order.payments.completed`
+  returned every payment) and its body loaded every record of the model; records an association
+  loaded did not point back at their owner instance.
 - **Documentation: `ReadYourWrites` projects a block's writes when the block ends**, so a read
   after the block sees them and a read inside it does not; `docs/API_REFERENCE.md` said or
   implied the latter.

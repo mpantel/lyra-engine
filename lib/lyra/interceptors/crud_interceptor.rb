@@ -410,13 +410,40 @@ module Lyra
       # ES-NoProj has no row; ES-Async and ES-Lazy project by replaying the
       # stream in order under a lock of their own. Creates have no earlier
       # writer: the identifier is reserved.
-      def lyra_lock_aggregate!
+      #
+      # The lock is the row's own, in the strength the write takes anyway
+      # (FOR NO KEY UPDATE for an update, FOR UPDATE for a destroy), only
+      # taken before the append instead of at the row write. So a write
+      # takes the locks plain ActiveRecord takes, in the same order, and adds
+      # no deadlock: a separate lock taken before the row's (an advisory lock,
+      # as in 0.9.0) deadlocked against a writer that holds the row first
+      # (record.lock!, with_lock) and then updates it
+      # (test/aggregate_lock_deadlock_test.rb). Where the row is missing, or
+      # the database has no such row lock, the advisory lock remains.
+      def lyra_lock_aggregate!(operation = :update)
         return unless Lyra.config.lock_aggregate_before_append
         return unless id
         return unless lyra_hijack_mode? || (lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync)
+        return if lyra_lock_own_row(operation)
 
         Lyra::AdvisoryLock.xact_lock(self.class.connection, "lyra_aggregate/#{lyra_stream_name}",
                                      purpose: "aggregate write")
+      end
+
+      # True when the record's row was found and locked.
+      def lyra_lock_own_row(operation)
+        connection = self.class.connection
+        return false unless connection.adapter_name.match?(/postgres/i)
+
+        primary_key = self.class.primary_key
+        return false unless primary_key.is_a?(String)
+
+        strength = operation == :destroy ? "FOR UPDATE" : "FOR NO KEY UPDATE"
+        key = respond_to?(:id_in_database) ? id_in_database : id
+        sql = "SELECT 1 FROM #{connection.quote_table_name(self.class.table_name)} " \
+              "WHERE #{connection.quote_column_name(primary_key)} = #{connection.quote(key)} #{strength}"
+        # Never from the query cache: a lock is taken by running the statement.
+        connection.uncached { connection.select_value(sql, "Lyra aggregate lock") }.present?
       end
 
       def lyra_hijack_update
@@ -437,7 +464,7 @@ module Lyra
       def lyra_hijack_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!
+        lyra_lock_aggregate!(:destroy)
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self
@@ -503,7 +530,7 @@ module Lyra
       def lyra_prepare_event_source_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!
+        lyra_lock_aggregate!(:destroy)
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self

@@ -9,7 +9,9 @@ require "test_helper"
 # which would add a statement to every write, fails here.
 class AggregateLockStatementsTest < Minitest::Test
   TABLE = "lyra_lock_items"
-  LOCK = /pg_advisory_xact_lock\(hashtext\('lyra_aggregate\/LockItem\$\d+'\)\)/
+  ROW_LOCK = /\ASELECT 1 FROM "lyra_lock_items" WHERE "id" = \d+ FOR (NO KEY )?UPDATE\z/
+  ADVISORY = /pg_advisory_xact_lock\(hashtext\('lyra_aggregate\/LockItem\$\d+'\)\)/
+  LOCK = Regexp.union(ROW_LOCK, ADVISORY)
 
   def setup
     skip "Requires Rails and PostgreSQL" unless defined?(ActiveRecord::Base) && connection.adapter_name.match?(/postgres/i)
@@ -68,6 +70,35 @@ class AggregateLockStatementsTest < Minitest::Test
     refute_nil lock
     refute_nil append
     assert_operator lock, :<, append, "the lock must precede the append"
+  end
+
+  # The lock is the row's own, in the strength the write would take: an
+  # update's FOR NO KEY UPDATE (so foreign-key checks of child inserts, which
+  # take FOR KEY SHARE, are not blocked), a destroy's FOR UPDATE.
+  def test_the_lock_is_the_rows_own_in_the_writes_strength
+    Lyra.config.enable_hijack!
+    item = LockItem.create!(label: "a")
+
+    update = statements { item.update!(label: "b") }.grep(ROW_LOCK)
+    destroy = statements { item.destroy! }.grep(ROW_LOCK)
+
+    assert_equal 1, update.size
+    assert update.first.end_with?("FOR NO KEY UPDATE"), update.first
+    assert_equal 1, destroy.size
+    assert destroy.first.end_with?(" FOR UPDATE") && !destroy.first.include?("NO KEY"), destroy.first
+  end
+
+  # A record whose row is missing (written by another path, or deleted under
+  # it) still gets a lock: the advisory lock on its stream.
+  def test_without_a_row_the_advisory_lock_is_taken
+    Lyra.config.enable_hijack!
+    item = LockItem.create!(label: "a")
+    connection.execute("DELETE FROM #{TABLE} WHERE id = #{item.id}")
+
+    sql = statements { item.update!(label: "b") rescue nil }
+
+    assert sql.any? { |s| s.match?(ROW_LOCK) }, "the row lock is tried first"
+    assert sql.any? { |s| s.match?(ADVISORY) }, "then the advisory lock:\n#{sql.join("\n")}"
   end
 
   def test_monitor_takes_no_lock_its_row_write_is_the_lock
