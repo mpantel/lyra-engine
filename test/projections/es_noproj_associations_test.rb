@@ -15,7 +15,7 @@ class EsNoprojAssociationsTest < Minitest::Test
       self.table_name = "users"
       include Lyra::Interceptors::CrudInterceptor
       monitor_with_lyra
-      has_many :en_articles, foreign_key: :author_id, class_name: "EnArticle"
+      has_many :en_articles, foreign_key: :author_id, class_name: "EnArticle", inverse_of: :author
       has_many :published_articles, -> { where(status: "published") }, foreign_key: :author_id, class_name: "EnArticle"
       has_many :article_authors, through: :en_articles, source: :author
       has_many :nullified_articles, foreign_key: :author_id, class_name: "EnArticle", dependent: :nullify
@@ -25,7 +25,9 @@ class EsNoprojAssociationsTest < Minitest::Test
       include Lyra::Interceptors::CrudInterceptor
       monitor_with_lyra
       class_attribute :flavour, default: "plain"
-      belongs_to :author, class_name: "EnAuthor", optional: true
+      scope :with_status, ->(status) { where(status: status) }
+      scope :published, -> { with_status("published") }
+      belongs_to :author, class_name: "EnAuthor", optional: true, inverse_of: :en_articles
     end)
 
     clean
@@ -67,6 +69,84 @@ class EsNoprojAssociationsTest < Minitest::Test
 
   def test_a_scoped_association_applies_its_scope
     assert_equal %w[A1], EnAuthor.find(@ann.id).published_articles.map(&:title)
+  end
+
+  # A named scope called on an association (order.payments.completed) must
+  # filter that association's records, and must not load the model's other
+  # records to do it.
+  def test_a_named_scope_on_an_association_filters_it_without_loading_the_model
+    ann = EnAuthor.find(@ann.id)
+    loaded = count_loads { assert_equal %w[A1], ann.en_articles.published.map(&:title) }
+
+    assert_equal %w[A1], ann.en_articles.published.map(&:title)
+    assert_equal %w[A2], ann.en_articles.with_status("draft").map(&:title)
+    assert_equal 0, loaded, "the scope loaded every article"
+  end
+
+  # An association's records are read when first needed, so a narrowing where
+  # made on it reaches the reference links with all its keys.
+  def test_a_where_on_an_unread_association_merges_into_the_lookup
+    ann = EnAuthor.find(@ann.id)
+    relation = ann.association(:en_articles).send(:lyra_get_cached_relation)
+
+    narrowed = relation.where(status: "draft")
+
+    refute relation.loaded?
+    refute narrowed.loaded?
+    assert_equal({ "author_id" => @ann.id, "status" => "draft" }, narrowed.create_attributes.slice("author_id", "status"))
+    assert_equal %w[A2], narrowed.map(&:title)
+    assert narrowed.loaded?
+    # a second condition on a key already pending is an AND, not an override
+    assert_empty relation.where(status: "draft").where(status: "published").to_a
+    assert_equal %w[A1 A2], relation.map(&:title).sort
+  end
+
+  def test_the_reference_stream_names_its_records_from_the_stream_table
+    ids = Lyra::Projections::ReferenceLinks.send(:candidate_ids, EnArticle, "author_id", @ann.id)
+
+    assert_equal EnArticle.where(author_id: @ann.id).map { _1.id.to_s }.sort, ids.sort
+    assert_equal 2, ids.size
+    assert_empty Lyra::Projections::ReferenceLinks.send(:candidate_ids, EnArticle, "author_id", 999_999)
+  end
+
+  # Model.new asks the current scope for the attributes a new record gets
+  # (ActiveRecord reads them off all.scope_for_create, and state machines call
+  # it for every instance): that must not load the model's records.
+  def test_building_a_record_loads_no_other_record
+    loaded = count_loads { EnArticle.new(title: "A9") }
+
+    assert_equal 0, loaded
+    built = EnAuthor.find(@ann.id).en_articles.build(title: "A9")
+    assert_equal @ann.id, built.author_id, "a record built through an association still gets its owner's key"
+  end
+
+  # What an association loads points back at its owner, as under ActiveRecord:
+  # the owner's unsaved in-memory state is what the children see through
+  # article.author (Solidus's shipment.order.paid? depends on it).
+  def test_records_an_association_loads_point_back_at_the_owner_instance
+    ann = EnAuthor.find(@ann.id)
+    ann.name = "Ann, renamed in memory"
+
+    articles = ann.en_articles.to_a
+
+    assert articles.any?
+    assert(articles.all? { |article| article.author.equal?(ann) })
+    assert_equal "Ann, renamed in memory", ann.en_articles.published.first.author.name
+  end
+
+  # Full loads of the model (CachedProjection.all) made inside the block.
+  def count_loads
+    calls = 0
+    singleton = Lyra::Projections::CachedProjection.singleton_class
+    original = singleton.instance_method(:all)
+    singleton.define_method(:all) do |model_class|
+      calls += 1 if model_class == EnArticle
+      original.bind_call(self, model_class)
+    end
+    yield
+    calls
+  ensure
+    singleton.define_method(:all, original)
   end
 
   # The foreign key of a :through association is on the intermediate

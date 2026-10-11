@@ -184,7 +184,17 @@ module Lyra
 
               conditions = { reflection.foreign_key => owner_key_value }
               conditions[reflection.type] = owner.class.polymorphic_name if reflection.type
-              Lyra::Projections::EventStoreReader.where(reflection.klass, conditions)
+              # Read when first needed, so that a narrowing where made on it
+              # (stock_items.where(variant_id: ...)) reaches the reference
+              # links with all its keys. As ActiveRecord does for what an
+              # association loads, the records point back at this owner, not
+              # at a copy of it read from the events: a child asks its
+              # parent in memory (shipment.order.paid?), and the copy was the
+              # parent before the change under way was recorded.
+              Lyra::Projections::DeferredRelation.new(
+                reflection.klass, conditions: conditions,
+                on_load: ->(records) { records.each { |record| set_inverse_instance(record) } }
+              )
             end
           lyra_apply_reflection_scope(relation)
         end
