@@ -440,7 +440,10 @@ returns (the job is still enqueued and converges on the same row). Blocks
 nest: an inner block projects its own writes when it ends and restores the
 outer block's list; if the inner block raises, its unprojected writes pass to
 the outer block. Every write is projected by the time the outermost block
-returns.
+returns. Writes are projected when the block ends, not as they are made: a read
+inside the block, before it ends, can still come before the projection (code
+that writes and then reads in one step, as Solidus's checkout does, needs a
+block around the write, or ES-Sync).
 
 ```ruby
 Lyra::Consistency::ReadYourWrites.with_guaranteed_read do

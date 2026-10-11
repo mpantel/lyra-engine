@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-10
+## [0.9.0] - 2026-10-11
 
 Everything since 0.8.0, the version the PAM article describes.
 
@@ -406,6 +406,9 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **Documentation: `ReadYourWrites` projects a block's writes when the block ends**, so a read
+  after the block sees them and a read inside it does not; `docs/API_REFERENCE.md` said or
+  implied the latter.
 - **ES-Lazy: concurrent first reads no longer fail creating the checkpoint table.** Two threads
   that both found `lyra_projection_checkpoints` missing both created it, and the second `CREATE`
   failed the write that triggered it (one write of the full BPI 2017 replay at two threads).
