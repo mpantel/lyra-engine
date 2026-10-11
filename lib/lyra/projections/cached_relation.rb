@@ -895,10 +895,33 @@ module Lyra
         result.is_a?(CachedRelation) ? result : self
       end
 
-      def scoping(skip_inherited_scope = false, full = nil, all_queries: nil, &block)
-        # Yield self for scoping blocks
-        yield self if block_given?
-        self
+      # The relation a +scoping+ block is running under, per model class, as
+      # ActiveRecord's current_scope: inside it the model's own class-level
+      # reads (all, where, first, last) answer from that relation instead of
+      # from every record of the model. Scope bodies reached through an
+      # association (order.payments.completed) run that way.
+      SCOPES_KEY = :lyra_cached_relation_scopes
+
+      def self.scoped_for(model_class)
+        (Thread.current[SCOPES_KEY] || {})[model_class]
+      end
+
+      # Runs the block with this relation as the model's current scope and
+      # returns the block's value, as ActiveRecord does. It used to return the
+      # relation itself, which dropped the block's result: a scope called on
+      # an association came back unfiltered.
+      def scoping(skip_inherited_scope = false, full = nil, all_queries: nil)
+        return self unless block_given?
+
+        scopes = (Thread.current[SCOPES_KEY] ||= {})
+        had_previous = scopes.key?(model_class)
+        previous = scopes[model_class]
+        scopes[model_class] = self
+        begin
+          yield self
+        ensure
+          had_previous ? scopes[model_class] = previous : scopes.delete(model_class)
+        end
       end
 
       def _scoping(skip_inherited_scope = false, full = nil, all_queries: nil, &block)

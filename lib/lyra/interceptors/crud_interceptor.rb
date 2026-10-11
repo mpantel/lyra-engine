@@ -236,6 +236,11 @@ module Lyra
         # Returns a CachedRelation that supports method chaining
         def where(*args, **kwargs, &block)
           if lyra_read_from_events?
+            # Under a relation's scoping block (a scope called on an
+            # association) the conditions apply to that relation's records.
+            scoped = Lyra::Projections::CachedRelation.scoped_for(self)
+            return scoped.where(*args, **kwargs, &block) if scoped
+
             # A plain hash of conditions can use the reference links (a
             # foreign-key lookup, as dependent associations make); anything
             # else is evaluated on every record.
@@ -252,9 +257,30 @@ module Lyra
         # Note: Rails 8 passes arguments to all() in internal call chains (e.g., reload)
         def all(...)
           if lyra_read_from_events?
-            Lyra::Projections::EventStoreReader.all(self)
+            Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.all(self)
           else
             super
+          end
+        end
+
+        # The attributes a new record gets from the current scope. ActiveRecord
+        # computes them from all.scope_for_create, and every Model.new asks
+        # (state machines do it to initialise their state), so under ES-NoProj
+        # that was a load of every record of the model per record built. They
+        # come from the relation being scoped, or from ActiveRecord's own
+        # default scope, which reads nothing.
+        def scope_attributes
+          return super unless lyra_read_from_events?
+
+          scoped = Lyra::Projections::CachedRelation.scoped_for(self)
+          return scoped.scope_for_create if scoped
+
+          previous = Thread.current[:lyra_bypass_read_override]
+          Thread.current[:lyra_bypass_read_override] = true
+          begin
+            super
+          ensure
+            Thread.current[:lyra_bypass_read_override] = previous
           end
         end
 
@@ -263,7 +289,7 @@ module Lyra
         # Rails' Model.last is equivalent to Model.order(pk: :desc).limit(1).first
         def first(limit = nil)
           if lyra_read_from_events?
-            relation = Lyra::Projections::EventStoreReader.relation(self)
+            relation = Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.relation(self)
             relation.order(primary_key => :asc).first(limit)
           else
             super
@@ -272,7 +298,7 @@ module Lyra
 
         def last(limit = nil)
           if lyra_read_from_events?
-            relation = Lyra::Projections::EventStoreReader.relation(self)
+            relation = Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.relation(self)
             relation.order(primary_key => :desc).first(limit)
           else
             super

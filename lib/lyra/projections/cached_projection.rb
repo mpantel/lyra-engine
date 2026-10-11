@@ -17,6 +17,14 @@ module Lyra
     # to be invalidated for reads to be correct; invalidation only saves a
     # rebuild.
     #
+    # An out-of-date entry is not thrown away. When the event it is stamped
+    # with is still in the record's stream, only the events after it are
+    # replayed onto its attributes: the stream is append-only, so that reaches
+    # the state a full replay reaches. A stamp that is no longer in the stream
+    # (a write that rolled back after warming the cache) is not trusted, and
+    # the whole stream is replayed. Without this, a record read after each of
+    # its updates was replayed from its first event every time.
+    #
     # Collections (all, where, find_by on non-key attributes, count) are
     # assembled from those entries: one query for the last event of every
     # stream of the model, one bulk cache read, and a replay of only the
@@ -39,6 +47,7 @@ module Lyra
       # 2: entries are { "v" => last event id, "a" => attributes or nil }.
       CACHE_VERSION = 2
       DEFAULT_EXPIRES_IN = 1.hour
+      MEMORY_CACHE_BYTES = 32.megabytes
 
       class << self
         # Find a single record by ID
@@ -55,7 +64,7 @@ module Lyra
           entry = cache_read(key) unless force
           return entry["a"] if fresh?(entry, version)
 
-          attributes, built_version = build_record(model_class, id)
+          attributes, built_version = build_record(model_class, id, entry)
           cache_write(key, entry_for(attributes, built_version)) if built_version
           attributes
         end
@@ -97,24 +106,23 @@ module Lyra
         # @param model_class [Class] The ActiveRecord model class
         # @return [Array<Hash>] All record attributes
         def all(model_class)
-          versions = stream_versions(model_class)
-          return [] if versions.empty?
+          records_at(model_class, stream_versions(model_class))
+        end
 
-          keys = versions.keys.to_h { |id| [record_cache_key(model_class, id), id] }
-          cached = cache_store.read_multi(*keys.keys)
-          rebuilt = {}
+        # The live records with these ids, in the order given. Like all, but
+        # for a known set of streams: one query for their last events and one
+        # cache read, instead of one of each per record (find). The reference
+        # links read their candidates this way.
+        #
+        # @param model_class [Class] The ActiveRecord model class
+        # @param ids [Array<Integer, String>] The record IDs
+        # @return [Array<Hash>] Record attributes; destroyed or unknown ids are left out
+        def find_many(model_class, ids)
+          ids = ids.map(&:to_s).uniq
+          return [] if ids.empty?
 
-          records = keys.filter_map do |key, id|
-            entry = cached[key]
-            next entry["a"] if fresh?(entry, versions[id])
-
-            attributes, built_version = build_record(model_class, id)
-            rebuilt[key] = entry_for(attributes, built_version) if built_version
-            attributes
-          end
-
-          cache_store.write_multi(rebuilt, expires_in: DEFAULT_EXPIRES_IN) if rebuilt.any?
-          records
+          versions = stream_versions_of(model_class, ids)
+          records_at(model_class, ids.to_h { |id| [id, versions[id]] }.compact)
         end
 
         # Query records with conditions
@@ -162,6 +170,7 @@ module Lyra
         #
         # @param model_class [Class] The ActiveRecord model class
         def invalidate_all(model_class)
+          memory_cache.delete_matched("#{cache_namespace}/#{model_class.name}/*")
           cache_store.delete_matched("#{cache_namespace}/#{model_class.name}/*")
         rescue NotImplementedError
           nil
@@ -172,7 +181,7 @@ module Lyra
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
         def warm(model_class, id)
-          find(model_class, id, force: true)
+          find(model_class, id)
         end
 
         private
@@ -187,8 +196,16 @@ module Lyra
 
         # [attributes or nil (destroyed), id of the last event replayed or
         # nil (no stream)]
-        def build_record(model_class, id)
-          events = load_events("#{model_class.name}$#{id}")
+        #
+        # +entry+ is the record's out-of-date cache entry, if any: when its
+        # stamp is still in the stream, only the events after it are replayed
+        # onto its attributes.
+        def build_record(model_class, id, entry = nil)
+          stream = "#{model_class.name}$#{id}"
+          incremental = build_from_entry(model_class, id, stream, entry)
+          return incremental if incremental
+
+          events = load_events(stream)
           return [nil, nil] if events.empty?
 
           version = events.last.event_id
@@ -198,6 +215,24 @@ module Lyra
           [reconstruct_state(model_class, id, replayed), version]
         end
 
+        # The state reached by replaying the events after +entry+'s stamp onto
+        # its attributes, as [attributes or nil, version]; nil when that cannot
+        # be done exactly (no usable entry, a stamp that is no longer in the
+        # stream, nothing after it), and the caller replays the whole stream.
+        def build_from_entry(model_class, id, stream, entry)
+          return nil unless entry.is_a?(Hash) && entry["v"] && entry["a"].is_a?(Hash)
+
+          events = load_events_after(stream, entry["v"])
+          return nil if events.nil? || events.empty?
+
+          version = events.last.event_id
+          replayed = events.select { Lyra::Event.operation_of(_1) }
+          return [entry["a"], version] if replayed.empty?
+          return [nil, version] if Lyra::Event.operation_of(replayed.last) == :destroyed
+
+          [reconstruct_state(model_class, id, replayed, entry["a"]), version]
+        end
+
         # The id of the last event in a record's stream, or nil if it has none.
         def stream_version(model_class, id)
           connection = ActiveRecord::Base.connection
@@ -205,6 +240,42 @@ module Lyra
             "SELECT event_id FROM event_store_events_in_streams " \
             "WHERE stream = #{connection.quote("#{model_class.name}$#{id}")} ORDER BY id DESC LIMIT 1"
           )
+        end
+
+        # The records whose streams' last events are +versions+ ({ id => event
+        # id }): one bulk cache read, and a replay of only the streams whose
+        # entry is missing or out of date.
+        def records_at(model_class, versions)
+          return [] if versions.empty?
+
+          keys = versions.keys.to_h { |id| [record_cache_key(model_class, id), id] }
+          cached = cache_read_multi(keys.keys)
+          rebuilt = {}
+
+          records = keys.filter_map do |key, id|
+            entry = cached[key]
+            next entry["a"] if fresh?(entry, versions[id])
+
+            attributes, built_version = build_record(model_class, id, entry)
+            rebuilt[key] = entry_for(attributes, built_version) if built_version
+            attributes
+          end
+
+          cache_write_multi(rebuilt) if rebuilt.any?
+          records
+        end
+
+        # { record id (String) => id of its stream's last event } for the
+        # given ids that have a stream. One query.
+        def stream_versions_of(model_class, ids)
+          connection = ActiveRecord::Base.connection
+          streams = ids.map { |id| connection.quote("#{model_class.name}$#{id}") }.join(", ")
+          rows = connection.select_rows(<<~SQL.squish)
+            SELECT stream, event_id FROM event_store_events_in_streams
+            WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream IN (#{streams}) GROUP BY stream)
+          SQL
+          prefix = "#{model_class.name}$"
+          rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
         end
 
         # { record id (String) => id of its stream's last event }, in
@@ -245,8 +316,10 @@ module Lyra
         end
 
         # Reconstruct record state from events
-        def reconstruct_state(model_class, id, events)
-          attributes = { "id" => id }
+        # +base+: the attributes the +events+ are applied onto (the state at
+        # an earlier event), instead of an empty record.
+        def reconstruct_state(model_class, id, events, base = nil)
+          attributes = base ? base.dup : { "id" => id }
 
           events.each do |event|
             case Lyra::Event.operation_of(event)
@@ -265,6 +338,14 @@ module Lyra
           # Convert id to integer if needed
           attributes["id"] = id.to_i if id.to_s =~ /^\d+$/
           attributes
+        end
+
+        # The events of a stream after +event_id+; nil when that event is not
+        # in the stream (a write that rolled back, a stream that was rewritten).
+        def load_events_after(stream_name, event_id)
+          Lyra.config.event_store.read.stream(stream_name).from(event_id).to_a
+        rescue RubyEventStore::EventNotFound
+          nil
         end
 
         # Load events from stream
@@ -287,15 +368,46 @@ module Lyra
           Rails.cache
         end
 
+        # A process-local copy in front of the shared cache. An entry is
+        # stamped with its stream's last event and used only while that
+        # still is the last one, so a copy that fell behind another process's
+        # write is detected as an out-of-date entry is, never trusted. What it
+        # saves is the shared cache's round trip (a database query when the
+        # cache is Solid Cache) on every read and write of a record.
+        def memory_cache
+          @memory_cache ||= ActiveSupport::Cache::MemoryStore.new(size: MEMORY_CACHE_BYTES)
+        end
+
         def cache_write(key, value, expires_in: DEFAULT_EXPIRES_IN)
+          memory_cache.write(key, value, expires_in: expires_in)
           cache_store.write(key, value, expires_in: expires_in)
         end
 
         def cache_read(key)
-          cache_store.read(key)
+          memory_cache.read(key) || begin
+            entry = cache_store.read(key)
+            memory_cache.write(key, entry, expires_in: DEFAULT_EXPIRES_IN) if entry
+            entry
+          end
+        end
+
+        def cache_read_multi(keys)
+          found = memory_cache.read_multi(*keys)
+          missing = keys - found.keys
+          return found if missing.empty?
+
+          fetched = cache_store.read_multi(*missing)
+          memory_cache.write_multi(fetched, expires_in: DEFAULT_EXPIRES_IN) if fetched.any?
+          found.merge(fetched)
+        end
+
+        def cache_write_multi(entries)
+          memory_cache.write_multi(entries, expires_in: DEFAULT_EXPIRES_IN)
+          cache_store.write_multi(entries, expires_in: DEFAULT_EXPIRES_IN)
         end
 
         def cache_delete(key)
+          memory_cache.delete(key)
           cache_store.delete(key)
         end
 

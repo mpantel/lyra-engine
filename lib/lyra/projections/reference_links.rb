@@ -83,12 +83,16 @@ module Lyra
         def lookup(model_class, conditions)
           return nil unless enabled? && conditions.is_a?(Hash)
 
-          key, value = indexed_condition(model_class, conditions)
-          return nil unless key
+          indexed = indexed_conditions(model_class, conditions)
+          return nil if indexed.empty?
 
           catch_up(model_class)
-          ids = candidate_ids(model_class, key, value)
-          records = ids.filter_map { |id| CachedProjection.find(model_class, id) }
+          # Every condition on an indexed key narrows the candidates: a record
+          # that matches them all is in each key's stream, so the streams are
+          # intersected (stock_location_id and variant_id together name one
+          # stock item, where the location alone names all of them).
+          ids = indexed.map { |key, value| candidate_ids(model_class, key, value) }.reduce(:&)
+          records = CachedProjection.find_many(model_class, ids)
           records.sort_by { |attrs| sort_key(attrs[model_class.primary_key.to_s]) }
         end
 
@@ -148,24 +152,30 @@ module Lyra
           end
         end
 
-        def indexed_condition(model_class, conditions)
+        # [[key, value], ...] for the conditions that name one value of an
+        # indexed foreign key.
+        def indexed_conditions(model_class, conditions)
           keys = foreign_keys(model_class)
-          conditions.each do |key, value|
+          conditions.filter_map do |key, value|
             next unless keys.include?(key.to_s)
 
             value = value.id if value.is_a?(ActiveRecord::Base)
-            return [key.to_s, value] if value.is_a?(Integer) || value.is_a?(String)
+            [key.to_s, value] if value.is_a?(Integer) || value.is_a?(String)
           end
-          nil
         end
 
+        # Ids of the records an event of which set +key+ to +value+: the
+        # records whose own streams hold the events linked in the reference
+        # stream. One query on the stream table; the events are not read.
         def candidate_ids(model_class, key, value)
-          Lyra.config.event_store.read.stream(stream_name(model_class, key, value)).to_a.map do |event|
-            data = event.data
-            (data[:model_id] || data["model_id"]).to_s
-          end.uniq
-        rescue RubyEventStore::EventNotFoundInStream
-          []
+          connection = ActiveRecord::Base.connection
+          own = "#{model_class.name}$"
+          connection.select_values(<<~SQL.squish).map { |stream| stream.delete_prefix(own) }
+            SELECT DISTINCT s.stream FROM event_store_events_in_streams l
+            JOIN event_store_events_in_streams s
+              ON s.event_id = l.event_id AND s.stream LIKE #{connection.quote("#{ActiveRecord::Base.sanitize_sql_like(own)}%")}
+            WHERE l.stream = #{connection.quote(stream_name(model_class, key, value))}
+          SQL
         end
 
         # { foreign key => value } that +event+ sets, for the model's keys.
