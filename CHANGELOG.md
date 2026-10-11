@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Everything since 0.8.0, the version the PAM article describes.
 
 ### Added
+- **`config.lock_aggregate_before_append`** (default `true`): Hijack and ES-Sync lock the
+  aggregate before appending. Two writers of one record could append in one order and write the
+  row in the other, leaving the row at a value its log does not replay to; seen in the wild, 2
+  rounds of 120 with 8 threads on one record, and reproduced deterministically
+  (`test/concurrent_same_record_test.rb`). An update or destroy now takes a PostgreSQL advisory
+  lock on the record's stream before its event is appended, held to the end of the transaction
+  (assumption L of Theorem 5). Creates, Monitor, ES-Async, ES-Lazy and ES-NoProj are unchanged
+  (`test/aggregate_lock_statements_test.rb`). Cost: an update or destroy issues three more SQL
+  statements (the lock, then the savepoint pair the append now needs), so Hijack and ES-Sync
+  updates go from 5 to 8 statements; on one contended record Hijack's throughput falls from
+  about 90 to about 52 ops/s. Set `false` for the previous behaviour and its numbers.
 - **Reference links for ES-NoProj** (`Lyra::Projections::ReferenceLinks`, `config.reference_links`,
   default `:auto`). An event that sets a `belongs_to` foreign key is also linked into the stream
   `Model.foreign_key$value`, the way Rails Event Store links events by metadata. A lookup by that

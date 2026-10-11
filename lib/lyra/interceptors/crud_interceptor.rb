@@ -373,9 +373,30 @@ module Lyra
         end
       end
 
+      # Assumption L of Theorem 5: hold a lock on the aggregate from before its
+      # event is appended until the transaction ends, so that two writers of
+      # one record append and write its row in the same order. Without it a
+      # writer that appended first can write its row last, and the row ends at
+      # a value the log does not replay to (test/concurrent_same_record_test.rb).
+      #
+      # Taken where the row is written by the operation itself: Hijack and
+      # ES-Sync. Monitor writes the row first, so the row lock is the lock;
+      # ES-NoProj has no row; ES-Async and ES-Lazy project by replaying the
+      # stream in order under a lock of their own. Creates have no earlier
+      # writer: the identifier is reserved.
+      def lyra_lock_aggregate!
+        return unless Lyra.config.lock_aggregate_before_append
+        return unless id
+        return unless lyra_hijack_mode? || (lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync)
+
+        Lyra::AdvisoryLock.xact_lock(self.class.connection, "lyra_aggregate/#{lyra_stream_name}",
+                                     purpose: "aggregate write")
+      end
+
       def lyra_hijack_update
         @lyra_hijacked = true
         lyra_disable_paper_trail!
+        lyra_lock_aggregate!
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         command.record = self
@@ -390,6 +411,7 @@ module Lyra
       def lyra_hijack_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
+        lyra_lock_aggregate!
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self
@@ -435,6 +457,7 @@ module Lyra
       def lyra_prepare_event_source_update
         @lyra_hijacked = true
         lyra_disable_paper_trail!
+        lyra_lock_aggregate!
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         command.record = self
@@ -454,6 +477,7 @@ module Lyra
       def lyra_prepare_event_source_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
+        lyra_lock_aggregate!
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self

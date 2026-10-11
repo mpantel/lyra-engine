@@ -54,6 +54,14 @@ module Lyra
     # together either way; this decides only what a failed append does.
     MONITOR_APPEND_FAILURES = %i[log fail_write].freeze
     attr_reader :monitor_append_failure
+    # Take a lock on the aggregate before appending its event, in Hijack and
+    # ES-Sync (assumption L of Theorem 5; Lyra::Interceptors::CrudInterceptor
+    # #lyra_lock_aggregate!). On (default): two writers of one record append and
+    # write its row in the same order, at the price of one lock statement per
+    # update or destroy, which also makes the append nest in a savepoint. Off:
+    # the order Hijack and ES-Sync had before, with a divergence between row and
+    # log possible under same-record races, which DualView detects.
+    attr_accessor :lock_aggregate_before_append
     # Apply the privacy policy's retention rules (Lyra::Retention). Off by
     # default: deleting data on a timer is the deployment's decision.
     attr_accessor :retention_executor
@@ -107,6 +115,7 @@ module Lyra
       @access_metadata_proc = nil
       @reads_without_purpose = :allow
       @monitor_append_failure = :log
+      @lock_aggregate_before_append = true
       @retention_executor = false
       @retention_anchors = {}
       @dashboard_authorization = nil
