@@ -9,7 +9,9 @@ require "test_helper"
 # or both deadlock (PostgreSQL detects it and aborts one transaction).
 class AggregateLockDeadlockTest < Minitest::Test
   TABLE = "lyra_deadlock_items"
-  MODES = %i[disabled hijack es_sync].freeze
+  # ES-Async projects inline here (the test environment's default): its job
+  # runs in the writer's thread once the writer has committed.
+  MODES = %i[disabled hijack es_sync es_async].freeze
 
   def setup
     skip "Requires Rails and PostgreSQL" unless defined?(ActiveRecord::Base) && connection.adapter_name.match?(/postgres/i)
@@ -161,6 +163,10 @@ class AggregateLockDeadlockTest < Minitest::Test
     when :es_sync
       Lyra.config.enable_event_sourcing!
       Lyra.config.projection_mode = :sync
+    when :es_async
+      Lyra.config.enable_event_sourcing!
+      Lyra.config.projection_mode = :async
+      Lyra.config.async_projections_inline = true
     end
   end
 

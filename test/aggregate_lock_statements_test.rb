@@ -109,13 +109,28 @@ class AggregateLockStatementsTest < Minitest::Test
     refute_locked(statements { item.destroy! }, "a Monitor destroy")
   end
 
-  def test_es_async_and_es_noproj_take_no_lock
+  # ES-Async's job applies only the events after its checkpoint, which needs a
+  # record's events to commit in append order: its writers take the lock too.
+  # They never write the row (the job does), so it is the advisory lock on the
+  # stream, not the row's.
+  def test_es_async_takes_the_advisory_lock_not_the_rows
     Lyra.config.enable_event_sourcing!
-    %i[async disabled].each do |projection|
-      Lyra.config.projection_mode = projection
-      item = LockItem.create!(label: "a")
-      refute_locked(statements { item.update!(label: "b") }, "an ES-#{projection} update")
-    end
+    Lyra.config.projection_mode = :async
+    created = nil
+    refute_locked(statements { created = LockItem.create!(label: "a") }, "an ES-Async create")
+
+    sql = statements { created.update!(label: "b") }
+
+    assert sql.any? { |s| s.match?(ADVISORY) }, "an ES-Async update took no advisory lock:\n#{sql.join("\n")}"
+    refute sql.any? { |s| s.match?(ROW_LOCK) }, "an ES-Async update locked the row"
+    assert_locked(statements { created.destroy! }, "an ES-Async destroy")
+  end
+
+  def test_es_noproj_takes_no_lock
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :disabled
+    item = LockItem.create!(label: "a")
+    refute_locked(statements { item.update!(label: "b") }, "an ES-NoProj update")
   end
 
   def test_the_lock_can_be_turned_off

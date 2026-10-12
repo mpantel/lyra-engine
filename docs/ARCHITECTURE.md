@@ -703,7 +703,7 @@ listed under [Operational Modes](#layer-1-interception-layer).
 | Configuration | `projection_mode` | How the table follows the events |
 |---|---|---|
 | ES-Sync | `:sync` (default) | `Lyra::Projections::ModelProjection` writes the row in the write's transaction |
-| ES-Async | `:async` | `Lyra::Projections::AsyncProjectionJob` (queue `lyra_projections`, enqueued after commit) replays the record's stream onto the row |
+| ES-Async | `:async` | `Lyra::Projections::AsyncProjectionJob` (queue `lyra_projections`, enqueued after commit) applies the record's events after the stream's checkpoint onto the row (the whole stream when there is no usable checkpoint) |
 | ES-NoProj | `:disabled` | no row is written; reads are answered from the events |
 | ES-Lazy | `:lazy` | no row at write time; pending events are applied before each read |
 

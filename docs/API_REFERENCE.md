@@ -82,7 +82,7 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `hijack_enabled` | `false` | Set by the mode helpers. When true, `hijack_mode?` is true whatever `mode` says. |
 | `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of every event a monitored record's write produces, in every mode. A proc that raises is logged and skipped. |
 | `monitor_append_failure` | `:log` | What Monitor does when a write's event cannot be stored: `:log` lets the write stand and logs the failure; `:fail_write` raises `EventStoreUnavailableError` and rolls the write back, as Hijack and event sourcing always do (bulk writes included). Validated on assignment. |
-| `lock_aggregate_before_append` | `true` | Hijack and ES-Sync lock the record's row before appending an update's or destroy's event (PostgreSQL: `FOR NO KEY UPDATE` for an update, `FOR UPDATE` for a destroy, the strength the write takes anyway), so two writers of one record append and write its row in the same order, and a write takes the locks plain ActiveRecord takes, in the same order (no deadlock against `with_lock`; `test/aggregate_lock_deadlock_test.rb`). A record with no row gets an advisory lock on its stream instead. Costs three SQL statements per update and one per destroy (the lock, and on an update the savepoint pair the append then needs). `false` restores the earlier order, with a row/log divergence possible under same-record races that DualView detects. SQLite needs no lock (it serialises writers from the first write, which is the append; `test/sqlite_same_record_test.rb`); other adapters warn once and are safe in a single process only. |
+| `lock_aggregate_before_append` | `true` | Hijack and ES-Sync lock the record's row before appending an update's or destroy's event (PostgreSQL: `FOR NO KEY UPDATE` for an update, `FOR UPDATE` for a destroy, the strength the write takes anyway), so two writers of one record append and write its row in the same order, and a write takes the locks plain ActiveRecord takes, in the same order (no deadlock against `with_lock`; `test/aggregate_lock_deadlock_test.rb`). A record with no row gets an advisory lock on its stream instead. ES-Async writers take the advisory lock on the stream (they do not write the row; the job does), so a record's events commit in the order they were appended, which lets the projection job apply only the events after its checkpoint. Costs three SQL statements per update and one per destroy (the lock, and on an update the savepoint pair the append then needs). `false` restores the earlier order, with a row/log divergence possible under same-record races in Hijack and ES-Sync that DualView detects, and makes ES-Async's job replay the whole stream every time. SQLite needs no lock (it serialises writers from the first write, which is the append; `test/sqlite_same_record_test.rb`); other adapters warn once and are safe in a single process only. |
 | `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. |
 | `projection_error_handler` | `nil` | `->(error, record, operation)`, called when a projection fails and `strict_projections` is off. |
 | `async_projections_inline` | `nil` | ES-Async: `nil` projects inline in the test environment only; `true` always; `false` never. |
@@ -432,8 +432,17 @@ end
 
 ES-Sync projects each event to the model's table in the write's transaction.
 ES-Async enqueues `Lyra::Projections::AsyncProjectionJob` (queue
-`:lyra_projections`, enqueued after commit, up to 5 attempts), which
-replays the record's whole stream so out-of-order jobs converge.
+`:lyra_projections`, enqueued after commit, up to 5 attempts), which applies,
+under a lock held per stream, the record's events after the stream's
+checkpoint (the last event a job applied, table `lyra_async_checkpoints`,
+created on first use), so out-of-order jobs converge and a record's jobs cost
+what its history is long. That relies on a record's events committing in the
+order they were appended, which the lock on the aggregate gives
+(`lock_aggregate_before_append`, taken by ES-Async writers as an advisory lock
+on the stream); with the lock off, or without a usable checkpoint, the job
+replays the whole stream. With `async_projections_inline` (the test
+environment's default) the writer runs the same job itself, after its
+transaction commits.
 
 Read-your-writes under ES-Async: the block's writes are projected before it
 returns (the job is still enqueued and converges on the same row). Blocks

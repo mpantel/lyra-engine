@@ -155,9 +155,11 @@ class ConcurrentSameRecordTest < Minitest::Test
                  Lyra.config.event_store.read.stream("RaceItem$#{id}").map { |e| e.event_type[/[A-Z][a-z]+\z/] }
   end
 
-  # ES-Async: the writers only append; the projection job replays the stream in
-  # order under a lock held per stream, so the row follows the log whichever
-  # order the jobs run in (here: newest first).
+  # ES-Async: the writers only append, under the lock on the aggregate, so a
+  # second writer waits for the first and the record's events commit in the
+  # order they were appended; the projection job applies them in order under a
+  # lock held per stream, so the row follows the log whichever order the jobs
+  # run in (here: newest first).
   def test_es_async_leaves_the_row_following_the_log
     previous = ActiveJob::Base.queue_adapter
     adapter = ActiveJob::QueueAdapters::TestAdapter.new
@@ -168,6 +170,29 @@ class ConcurrentSameRecordTest < Minitest::Test
     id = RaceItem.create!(label: "initial").id
     run_enqueued(adapter)
 
+    interleave_blocked(id, pause_at: :after_append)
+    run_enqueued(adapter, newest_first: true)
+
+    assert_equal "from-t2", replayed_label(id)
+    assert_equal "from-t2", row_label(id), "the row follows the log"
+  ensure
+    ActiveJob::Base.queue_adapter = previous if previous
+  end
+
+  # ES-Async without the lock: the second writer does not wait, and the job,
+  # with no ordering to rely on, replays the whole stream; the row still
+  # follows the log.
+  def test_es_async_without_the_lock_still_converges_by_replaying_the_stream
+    previous = ActiveJob::Base.queue_adapter
+    adapter = ActiveJob::QueueAdapters::TestAdapter.new
+    ActiveJob::Base.queue_adapter = adapter
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :async
+    Lyra.config.async_projections_inline = false
+    Lyra.config.lock_aggregate_before_append = false
+    id = RaceItem.create!(label: "initial").id
+    run_enqueued(adapter)
+
     interleave(id, pause_at: :after_append)
     run_enqueued(adapter, newest_first: true)
 
@@ -175,6 +200,24 @@ class ConcurrentSameRecordTest < Minitest::Test
     assert_equal "from-t2", row_label(id), "the row follows the log"
   ensure
     ActiveJob::Base.queue_adapter = previous if previous
+  end
+
+  # ES-Async projected inline (async_projections_inline: the test
+  # environment's default, and the benchmarks' choice so that a round's row is
+  # complete when its last write returns) must converge as the job does. It
+  # applied only its own event, inside the writer's transaction and under no
+  # lock, so a writer paused before its projection rolled the row back to its
+  # value after a later writer had committed.
+  def test_es_async_inline_leaves_the_row_following_the_log
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :async
+    Lyra.config.async_projections_inline = true
+    id = RaceItem.create!(label: "initial").id
+
+    interleave_blocked(id, pause_at: :after_append)
+
+    assert_equal "from-t2", replayed_label(id)
+    assert_equal "from-t2", row_label(id), "the row follows the log"
   end
 
   # Monitor: the first writer's row write holds the row lock until its

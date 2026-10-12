@@ -405,26 +405,33 @@ module Lyra
       # writer that appended first can write its row last, and the row ends at
       # a value the log does not replay to (test/concurrent_same_record_test.rb).
       #
-      # Taken where the row is written by the operation itself: Hijack and
-      # ES-Sync. Monitor writes the row first, so the row lock is the lock;
-      # ES-NoProj has no row; ES-Async and ES-Lazy project by replaying the
-      # stream in order under a lock of their own. Creates have no earlier
-      # writer: the identifier is reserved.
+      # Taken where the row is written by the operation itself, Hijack and
+      # ES-Sync, and in ES-Async, whose projection job applies only the events
+      # after its checkpoint and so needs a record's events to commit in the
+      # order they were appended (AsyncProjectionJob). Monitor writes the row
+      # first, so the row lock is the lock; ES-NoProj has no row; ES-Lazy
+      # projects every event in log order under a lock of its own. Creates have
+      # no earlier writer: the identifier is reserved.
       #
-      # The lock is the row's own, in the strength the write takes anyway
-      # (FOR NO KEY UPDATE for an update, FOR UPDATE for a destroy), only
-      # taken before the append instead of at the row write. So a write
-      # takes the locks plain ActiveRecord takes, in the same order, and adds
-      # no deadlock: a separate lock taken before the row's (an advisory lock,
-      # as in 0.9.0) deadlocked against a writer that holds the row first
-      # (record.lock!, with_lock) and then updates it
-      # (test/aggregate_lock_deadlock_test.rb). Where the row is missing, or
-      # the database has no such row lock, the advisory lock remains.
+      # In Hijack and ES-Sync the lock is the row's own, in the strength the
+      # write takes anyway (FOR NO KEY UPDATE for an update, FOR UPDATE for a
+      # destroy), only taken before the append instead of at the row write. So
+      # a write takes the locks plain ActiveRecord takes, in the same order,
+      # and adds no deadlock: a separate lock taken before the row's (an
+      # advisory lock, as first written) deadlocked against a writer that holds
+      # the row first (record.lock!, with_lock) and then updates it
+      # (test/aggregate_lock_deadlock_test.rb). An ES-Async writer does not
+      # write the row (its job does), so it takes the advisory lock on the
+      # stream: it never waits for the row, and cannot deadlock that way.
+      # Where the row is missing, or the database has no such row lock, the
+      # advisory lock is taken too.
       def lyra_lock_aggregate!(operation = :update)
         return unless Lyra.config.lock_aggregate_before_append
         return unless id
-        return unless lyra_hijack_mode? || (lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync)
-        return if lyra_lock_own_row(operation)
+        es_async = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :async
+        es_sync = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync
+        return unless lyra_hijack_mode? || es_sync || es_async
+        return if !es_async && lyra_lock_own_row(operation)
 
         Lyra::AdvisoryLock.xact_lock(self.class.connection, "lyra_aggregate/#{lyra_stream_name}",
                                      purpose: "aggregate write")
@@ -604,9 +611,19 @@ module Lyra
         return unless event
 
         # Inline in the test environment unless a test opts out
-        # (Configuration#async_projections_inline?).
+        # (Configuration#async_projections_inline?). Inline runs what the job
+        # runs, in this thread, once the writing transaction has committed:
+        # the record's whole stream replayed under the per-stream lock. It used
+        # to apply only this event, inside the transaction and under no lock,
+        # so of two writers of one record the one that projected last could
+        # leave the row at its own, older value while the log ended at the
+        # other's (test/concurrent_same_record_test.rb).
         if Lyra.config.async_projections_inline?
-          Lyra::Projections::ModelProjection.project(self.class, operation, result)
+          job = Lyra::Projections::AsyncProjectionJob.new
+          model_name = self.class.name
+          ActiveRecord.after_all_transactions_commit do
+            job.perform(event.event_id, model_name, operation.to_s)
+          end
         else
           # Inside ReadYourWrites.with_guaranteed_read the write is also
           # projected when the block ends, so the block's reads find it. The

@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Everything since 0.8.0, the version the PAM article describes.
 
 ### Added
-- **`config.lock_aggregate_before_append`** (default `true`): Hijack and ES-Sync lock the
-  aggregate before appending. Two writers of one record could append in one order and write the
+- **`config.lock_aggregate_before_append`** (default `true`): Hijack, ES-Sync and ES-Async lock
+  the aggregate before appending. Two writers of one record could append in one order and write the
   row in the other, leaving the row at a value its log does not replay to; seen in the wild, 2
   rounds of 120 with 8 threads on one record, and reproduced deterministically
   (`test/concurrent_same_record_test.rb`). An update or destroy now locks the record's row before
@@ -26,12 +26,22 @@ Everything since 0.8.0, the version the PAM article describes.
   no row. `test/aggregate_lock_deadlock_test.rb`: writes to several records in one order never
   deadlock, opposite orders deadlock exactly as plain ActiveRecord does, a row lock held first
   does not deadlock a plain writer. SQLite needs no lock: it serialises writers from the first
-  write, which is the append (`test/sqlite_same_record_test.rb`). Creates, Monitor, ES-Async,
-  ES-Lazy and ES-NoProj are unchanged (`test/aggregate_lock_statements_test.rb`). Cost: an update
-  issues three more SQL statements (the lock, then the savepoint pair the append now needs), so
-  Hijack and ES-Sync updates go from 5 to 8 statements, and a destroy one more; on one contended
-  record Hijack's throughput falls from about 90 to about 52 ops/s. Set `false` for the previous
+  write, which is the append (`test/sqlite_same_record_test.rb`). ES-Async writers take the
+  advisory lock on the stream (they do not write the row, the projection job does, so they never
+  wait for the row's lock); it makes a record's events commit in append order, which the job's
+  checkpoint relies on (below). Creates, Monitor, ES-Lazy and ES-NoProj are unchanged
+  (`test/aggregate_lock_statements_test.rb`). Cost: an update issues three more SQL statements
+  (the lock, then the savepoint pair the append now needs), so Hijack and ES-Sync updates go from
+  5 to 8 statements and ES-Async's from 4 to 7, and a destroy one more; on one contended record
+  Hijack's throughput falls from about 90 to about 52 ops/s. Set `false` for the previous
   behaviour and its numbers.
+- **ES-Async's projection job applies only the events after the stream's checkpoint**
+  (`Lyra::Projections::AsyncCheckpoint`, table `lyra_async_checkpoints`, created on first use)
+  instead of replaying the record's whole stream, so a record's jobs cost what its history is
+  long, not its square. Exact because the lock above makes a record's commits follow its
+  appends; with the lock off, or without a usable checkpoint (its event gone), the job replays
+  the whole stream. A checkpoint older than the row only re-applies events the row already has,
+  which is harmless (`test/projections/async_checkpoint_test.rb`).
 - `test/projections/cached_projection_concurrency_test.rb`: readers and writers of one record under
   ES-NoProj see only states the stream had, never go back, and converge.
 - **Reference links for ES-NoProj** (`Lyra::Projections::ReferenceLinks`, `config.reference_links`,
@@ -423,6 +433,12 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **ES-Async projected inline could leave the row behind the log.** With
+  `async_projections_inline` (the test environment's default) a write applied only its own event,
+  inside its transaction and under no lock: of two writers of one record, the one that projected
+  last could leave the row at its older value. Inline now runs what `AsyncProjectionJob` runs, in
+  the writer's thread once its transaction has committed, under the per-stream lock. The job path
+  was not affected (`test/concurrent_same_record_test.rb`).
 - **ES-NoProj: a named scope called on an association was ignored** (`order.payments.completed`
   returned every payment) and its body loaded every record of the model; records an association
   loaded did not point back at their owner instance.

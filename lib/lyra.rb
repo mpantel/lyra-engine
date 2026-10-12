@@ -58,6 +58,7 @@ require "lyra/strict_data_access"
 # Event sourcing projections
 require "lyra/projections/model_projection"
 require "lyra/projections/rebuild"
+require "lyra/projections/async_checkpoint"
 require "lyra/projections/async_projection_job"
 require "lyra/projections/cached_projection"
 require "lyra/projections/reference_links"

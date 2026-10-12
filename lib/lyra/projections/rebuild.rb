@@ -80,6 +80,21 @@ module Lyra
           replay_stream(model_class, id).first
         end
 
+        # Project +events+ (of one record's stream, in append order) through
+        # the live projector. Returns how many were projected. Projecting an
+        # event the row already reflects is harmless: a create of an existing
+        # row inserts nothing and an update sets the same values, so callers
+        # may start from an earlier event than strictly needed.
+        def project_events(model_class, events)
+          events.count do |event|
+            operation = operation_for(event)
+            next false unless operation
+
+            ModelProjection.project(model_class, operation, build_result_from_event(event))
+            true
+          end
+        end
+
         private
 
         # Replay a single stream (one record's lifecycle) through the live
@@ -87,15 +102,7 @@ module Lyra
         def replay_stream(model_class, id)
           stream_name = "#{model_class.name}$#{id}"
           events = Lyra.config.event_store.read.stream(stream_name).to_a
-          replayed = 0
-
-          events.each do |event|
-            operation = operation_for(event)
-            next unless operation
-
-            ModelProjection.project(model_class, operation, build_result_from_event(event))
-            replayed += 1
-          end
+          replayed = project_events(model_class, events)
 
           last = events.reverse_each.find { Lyra::Event.operation_of(_1) }
           present = !(last && Lyra::Event.operation_of(last) == :destroyed)
