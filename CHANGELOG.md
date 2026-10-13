@@ -453,6 +453,16 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **`has_and_belongs_to_many` links were not recorded.** The join table has no model of its own
+  (Active Record writes it through an anonymous class), so `item.tags << tag` wrote the join row
+  and no event recorded it: a rebuild lost the association and DualView did not compare it. Every
+  insert into and delete from a HABTM join table is now an `AssociationLinked` or
+  `AssociationUnlinked` event on the owner's stream, linked into each monitored associated
+  record's stream (`Lyra::Associations::HabtmLinks`), in every mode. DualView compares each HABTM
+  association's links with the join table, `Rebuild` restores join tables from the events, and
+  Genesis records the links pre-existing rows had. Under ES-NoProj, HABTM writes failed before
+  reaching Lyra (`CachedRelation` lacked `where_values_hash`); they now work and read back
+  (`test/habtm_links_test.rb`, every mode; mpantel/lyra#21).
 - **Optimistic locking: a stale update silently won under event sourcing.** Active Record checks
   `lock_version` in the UPDATE or DELETE that writes the row; ES-Sync, ES-Async, ES-NoProj and
   ES-Lazy skip that statement, so a stale `update` or `destroy` overwrote the newer write (a lost

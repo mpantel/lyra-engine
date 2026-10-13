@@ -243,6 +243,24 @@ Record. A record that expects a newer version than the log's passes: events
 written before Lyra recorded the column (a Hijack table switched to event
 sourcing) did not carry increments their rows made.
 
+### `has_and_belongs_to_many` links
+
+A HABTM join table has no model of its own, so Lyra records its rows as links
+of the owner: `tags << tag`, `tag_ids=`, `tags.create`, saving a new owner with
+tags, `tags.delete`, `tags.clear` and destroying the owner each append a
+`Lyra::Events::AssociationLinked` or `AssociationUnlinked` event to the owner's
+stream, in every mode but `:disabled`. The event names the association, the join
+table, the associated ids (`target_ids`) and the join rows written or deleted
+(`rows: [{ "item_id" => 1, "tag_id" => 5 }]`), and is linked into each associated
+record's stream when that model is monitored, so either side's stream tells its
+links. A failed append follows the bypass-event policy (`BypassEvents.required?`).
+
+The events change no record's state on replay. DualView compares each HABTM
+association's links (`{ "tags" => { crud: [...], event_sourced: [...] } }`),
+`Rebuild` restores the model's join tables from them, and Genesis records the
+links a row already had. The join table is read as a set: a pair linked twice
+is one link.
+
 ### Who wrote it
 
 Events take `user_id` from `Current.user` and `request_id` from

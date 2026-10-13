@@ -17,6 +17,9 @@ module Lyra
     # transaction rolls back (throw(:abort) is not caught inside the block).
     module WriteHooks
       def _create_record(*args)
+        # A has_and_belongs_to_many join row: recorded as a link of its owner.
+        return Lyra::Associations::HabtmLinks.create(self) { super(*args) } if Lyra::Associations::HabtmLinks.join_model?(self.class)
+
         lyra_genesis_first_use
         return super unless lyra_takes_over_write_here?
         return false unless lyra_hijack_mode? ? lyra_hijack_create : lyra_prepare_event_source_create

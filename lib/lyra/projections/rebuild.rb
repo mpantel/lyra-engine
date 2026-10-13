@@ -41,7 +41,10 @@ module Lyra
 
         def rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids)
           model_class.transaction do
-            clear_read_model(model_class) if truncate
+            if truncate
+              Lyra::Associations::HabtmLinks.clear(model_class)
+              clear_read_model(model_class)
+            end
 
             stream_ids_for(model_class).each do |id|
               stats[:streams] += 1
@@ -50,6 +53,10 @@ module Lyra
               stats[:events] += replayed
               present ? stats[:records] += 1 : stats[:destroyed] += 1
             end
+
+            # has_and_belongs_to_many join tables, from the link events.
+            links = Lyra::Associations::HabtmLinks.rebuild(model_class)
+            stats[:links] = links if links.positive?
           end
 
           invalidate_caches(model_class, rebuilt_ids)

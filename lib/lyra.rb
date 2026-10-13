@@ -80,6 +80,7 @@ require "lyra/retention"
 
 # Event-aware associations
 require "lyra/associations/event_aware"
+require "lyra/associations/habtm_links"
 
 # Consistency helpers
 require "lyra/consistency/read_your_writes"

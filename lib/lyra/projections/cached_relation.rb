@@ -110,6 +110,14 @@ module Lyra
 
       def create_attributes = @create_attributes || {}
 
+      # The equality conditions on +table_name+, as ActiveRecord's
+      # where_values_hash gives them. A has_many :through or
+      # has_and_belongs_to_many write reads them to build its join row; only
+      # those on the model's own table are known here.
+      def where_values_hash(table_name = model_class.table_name)
+        table_name.to_s == model_class.table_name.to_s ? create_attributes.stringify_keys : {}
+      end
+
       # Columns of a group(...): the aggregates return a hash per group.
       attr_writer :group_columns
 

@@ -126,6 +126,10 @@ module Lyra
         end
       end
 
+      # has_and_belongs_to_many links: the join table against the link
+      # events (Lyra::Associations::HabtmLinks), by association name.
+      differences.merge!(Associations::HabtmLinks.differences(model_class, model_id))
+
       differences.empty? ? { no_differences: true } : differences
     end
 

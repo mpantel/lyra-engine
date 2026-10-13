@@ -149,7 +149,10 @@ module Lyra
         }
         event = event_class(model_class).new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, { genesis: true }))
         # The lock and the NOT EXISTS above make the stream empty here.
-        Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, record.id))
+        stream_name = Lyra.stream_name(model_class, record.id)
+        Lyra.append_events(event, stream_name: stream_name)
+        # The has_and_belongs_to_many links the row already has.
+        Associations::HabtmLinks.import(model_class, record.id, stream_name)
         record.id
       end
 

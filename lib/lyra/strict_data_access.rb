@@ -178,6 +178,8 @@ module Lyra
     end
 
     def delete_all
+      # Deleting has_and_belongs_to_many join rows unlinks their owners.
+      return Lyra::Associations::HabtmLinks.delete_all(self) { super } if Lyra::Associations::HabtmLinks.join_model?(klass)
       return super unless lyra_guarded?
 
       check_strict_mode!(:delete_all)
