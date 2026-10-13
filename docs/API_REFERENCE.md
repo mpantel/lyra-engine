@@ -222,6 +222,27 @@ end
 
 `dependent: :nullify` updates are always allowed and recorded.
 
+### Optimistic locking
+
+A model with a `lock_version` column (or another `locking_column`) raises
+`ActiveRecord::StaleObjectError` on a stale `save`, `update`, `destroy` or
+`touch` in every mode, as plain Active Record does, and leaves the stale
+record's version as it was. Each write's event records the increment as a
+change of the column, `[old, old + 1]`, so the log replays to the row's
+version and DualView compares it like any other column.
+
+Monitor and Hijack leave the check to Active Record's own UPDATE or DELETE. The
+event-sourcing modes check before appending, under the lock on the aggregate
+(taken for such a model even with `lock_aggregate_before_append = false`):
+the newest event of the stream that records the column gives the version, and
+a record that expects an older one is stale. The check is against the log
+because in ES-Async and ES-Lazy the row can trail it, and in ES-NoProj there
+is no row. A version submitted with the change (`update(lock_version:
+params[:lock_version], ...)`) is checked instead of the loaded one, as in Active
+Record. A record that expects a newer version than the log's passes: events
+written before Lyra recorded the column (a Hijack table switched to event
+sourcing) did not carry increments their rows made.
+
 ### Who wrote it
 
 Events take `user_id` from `Current.user` and `request_id` from

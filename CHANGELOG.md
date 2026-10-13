@@ -453,6 +453,18 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **Optimistic locking: a stale update silently won under event sourcing.** Active Record checks
+  `lock_version` in the UPDATE or DELETE that writes the row; ES-Sync, ES-Async, ES-NoProj and
+  ES-Lazy skip that statement, so a stale `update` or `destroy` overwrote the newer write (a lost
+  update), and `touch` raised `StaleObjectError` on every call under ES-NoProj, where no row
+  matches. No mode's events recorded the version's increment, so the log replayed to a
+  `lock_version` the row did not have (DualView: `lock_version: { crud: 1, event_sourced: 0 }`).
+  Every write's event now records the increment, `touch` included; the event-sourcing modes check
+  the version against the log before appending, under the lock on the aggregate (taken for such a
+  model in every event-sourcing mode), and raise `ActiveRecord::StaleObjectError` as Active Record
+  does (`Lyra::OptimisticLocking`). A record that expects a newer version than the log's passes,
+  so streams written before the change keep working (`test/optimistic_locking_test.rb`, every
+  mode, concurrent writers included; mpantel/lyra#20).
 - **Encrypted attributes (Active Record `encrypts`) reached the event log in clear** while their
   row held ciphertext: events are built from attributes Active Record has already decrypted.
   `Lyra.append_events`, through which every event passes, now stores those attributes' values (in

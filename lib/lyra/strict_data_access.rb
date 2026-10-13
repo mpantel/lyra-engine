@@ -70,11 +70,13 @@ module Lyra
 
     # touch skips save callbacks too (Solidus records order completion with
     # touch(:completed_at)). It is not a strict-mode violation: Rails itself
-    # calls it for belongs_to ... touch: true.
+    # calls it for belongs_to ... touch: true. With optimistic locking it
+    # also increments lock_version, which the event records.
     def touch(*names, time: nil)
       columns = (timestamp_attributes_for_update_in_model | names.map(&:to_s)).map do |name|
         self.class.attribute_aliases[name] || name
       end
+      columns |= [self.class.locking_column] if Lyra::OptimisticLocking.enabled?(self.class)
       with_bypass_event(columns, "touch") { super }
     end
 

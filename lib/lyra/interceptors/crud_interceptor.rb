@@ -109,11 +109,13 @@ module Lyra
       # Override _update_row to skip SQL UPDATE in event_sourcing mode.
       # Rails 6.1+ calls _update_row from within _run_update_callbacks,
       # so this runs AFTER before_update callbacks when @lyra_skip_sql is set.
-      def _update_row(*)
+      def _update_row(attribute_names, attempted_action = "update")
         if @lyra_skip_sql
           # Skip the UPDATE - projection will handle it
           # Return 1 to indicate one row was "updated"
           1
+        elsif lyra_event_sourcing_mode? && Lyra::OptimisticLocking.enabled?(self.class)
+          lyra_update_row_checked_by_log(attribute_names, attempted_action)
         else
           super
         end
@@ -425,13 +427,19 @@ module Lyra
       # stream: it never waits for the row, and cannot deadlock that way.
       # Where the row is missing, or the database has no such row lock, the
       # advisory lock is taken too.
+      #
+      # A model with optimistic locking has its version checked against the
+      # log before the append (Lyra::OptimisticLocking), which needs this lock
+      # in every event-sourcing mode, ES-NoProj and ES-Lazy included, whatever
+      # lock_aggregate_before_append says.
       def lyra_lock_aggregate!(operation = :update)
-        return unless Lyra.config.lock_aggregate_before_append
         return unless id
+        checks_version = lyra_event_sourcing_mode? && Lyra::OptimisticLocking.enabled?(self.class)
+        return unless Lyra.config.lock_aggregate_before_append || checks_version
         es_async = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :async
         es_sync = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync
-        return unless lyra_hijack_mode? || es_sync || es_async
-        return if !es_async && lyra_lock_own_row(operation)
+        return unless lyra_hijack_mode? || es_sync || es_async || checks_version
+        return if (lyra_hijack_mode? || es_sync) && lyra_lock_own_row(operation)
 
         Lyra::AdvisoryLock.xact_lock(self.class.connection, "lyra_aggregate/#{lyra_stream_name}",
                                      purpose: "aggregate write")
@@ -458,7 +466,11 @@ module Lyra
         lyra_disable_paper_trail!
         lyra_lock_aggregate!
 
-        command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
+        # Active Record checks and increments lock_version in the row write
+        # that follows; the event records the increment it makes.
+        recorded = changes
+        recorded = recorded.merge(Lyra::OptimisticLocking.increment(self)) if recorded.any? && Lyra::OptimisticLocking.enabled?(self.class)
+        command = Lyra::Commands::UpdateCommand.new(self.class, id, recorded)
         command.record = self
         result = Lyra::CommandHandler.handle(command)
 
@@ -518,6 +530,9 @@ module Lyra
         @lyra_hijacked = true
         lyra_disable_paper_trail!
         lyra_lock_aggregate!
+        # Active Record checks and increments lock_version only when it writes
+        # the row, that is when something changed.
+        lock_was = lyra_take_lock_version!("update") if has_changes_to_save?
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         command.record = self
@@ -529,15 +544,61 @@ module Lyra
           @lyra_skip_sql = true
           true
         else
+          lyra_restore_lock_version(lock_was)
           errors.add(:base, result.error)
           false
         end
+      rescue Exception # as Active Record restores the version
+        lyra_restore_lock_version(lock_was)
+        raise
+      end
+
+      # Optimistic locking in the event-sourcing modes (Lyra::OptimisticLocking):
+      # check the version against the log, under the lock on the aggregate, and
+      # take the next one, as Active Record's UPDATE would, so the event
+      # records the increment as a change. Returns the attribute to restore if
+      # the write then fails, as Active Record restores it.
+      def lyra_take_lock_version!(attempted_action)
+        return unless Lyra::OptimisticLocking.enabled?(self.class)
+
+        Lyra::OptimisticLocking.check!(self, attempted_action)
+        column = self.class.locking_column
+        was = @attributes[column]
+        self[column] = Lyra::OptimisticLocking.increment(self)[column].last
+        was
+      end
+
+      def lyra_restore_lock_version(was)
+        @attributes[self.class.locking_column] = was if was
+      end
+
+      # A row write that Lyra does not take over (touch) on a model with
+      # optimistic locking, in an event-sourcing mode. Active Record would
+      # check the version against the row, which in ES-Async can trail the log
+      # and in ES-NoProj does not exist (every touch there raised
+      # StaleObjectError). The version is checked against the log instead, and
+      # the row, where there is one, written by its primary key. touch records
+      # the new version in its event (StrictDataAccess#touch).
+      def lyra_update_row_checked_by_log(attribute_names, attempted_action)
+        lyra_lock_aggregate!
+        was = lyra_take_lock_version!(attempted_action)
+        return 1 if Lyra.config.projection_mode == :disabled
+
+        # A row not projected yet (ES-Async) matches nothing; the touch's event
+        # reaches it with the rest of the stream.
+        self.class._update_record(attributes_with_values(attribute_names | [self.class.locking_column]),
+                                  { self.class.primary_key => id_in_database })
+        1
+      rescue Exception # as Active Record restores the version
+        lyra_restore_lock_version(was)
+        raise
       end
 
       def lyra_prepare_event_source_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
         lyra_lock_aggregate!(:destroy)
+        Lyra::OptimisticLocking.check!(self, "destroy")
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self
