@@ -57,7 +57,9 @@ module Lyra
 
       return { exists: false, events_count: 0 } if events.empty?
 
-      state = StateProjection.new.rebuild_from_events(events)
+      # Encrypted attributes are ciphertext in the log, plaintext in the
+      # record's attributes: compare like with like.
+      state = EncryptedAttributes.open(model_class, StateProjection.new.rebuild_from_events(events))
 
       # A stream whose last replayed event destroys the record describes a
       # record that no longer exists, as Lyra::ModeTransition.compare reads

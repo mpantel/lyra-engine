@@ -477,7 +477,8 @@ GET /lyra/privacy/pii_detection
 - **Low**: Minimal PII exposure
 
 **Recommendations**:
-- Implement field-level encryption
+- Implement field-level encryption (Active Record `encrypts`: Lyra stores
+  those attributes in the event log as ciphertext too, see the API reference)
 - Enable audit logging
 - Review retention policies
 - Implement change approval workflows

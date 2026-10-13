@@ -453,6 +453,19 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **Encrypted attributes (Active Record `encrypts`) reached the event log in clear** while their
+  row held ciphertext: events are built from attributes Active Record has already decrypted.
+  `Lyra.append_events`, through which every event passes, now stores those attributes' values (in
+  `attributes` and `changes`) as the ciphertext Active Record writes to the column
+  (`Lyra::EncryptedAttributes`); projections, rebuilds and DualView decrypt them, and records
+  instantiated from events are decrypted by Active Record. Events written before keep their clear
+  values and still read; rows written from them are encrypted. No mode leaks the value, no value is
+  encrypted twice (`test/encrypted_attributes_test.rb`; mpantel/lyra#19).
+- **ES-Lazy stopped projecting after the event store was emptied or restored without its
+  checkpoint table**: the checkpoint then lay past the newest event, and every new event looked
+  applied. A checkpoint past the newest event is now recognised, warned about and reset (applying
+  is idempotent). It made two tests fail in some orders, since the test suite reloads the event
+  tables but not the checkpoint table (`test/projections/lazy_projection_test.rb`).
 - **Single-table inheritance: a record's events were filed under its concrete class's stream**
   (`Spree::Calculator::Shipping::FlatRate$1`), and anything given the base class read
   `Spree::Calculator$1` and found none: DualView reported the row as missing from the log, and

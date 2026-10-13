@@ -666,6 +666,18 @@ provider declares nothing and allows everything. `Lyra.pam_dsl_available?` and
 `Lyra.privacy_features_available?` report which is in use. Set
 `LYRA_DISABLE_PAM_DSL=true` to run without PAM.
 
+### Encrypted attributes (Active Record Encryption)
+
+An attribute declared with `encrypts` reaches the event log as ciphertext, as
+it reaches the row: every event passes through `Lyra.append_events`, which
+replaces the attribute's values (in `attributes` and in `changes`) with what
+Active Record writes to the column (`Lyra::EncryptedAttributes`). Projections,
+rebuilds and DualView decrypt them; records instantiated from events (ES-NoProj
+reads, `as_of`) are decrypted by Active Record itself. Events written before
+0.9.0 hold such values in clear; they are still read, and the rows written from
+them are encrypted. The log is then protected by the application's encryption
+keys, as the table is; erasure treats the ciphertext as opaque.
+
 ### Provider interface
 
 | Method | Description |

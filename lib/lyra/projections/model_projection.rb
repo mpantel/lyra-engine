@@ -52,7 +52,9 @@ module Lyra
         # Uses insert() to bypass all callbacks and validations.
         # This is intentional - the event is the source of truth.
         def project_create(model_class, result)
-          attributes = result.attributes.dup
+          # Encrypted attributes arrive from the log as ciphertext; Active
+          # Record encrypts what it inserts, so they are decrypted first.
+          attributes = Lyra::EncryptedAttributes.open(model_class, result.attributes.dup)
 
           # Ensure we have an ID
           raise "Cannot project create without ID" unless attributes[:id] || attributes["id"]
@@ -92,6 +94,7 @@ module Lyra
 
           # Ensure updated_at timestamp (may already be in changes)
           updates[:updated_at] ||= Time.current
+          updates = Lyra::EncryptedAttributes.open(model_class, updates)
 
           # Use update_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events

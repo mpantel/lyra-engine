@@ -91,6 +91,21 @@ class LazyProjectionTest < Minitest::Test
     assert_empty gaps.keys & event_ids, "no gap may refer to an event that exists"
   end
 
+  # A checkpoint past the newest event (the event store emptied or restored
+  # without the checkpoint table, as a test suite that reloads its schema
+  # does) used to make every new event look applied: nothing was projected.
+  def test_a_checkpoint_past_the_newest_event_starts_over
+    LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    LazyAuthor.count
+    ahead = raw("SELECT MAX(id) FROM event_store_events").to_i + 1_000_000
+    raw("UPDATE #{LazyProjection::TABLE} SET position = #{ahead}")
+
+    author = LazyAuthor.create!(name: "Bea", email: "bea@example.com")
+
+    assert_equal "Bea", LazyAuthor.find(author.id).name
+    assert_operator LazyProjection.checkpoint.first, :<, ahead
+  end
+
   def test_a_rolled_back_write_leaves_nothing_behind
     ActiveRecord::Base.transaction do
       LazyAuthor.create!(name: "Ghost", email: "ghost@example.com")

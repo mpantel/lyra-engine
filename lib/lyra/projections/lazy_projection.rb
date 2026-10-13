@@ -108,7 +108,17 @@ module Lyra
         # re-checked less than GAP_RECHECK seconds ago.
         def up_to_date?(connection)
           position, gaps = checkpoint(connection)
-          return false if max_event_id(connection) > position
+          newest = max_event_id(connection)
+          # A checkpoint past the newest event cannot be right: the event
+          # store was emptied or restored without this table. Taken at its
+          # word, every new event would look applied and nothing would be
+          # projected again; start over instead (applying is idempotent).
+          if position > newest
+            warn_stale_checkpoint(position, newest)
+            reset!(connection)
+            return newest.zero?
+          end
+          return false if newest > position
 
           gaps.empty? || (Process.clock_gettime(Process::CLOCK_MONOTONIC) - (@gaps_checked_at || 0)) < GAP_RECHECK
         end
@@ -199,6 +209,12 @@ module Lyra
 
         def max_event_id(connection)
           connection.select_value("SELECT MAX(id) FROM event_store_events").to_i
+        end
+
+        def warn_stale_checkpoint(position, newest)
+          message = "Lyra: ES-Lazy checkpoint #{position} is past the newest event (#{newest}); " \
+                    "the event store was emptied or restored without #{TABLE}. Catching up from the start."
+          defined?(Rails) && Rails.logger ? Rails.logger.warn(message) : Kernel.warn(message)
         end
 
         def lock!(connection)

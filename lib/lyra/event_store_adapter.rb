@@ -22,6 +22,8 @@ module Lyra
   # EventStoreUnavailableError if the store fails. Every event Lyra writes
   # goes through here.
   def self.append_events(events, stream_name:, store: config.event_store)
+    # Encrypted attributes go to the log as ciphertext, as they go to the row.
+    Array(events).each { |event| EncryptedAttributes.seal!(event) }
     store.publish(events, stream_name: stream_name)
     Projections::ReferenceLinks.after_append(events, stream_name, store)
   rescue EventStoreUnavailableError
