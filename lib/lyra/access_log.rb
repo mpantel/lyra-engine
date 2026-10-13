@@ -55,7 +55,7 @@ module Lyra
       def subject_key(subject)
         case subject
         when nil then nil
-        when ActiveRecord::Base then "#{subject.class.name}$#{subject.id}"
+        when ActiveRecord::Base then Lyra.stream_name(subject.class, subject.id)
         else subject.to_s
         end
       end

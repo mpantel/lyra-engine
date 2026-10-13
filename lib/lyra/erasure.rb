@@ -54,7 +54,7 @@ module Lyra
 
     class << self
       def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false, max_copies: MAX_COPIES)
-        stream = "#{model.name}$#{id}"
+        stream = Lyra.stream_name(model, id)
         events = Lyra.config.event_store.read.stream(stream).to_a
         personal = (fields || personal_fields(model, events)).map(&:to_s).uniq
         raise Unsupported, "#{model.name} #{id}: no personal fields to erase" if personal.empty?
@@ -217,7 +217,7 @@ module Lyra
           next "#{rewritten.size} events" unless model
 
           copied = erase_copied_columns(model, id, originals, replacements)
-          record_erasure(model, id, "#{model.name}$#{id}", copied,
+          record_erasure(model, id, Lyra.stream_name(model, id), copied,
                          "#{reason} (copies of #{origin.name} #{origin_id})", erased_by)
           forget_cached(model, id)
           "#{model.name} #{id}"
@@ -252,7 +252,7 @@ module Lyra
       def record_of(event)
         streams_of(event).each do |name|
           model_name, id = name.split("$", 2)
-          model = Lyra.config.monitored_models.find { |m| m.name == model_name }
+          model = Lyra.config.monitored_model_named(model_name)
           return [model, id] if model && id
         end
         [nil, nil]

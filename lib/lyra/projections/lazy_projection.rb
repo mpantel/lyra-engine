@@ -179,7 +179,7 @@ module Lyra
         def target_of(event)
           name = event.data[:model_class] || event.data["model_class"]
           id = event.data[:model_id] || event.data["model_id"]
-          model_class = name && Lyra.config.monitored_models.find { |m| m.name == name }
+          model_class = Lyra.config.monitored_model_named(name)
           [model_class, id]
         end
 

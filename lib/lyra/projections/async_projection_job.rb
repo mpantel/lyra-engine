@@ -63,7 +63,7 @@ module Lyra
 
         model_class = model_class_name.constantize
         model_id = event.data[:model_id] || event.data["model_id"]
-        stream = "#{model_class.name}$#{model_id}"
+        stream = Lyra.stream_name(model_class, model_id)
 
         model_class.transaction do
           lock_stream!(model_class, stream)

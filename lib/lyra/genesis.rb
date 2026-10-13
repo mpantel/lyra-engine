@@ -122,7 +122,7 @@ module Lyra
       def rows_without_stream(connection, model_class, after, limit: BATCH)
         table = connection.quote_table_name(model_class.table_name)
         pk = connection.quote_column_name(model_class.primary_key)
-        prefix = connection.quote("#{model_class.name}$")
+        prefix = connection.quote(Lyra.stream_prefix(model_class))
         keyset = after.nil? ? "" : "AND t.#{pk} > #{connection.quote(after)}"
 
         connection.select_all(<<~SQL.squish).to_a
@@ -149,7 +149,7 @@ module Lyra
         }
         event = event_class(model_class).new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, { genesis: true }))
         # The lock and the NOT EXISTS above make the stream empty here.
-        Lyra.append_events(event, stream_name: "#{model_class.name}$#{record.id}")
+        Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, record.id))
         record.id
       end
 

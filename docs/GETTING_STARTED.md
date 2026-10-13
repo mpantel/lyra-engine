@@ -82,6 +82,8 @@ config.models = %w[Order]
 ```
 
 A name in `config.models` that does not resolve to a class fails the boot.
+`config.models` also takes namespace patterns (`%w[Spree::*]`) and `:all`
+(every eligible model, with `except:` for a denylist); see the API reference.
 
 ## 4. Make a write and read its stream
 

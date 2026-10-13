@@ -117,13 +117,32 @@ Configuration methods:
 | `disable!` | Switch to `:disabled` (never gated). |
 | `monitored_models` | The monitored model classes. |
 | `model_config(model_class)` | The model's `Lyra::ModelConfiguration`. |
-| `declared_models` | `{ "Name" => options }` from `models=`. |
+| `declared_models` | What `models=` asked for (`Lyra::ModelSelection::Spec`: `all`, `entries` `{ "Name or pattern" => options }`, `except`). |
 
 ```ruby
-config.models = %w[Order Payment]
+config.models = %w[Order Payment]                          # by name
 config.models = { "Order" => { event_prefix: "Shop" }, "Payment" => {} }
+config.models = %w[Spree::* Order]                         # a namespace pattern
+config.models = :all                                       # every eligible model
+config.models = :all, except: %w[Session Spree::LogEntry]  # with a denylist
 config.verify_mapping!
 ```
+
+A name that does not resolve fails the boot. Patterns and `:all` enrol only
+eligible models: concrete (not abstract), named, with a table and a
+single-column primary key, and the base class of a single-table-inheritance
+hierarchy (its subclasses follow it). The application's code is eager-loaded
+first, so every model is found. Some models are never enrolled, and naming
+one fails the boot: the event store's own tables (an event about an event
+would recurse), Lyra's, and those of Solid Cache, Solid Queue, Solid Cable,
+Active Storage, Action Text, Action Mailbox and PaperTrail. A pattern that
+matches nothing logs a warning; the enrolled models are logged at boot.
+`:all` outside Monitor mode warns: Hijack and the event-sourcing modes then
+route every write of every model through events, including models no one has
+reviewed, so an allowlist suits them better. A single-table-inheritance
+hierarchy shares one stream per row, named after its base class
+(`Lyra.stream_name`), so enrolling the base class covers every subclass and
+any of them reads the same history.
 
 ---
 

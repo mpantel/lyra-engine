@@ -100,7 +100,7 @@ module Lyra
         # Replay a single stream (one record's lifecycle) through the live
         # projector, in append order. Returns [events_replayed, still_present?].
         def replay_stream(model_class, id)
-          stream_name = "#{model_class.name}$#{id}"
+          stream_name = Lyra.stream_name(model_class, id)
           events = Lyra.config.event_store.read.stream(stream_name).to_a
           replayed = project_events(model_class, events)
 
@@ -132,7 +132,7 @@ module Lyra
 
         # Enumerate the record ids that have an event stream for this model.
         def stream_ids_for(model_class)
-          prefix = "#{model_class.name}$"
+          prefix = Lyra.stream_prefix(model_class)
           sql = ActiveRecord::Base.sanitize_sql_array(
             ["SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE ?", "#{prefix}%"]
           )

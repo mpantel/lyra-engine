@@ -194,7 +194,14 @@ instrument a gem's models, such as Solidus's):
 ```ruby
 config.models = %w[Order Payment]
 config.models = { "Spree::Order" => { event_prefix: "Shop" }, "Spree::Payment" => {} }
+config.models = %w[Spree::*]                    # every model under a namespace
+config.models = :all, except: %w[Session]       # every eligible model (Monitor mode)
 ```
+
+`:all` suits Monitor mode, where Lyra only observes: in the Solidus case study
+it enrols 90 models and leaves out 28 framework, event-store and Lyra records
+and 48 abstract classes and single-table-inheritance subclasses. For Hijack
+and the event-sourcing modes, list the models you have reviewed.
 
 Declared models are instrumented once the application's code has loaded, and
 again after each reload; a name that does not resolve fails the boot. A model
@@ -202,9 +209,26 @@ records events from the moment it is declared, in whatever mode the
 application runs. There is no per-model mode: `monitor_with_lyra` ignores a
 `mode:` option.
 
-Events go to one stream per record, named `"#{Model.name}$#{id}"`
-(`"Order$42"`), with event types such as `OrderCreated`, `OrderUpdated` and
-`OrderDestroyed` (`event_prefix:` changes the prefix).
+Events go to one stream per record, named after the class that owns the
+table, `"#{Model.base_class.name}$#{id}"` (`"Order$42"`; `Lyra.stream_name`),
+with event types such as `OrderCreated`, `OrderUpdated` and `OrderDestroyed`
+(`event_prefix:` changes the prefix). Under single-table inheritance the
+stream is the base class's whatever the record's concrete class
+(`Spree::Calculator$1` for a `Spree::Calculator::Shipping::FlatRate`), so the
+base class and every subclass read the same history; event types still name
+the concrete class.
+
+**Upgrading an event store written before 0.9.0** with STI models: those
+filed a record's events under its concrete class's stream. Link them into the
+base stream once, before writing in a Lyra mode after the upgrade:
+
+```bash
+DRY_RUN=1 bin/rails lyra:streams:migrate_sti   # report only
+bin/rails lyra:streams:migrate_sti             # link (no event is copied or changed)
+```
+
+It skips streams already linked and reports any base stream that already has
+newer events, which linking would put out of order.
 
 **5. Optional: verify the mapping at boot** (needs PetriFlow):
 

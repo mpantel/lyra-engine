@@ -236,7 +236,7 @@ module Lyra
       rescue => e
         Rails.logger.error(
           "Lyra: could not load #{aggregate_class.name} history for " \
-          "#{command.model_class.name}$#{command.id} (#{e.class}: #{e.message}); continuing from an empty aggregate"
+          "#{Lyra.stream_name(command.model_class, command.id)} (#{e.class}: #{e.message}); continuing from an empty aggregate"
         )
         aggregate_class.new(command.id, *args)
       end
@@ -270,7 +270,7 @@ module Lyra
       Rails.logger.warn(
         "Lyra: hijack mode can't reserve a safe id for #{model_class.name} " \
         "(#{adapter}, integer key without a PostgreSQL sequence); " \
-        "its created events go to a pending-<hex> stream, not #{model_class.name}$<id>"
+        "its created events go to a pending-<hex> stream, not #{Lyra.stream_prefix(model_class)}<id>"
       )
     end
   end

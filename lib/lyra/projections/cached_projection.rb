@@ -62,11 +62,11 @@ module Lyra
 
           key = record_cache_key(model_class, id)
           entry = cache_read(key) unless force
-          return entry["a"] if fresh?(entry, version)
+          return of_class(model_class, entry["a"]) if fresh?(entry, version)
 
           attributes, built_version = build_record(model_class, id, entry)
           cache_write(key, entry_for(attributes, built_version)) if built_version
-          attributes
+          of_class(model_class, attributes)
         end
 
         # Find a record by attributes
@@ -170,8 +170,8 @@ module Lyra
         #
         # @param model_class [Class] The ActiveRecord model class
         def invalidate_all(model_class)
-          memory_cache.delete_matched("#{cache_namespace}/#{model_class.name}/*")
-          cache_store.delete_matched("#{cache_namespace}/#{model_class.name}/*")
+          memory_cache.delete_matched("#{cache_namespace}/#{Lyra.stream_owner_name(model_class)}/*")
+          cache_store.delete_matched("#{cache_namespace}/#{Lyra.stream_owner_name(model_class)}/*")
         rescue NotImplementedError
           nil
         end
@@ -201,7 +201,7 @@ module Lyra
         # stamp is still in the stream, only the events after it are replayed
         # onto its attributes.
         def build_record(model_class, id, entry = nil)
-          stream = "#{model_class.name}$#{id}"
+          stream = Lyra.stream_name(model_class, id)
           incremental = build_from_entry(model_class, id, stream, entry)
           return incremental if incremental
 
@@ -238,7 +238,7 @@ module Lyra
           connection = ActiveRecord::Base.connection
           connection.select_value(
             "SELECT event_id FROM event_store_events_in_streams " \
-            "WHERE stream = #{connection.quote("#{model_class.name}$#{id}")} ORDER BY id DESC LIMIT 1"
+            "WHERE stream = #{connection.quote(Lyra.stream_name(model_class, id))} ORDER BY id DESC LIMIT 1"
           )
         end
 
@@ -262,19 +262,34 @@ module Lyra
           end
 
           cache_write_multi(rebuilt) if rebuilt.any?
-          records
+          records.select { |attributes| of_class(model_class, attributes) }
+        end
+
+        # +attributes+ if the record belongs to +model_class+, nil otherwise.
+        # A table's records share one stream prefix (Lyra.stream_name); under
+        # single-table inheritance a subclass keeps those of its own type and
+        # its subclasses', as ActiveRecord's type condition does.
+        def of_class(model_class, attributes)
+          return attributes if attributes.nil? || !sti_subclass?(model_class)
+
+          types = [model_class, *model_class.descendants].map(&:sti_name)
+          types.include?(attributes[model_class.inheritance_column].to_s) ? attributes : nil
+        end
+
+        def sti_subclass?(model_class)
+          model_class.respond_to?(:base_class) && model_class.base_class != model_class
         end
 
         # { record id (String) => id of its stream's last event } for the
         # given ids that have a stream. One query.
         def stream_versions_of(model_class, ids)
           connection = ActiveRecord::Base.connection
-          streams = ids.map { |id| connection.quote("#{model_class.name}$#{id}") }.join(", ")
+          streams = ids.map { |id| connection.quote(Lyra.stream_name(model_class, id)) }.join(", ")
           rows = connection.select_rows(<<~SQL.squish)
             SELECT stream, event_id FROM event_store_events_in_streams
             WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream IN (#{streams}) GROUP BY stream)
           SQL
-          prefix = "#{model_class.name}$"
+          prefix = Lyra.stream_prefix(model_class)
           rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
         end
 
@@ -282,7 +297,7 @@ module Lyra
         # primary-key order. One query for the whole model.
         def stream_versions(model_class)
           connection = ActiveRecord::Base.connection
-          prefix = "#{model_class.name}$"
+          prefix = Lyra.stream_prefix(model_class)
           pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
           rows = connection.select_rows(<<~SQL.squish)
             SELECT stream, event_id FROM event_store_events_in_streams
@@ -356,7 +371,7 @@ module Lyra
         end
 
         def record_cache_key(model_class, id)
-          "#{cache_namespace}/#{model_class.name}/records/#{id}/v#{CACHE_VERSION}"
+          "#{cache_namespace}/#{Lyra.stream_owner_name(model_class)}/records/#{id}/v#{CACHE_VERSION}"
         end
 
         def cache_namespace

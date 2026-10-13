@@ -91,7 +91,7 @@ module Lyra
         # @param id [Integer, String] The record ID
         # @return [VirtualRecord, nil] A virtual record or nil if not found/deleted
         def reconstruct(model_class, id)
-          stream_name = "#{model_class.name}$#{id}"
+          stream_name = Lyra.stream_name(model_class, id)
 
           begin
             events = Lyra.config.event_store.read.stream(stream_name).to_a

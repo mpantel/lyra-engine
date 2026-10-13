@@ -58,4 +58,21 @@ namespace :lyra do
     end
     puts "Done."
   end
+
+  namespace :streams do
+    desc "Link the events of single-table-inheritance records written under their subclass's stream " \
+         "into the base class's stream (once, after upgrading to 0.9.0; DRY_RUN=1 to report only)"
+    task migrate_sti: :environment do
+      Rails.application.eager_load! unless Rails.application.config.eager_load
+      dry_run = ENV["DRY_RUN"] == "1"
+      result = Lyra::StiStreamMigration.run!(dry_run: dry_run)
+      puts "#{dry_run ? 'Would link' : 'Linked'} #{result[:linked]} events from #{result[:streams]} subclass streams " \
+           "(#{result[:already]} already in place)."
+      next if result[:conflicts].empty?
+
+      puts "Not linked, their base streams already hold newer events (#{result[:conflicts].size}):"
+      result[:conflicts].first(20).each { |stream| puts "  #{stream}" }
+      exit 1
+    end
+  end
 end

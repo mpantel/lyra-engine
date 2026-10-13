@@ -108,7 +108,7 @@ module Lyra
         fields = named_fields(column_names, policy.declared_fields.map(&:to_s))
         return if fields.empty?
 
-        subject = "#{model_class.name}$*"
+        subject = "#{Lyra.stream_prefix(model_class)}*"
         if purpose
           policy.validate_access!(fields, purpose, subject: subject)
         else

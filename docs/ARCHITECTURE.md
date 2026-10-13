@@ -471,7 +471,9 @@ write path records are listed under [Metadata](API_REFERENCE.md#metadata).
 - Serialization is the client's (configurable)
 
 **Stream Organization:**
-- One stream per record: `"#{model_class}$#{id}"`
+- One stream per record: `"#{model_class.base_class}$#{id}"` (`Lyra.stream_name`;
+  under single-table inheritance the base class's, so every class of the
+  hierarchy reads the same stream)
 - Events appended in order
 - Access events go to separate streams, `"Lyra::DataAccess$<subject>"` (see
   [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md#the-access-log))

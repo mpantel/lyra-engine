@@ -153,35 +153,28 @@ module Lyra
         (Lyra.monitor_mode? && monitor_append_failure == :fail_write)
     end
 
-    # Declare the models to monitor by name, in the initializer, before they
-    # are loaded:
+    # Declare the models to monitor in the initializer, before they are
+    # loaded:
     #
-    #   config.models = %w[Order Payment]
+    #   config.models = %w[Order Payment]                        # by name
     #   config.models = { "Order" => { event_prefix: "Shop" }, "Payment" => {} }
+    #   config.models = %w[Spree::* Order]                       # a namespace pattern
+    #   config.models = :all                                     # every eligible model
+    #   config.models = :all, except: %w[Session Spree::LogEntry]
     #
     # Each is given monitor_with_lyra (with its options) once the
     # application's code has loaded (Lyra::Engine, to_prepare): no model
-    # file is edited. A name that does not resolve fails the boot.
+    # file is edited. A name that does not resolve fails the boot. Patterns
+    # and :all enrol only eligible models, and never the event store's,
+    # Lyra's or the Rails frameworks' own (Lyra::ModelSelection).
     def models=(models)
-      @declared_models =
-        case models
-        when Hash then models.to_h { |name, options| [name.to_s, options || {}] }
-        else Array(models).to_h { |name| [name.to_s, {}] }
-        end
+      @declared_models = ModelSelection.parse(models)
     end
 
     # Instrument the declared models now. Called by the engine; call it
     # yourself outside Rails. Returns the model classes.
     def apply_declared_models!
-      (@declared_models || {}).map do |name, options|
-        model = begin
-          name.constantize
-        rescue NameError
-          raise ArgumentError, "config.models names #{name.inspect}, which is not a loaded class"
-        end
-        model.monitor_with_lyra(options) unless model.respond_to?(:lyra_monitored) && model.lyra_monitored
-        model
-      end
+      ModelSelection.apply(@declared_models)
     end
 
     # Verify the CRUD-to-event mapping with PetriFlow (Lyra.verify_mapping!).
@@ -217,6 +210,23 @@ module Lyra
         @monitored_models.map! { |m| (m.name rescue m.object_id.to_s) == model_name ? model_class : m }
       end
       @model_configs[model_class] = ModelConfiguration.new(model_class, options)
+    end
+
+    # The monitored model an event's model_class names: a monitored model, or
+    # a single-table-inheritance subclass of one (enrolling the base class
+    # covers its subclasses, which events name as their concrete class). Nil
+    # for anything else.
+    def monitored_model_named(name)
+      return nil if name.nil? || name.to_s.empty?
+
+      found = @monitored_models.find { |m| m.name == name.to_s }
+      return found if found
+
+      model = name.to_s.safe_constantize
+      return nil unless model.is_a?(Class) && model.respond_to?(:base_class)
+
+      owner = model.base_class
+      @monitored_models.any? { |m| m == owner || (m.respond_to?(:base_class) && m.base_class == owner) } ? model : nil
     end
 
     def model_config(model_class)

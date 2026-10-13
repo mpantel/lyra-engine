@@ -770,7 +770,7 @@ module Lyra
       end
 
       def lyra_stream_name
-        "#{self.class.name}$#{id}"
+        Lyra.stream_name(self.class, id)
       end
 
       # Hook methods for context (can be overridden by the application)

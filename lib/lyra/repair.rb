@@ -106,7 +106,7 @@ module Lyra
         metadata = { source: SOURCE, repaired: problem.problem, correlation_id: Lyra::Correlation.current_id }.compact
         event = Lyra::BypassEvents.event_class_for(model, operation)
                                   .new(data: data, metadata: Lyra::Privacy.stamp(model, data, metadata))
-        Lyra.append_events(event, stream_name: "#{model.name}$#{id}")
+        Lyra.append_events(event, stream_name: Lyra.stream_name(model, id))
         Lyra::Projections::EventStoreReader.invalidate(model, id)
       end
     end

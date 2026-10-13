@@ -83,7 +83,7 @@ module Lyra
     end
 
     def stream_name
-      "#{@model_class.name}$#{id}"
+      Lyra.stream_name(@model_class, id)
     end
 
     # Apply by the operation the event records (Lyra::Event.operation_of),

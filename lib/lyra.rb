@@ -30,6 +30,7 @@ if defined?(Rails)
 end
 
 # Core components
+require "lyra/model_selection"
 require "lyra/configuration"
 require "lyra/correlation"
 require "lyra/event"
@@ -58,6 +59,7 @@ require "lyra/strict_data_access"
 # Event sourcing projections
 require "lyra/projections/model_projection"
 require "lyra/projections/rebuild"
+require "lyra/sti_stream_migration"
 require "lyra/projections/async_checkpoint"
 require "lyra/projections/async_projection_job"
 require "lyra/projections/cached_projection"
@@ -134,6 +136,30 @@ module Lyra
 
   def self.disabled_mode?
     config.disabled_mode?
+  end
+
+  # A record's event stream: one per row, named after the class that owns the
+  # table. Under single-table inheritance that is the base class, whatever the
+  # record's concrete class (Spree::Calculator$1 for a
+  # Spree::Calculator::Shipping::FlatRate), so a reader given the base class
+  # or any subclass finds the same stream, and a record whose type changes
+  # keeps one history. Every place that names a record's stream goes through
+  # here.
+  def self.stream_name(model_class, id)
+    "#{stream_owner_name(model_class)}$#{id}"
+  end
+
+  # The prefix all of a table's record streams share ("Spree::Calculator$").
+  def self.stream_prefix(model_class)
+    "#{stream_owner_name(model_class)}$"
+  end
+
+  # The name of the class that owns +model_class+'s table (its STI base class).
+  def self.stream_owner_name(model_class)
+    owner = model_class.respond_to?(:base_class) ? model_class.base_class : model_class
+    owner.name
+  rescue StandardError
+    model_class.name
   end
 
   # Delegate event_store to configuration

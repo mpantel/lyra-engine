@@ -257,7 +257,7 @@ module Lyra
       end
 
       def stream_ids(model)
-        prefix = "#{model.name}$"
+        prefix = Lyra.stream_prefix(model)
         connection.select_values(
           "SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{q(like_prefix(prefix))}"
         ).map { _1.delete_prefix(prefix) }
@@ -267,7 +267,7 @@ module Lyra
       def compare(model, id)
         bypass do
           row = model.unscoped.find_by(model.primary_key => id)
-          events = Lyra.config.event_store.read.stream("#{model.name}$#{id}").to_a
+          events = Lyra.config.event_store.read.stream(Lyra.stream_name(model, id)).to_a
           replayed = events.select { Lyra::Event.operation_of(_1) }
           gone = replayed.empty? || Lyra::Event.operation_of(replayed.last) == :destroyed
 
@@ -291,7 +291,7 @@ module Lyra
       # were updated at or after +since+.
       def changed_since(models, position, since)
         models.each_with_object({}) do |model, acc|
-          prefix = "#{model.name}$"
+          prefix = Lyra.stream_prefix(model)
           moved = connection.select_values(
             "SELECT DISTINCT s.stream FROM event_store_events_in_streams s JOIN event_store_events e " \
             "ON e.event_id = s.event_id WHERE e.id > #{Integer(position)} AND s.stream LIKE #{q(like_prefix(prefix))}"

@@ -149,7 +149,7 @@ module Lyra
 
       # Attributes an earlier erasure of this record already covered.
       def erased_fields(model, id)
-        Lyra.config.event_store.read.stream("#{model.name}$#{id}").to_a
+        Lyra.config.event_store.read.stream(Lyra.stream_name(model, id)).to_a
             .select { |event| event.is_a?(Lyra::Events::ErasureApplied) }
             .flat_map { |event| Array(event.data[:fields] || event.data["fields"]).map(&:to_s) }
       end

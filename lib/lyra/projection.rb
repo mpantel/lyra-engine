@@ -38,7 +38,7 @@ module Lyra
   # State projection that rebuilds current state from events
   class StateProjection < Projection
     def self.rebuild_state(model_class, model_id)
-      stream_name = "#{model_class.name}$#{model_id}"
+      stream_name = Lyra.stream_name(model_class, model_id)
       events = Lyra.config.event_store.read.stream(stream_name).to_a
 
       new.rebuild_from_events(events)
@@ -91,7 +91,7 @@ module Lyra
   # Audit trail projection
   class AuditProjection < Projection
     def self.audit_trail(model_class, model_id)
-      stream_name = "#{model_class.name}$#{model_id}"
+      stream_name = Lyra.stream_name(model_class, model_id)
       events = Lyra.config.event_store.read.stream(stream_name).to_a
 
       events.map do |event|

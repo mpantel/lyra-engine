@@ -43,7 +43,7 @@ module Lyra
 
     # Event-sourced view - state rebuilt from events
     def event_sourced_state
-      stream_name = "#{model_class.name}$#{model_id}"
+      stream_name = Lyra.stream_name(model_class, model_id)
 
       begin
         events = Lyra.config.event_store.read.stream(stream_name).to_a

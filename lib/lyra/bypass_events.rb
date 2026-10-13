@@ -70,7 +70,7 @@ module Lyra
           timestamp: Time.current
         }
         event = event_class.new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, metadata))
-        Lyra.append_events(event, stream_name: "#{model_class.name}$#{id}")
+        Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, id))
 
         # With projections disabled, reads come from the cached event-stream
         # reconstruction, which would otherwise keep serving the old state.

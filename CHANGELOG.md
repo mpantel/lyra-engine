@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Everything since 0.8.0, the version the PAM article describes.
 
 ### Added
+- **`config.models` takes namespace patterns, `:all` and a denylist** (`Lyra::ModelSelection`):
+  `config.models = %w[Spree::* Order]`, `config.models = :all`,
+  `config.models = :all, except: %w[Session]`. Patterns and `:all` enrol only eligible models
+  (concrete, named, with a table and a single-column primary key, base classes of an STI
+  hierarchy), after eager-loading the application's code. The event store's tables, Lyra's own and
+  those of Solid Cache/Queue/Cable, Active Storage, Action Text, Action Mailbox and PaperTrail are
+  never enrolled; naming one fails the boot. A pattern matching nothing warns; `:all` outside
+  Monitor mode warns. On a Solidus application `:all` enrols 90 models, excludes 28 and leaves 48
+  abstract classes and STI subclasses to their bases (`test/model_selection_test.rb`).
 - **`ReadYourWrites.with_guaranteed_read(each_write: true)`**: each write in the block is projected
   as it is made, so reads later in the same block see it (by default the block projects when it
   ends). For code that writes and reads back in one unit of work, as Solidus's checkout does
@@ -444,6 +453,19 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **Single-table inheritance: a record's events were filed under its concrete class's stream**
+  (`Spree::Calculator::Shipping::FlatRate$1`), and anything given the base class read
+  `Spree::Calculator$1` and found none: DualView reported the row as missing from the log, and
+  under ES-NoProj, ES-Lazy or a rebuild the base class saw an empty stream. A record's stream is
+  now named after the class that owns the table (`Lyra.stream_name`, `Lyra.stream_prefix`), at
+  every one of the 21 places that built it; reference links and Lyra's caches follow the table.
+  Under ES-NoProj a subclass reads only its own records and its subclasses', as ActiveRecord's
+  type condition does; events naming a subclass of a monitored model resolve to it
+  (`Configuration#monitored_model_named`, used by ES-Lazy's catch-up and erasure). Event types
+  still name the concrete class. **Upgrade**: `bin/rails lyra:streams:migrate_sti`
+  (`Lyra::StiStreamMigration`) links events written before into the base streams, once; it
+  reports a base stream that already holds newer events instead of linking out of order
+  (`test/sti_streams_test.rb`, every mode).
 - **ES-Async projected inline could leave the row behind the log.** With
   `async_projections_inline` (the test environment's default) a write applied only its own event,
   inside its transaction and under no lock: of two writers of one record, the one that projected

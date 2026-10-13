@@ -28,7 +28,7 @@ module Lyra
     # exist then. Raises HistoryNotRecorded for a time before an imported
     # record's recorded history begins.
     def state_at(model_class, id, time)
-      events = Lyra.config.event_store.read.stream("#{model_class.name}$#{id}").to_a
+      events = Lyra.config.event_store.read.stream(Lyra.stream_name(model_class, id)).to_a
       return nil if events.empty?
 
       time = time.to_time
@@ -111,7 +111,7 @@ module Lyra
 
       def stream_ids
         connection = ActiveRecord::Base.connection
-        prefix = "#{model_class.name}$"
+        prefix = Lyra.stream_prefix(model_class)
         pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
         ids = connection.select_values("SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{pattern}")
                         .map { _1.delete_prefix(prefix) }

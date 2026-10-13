@@ -51,8 +51,10 @@ module Lyra
           end
         end
 
+        # Named after the class that owns the table (the STI base class), as
+        # the record streams are (Lyra.stream_name).
         def stream_name(model_class, foreign_key, value)
-          "#{model_class.name}.#{foreign_key}$#{value}"
+          "#{Lyra.stream_owner_name(model_class)}.#{foreign_key}$#{value}"
         end
 
         # Called by Lyra.append_events after +events+ are stored in
@@ -80,18 +82,23 @@ module Lyra
         # +conditions+, found through a reference stream; nil when the
         # conditions name no single foreign-key value (then the caller
         # considers every record). The caller still applies +conditions+.
+        # Under single-table inheritance the links are the table's: kept and
+        # looked up for the base class, with its foreign keys (a key only a
+        # subclass declares is not indexed, and the caller loads every record);
+        # CachedProjection.find_many keeps the records of +model_class+.
         def lookup(model_class, conditions)
           return nil unless enabled? && conditions.is_a?(Hash)
 
-          indexed = indexed_conditions(model_class, conditions)
+          table = owner(model_class)
+          indexed = indexed_conditions(table, conditions)
           return nil if indexed.empty?
 
-          catch_up(model_class)
+          catch_up(table)
           # Every condition on an indexed key narrows the candidates: a record
           # that matches them all is in each key's stream, so the streams are
           # intersected (stock_location_id and variant_id together name one
           # stock item, where the location alone names all of them).
-          ids = indexed.map { |key, value| candidate_ids(model_class, key, value) }.reduce(:&)
+          ids = indexed.map { |key, value| candidate_ids(table, key, value) }.reduce(:&)
           records = CachedProjection.find_many(model_class, ids)
           records.sort_by { |attrs| sort_key(attrs[model_class.primary_key.to_s]) }
         end
@@ -105,6 +112,7 @@ module Lyra
         # checkpoint written in the caller's transaction would vanish with a
         # rollback while this process took the model for linked.
         def catch_up(model_class, force: false)
+          model_class = owner(model_class)
           return 0 if !force && ready?(model_class)
 
           linked = on_own_connection { link_and_checkpoint(model_class, force) }
@@ -126,6 +134,10 @@ module Lyra
 
         def ready
           @ready ||= Set.new
+        end
+
+        def owner(model_class)
+          model_class.respond_to?(:base_class) ? model_class.base_class : model_class
         end
 
         def ready?(model_class)
@@ -169,7 +181,7 @@ module Lyra
         # stream. One query on the stream table; the events are not read.
         def candidate_ids(model_class, key, value)
           connection = ActiveRecord::Base.connection
-          own = "#{model_class.name}$"
+          own = Lyra.stream_prefix(model_class)
           connection.select_values(<<~SQL.squish).map { |stream| stream.delete_prefix(own) }
             SELECT DISTINCT s.stream FROM event_store_events_in_streams l
             JOIN event_store_events_in_streams s
@@ -205,7 +217,7 @@ module Lyra
 
         def link_since(model_class, position, upto)
           connection = ActiveRecord::Base.connection
-          prefix = connection.quote("#{ActiveRecord::Base.sanitize_sql_like("#{model_class.name}$")}%")
+          prefix = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(Lyra.stream_prefix(model_class))}%")
           event_ids = connection.select_values(<<~SQL.squish)
             SELECT e.event_id FROM event_store_events e
             JOIN event_store_events_in_streams s ON s.event_id = e.event_id
@@ -256,7 +268,10 @@ module Lyra
 
           model_class = name.safe_constantize
           return nil unless model_class.is_a?(Class) && model_class < ActiveRecord::Base
-          return nil unless model_class.respond_to?(:lyra_monitored) && model_class.lyra_monitored
+          return nil unless model_class.respond_to?(:lyra_monitored)
+          # The stream is the table's; it is monitored when its base class is,
+          # or any subclass that monitor_with_lyra was given directly.
+          return nil unless model_class.lyra_monitored || model_class.descendants.any?(&:lyra_monitored)
 
           model_class
         end
