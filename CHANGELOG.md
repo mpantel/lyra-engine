@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Everything since 0.8.0, the version the PAM article describes.
 
 ### Added
+- **`ReadYourWrites.with_guaranteed_read(each_write: true)`**: each write in the block is projected
+  as it is made, so reads later in the same block see it (by default the block projects when it
+  ends). For code that writes and reads back in one unit of work, as Solidus's checkout does
+  (a replay of 2,000 Olist orders through Solidus under ES-Async matched the oracle for 135 orders,
+  and for 1,992, as plain ActiveRecord does, with each step in such a block).
+  `test/projections/read_your_writes_async_test.rb`. The controller concern takes it per
+  controller, inherited by subclasses, so an application is adapted from an initializer:
+  `Spree::BaseController.include Lyra::Consistency::ControllerConcern` and
+  `Spree::BaseController.lyra_read_your_writes each_write: true`
+  (`test/consistency/controller_concern_test.rb`). `docs/API_REFERENCE.md` named the concern
+  `ReadYourWrites::ControllerConcern`, which does not exist; it is `Consistency::ControllerConcern`.
 - **`config.lock_aggregate_before_append`** (default `true`): Hijack, ES-Sync and ES-Async lock
   the aggregate before appending. Two writers of one record could append in one order and write the
   row in the other, leaving the row at a value its log does not replay to; seen in the wild, 2

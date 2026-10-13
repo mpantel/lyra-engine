@@ -449,10 +449,13 @@ returns (the job is still enqueued and converges on the same row). Blocks
 nest: an inner block projects its own writes when it ends and restores the
 outer block's list; if the inner block raises, its unprojected writes pass to
 the outer block. Every write is projected by the time the outermost block
-returns. Writes are projected when the block ends, not as they are made: a read
-inside the block, before it ends, can still come before the projection (code
-that writes and then reads in one step, as Solidus's checkout does, needs a
-block around the write, or ES-Sync).
+returns. By default writes are projected when the block ends, not as they are
+made: a read inside the block, before it ends, can still come before the
+projection. Code that writes and then reads in one unit of work, as Solidus's
+checkout does, opens the block with `each_write: true`: each write is then
+projected as it is made, in its own transaction, as ES-Sync projects it (the
+job is still enqueued and finds nothing new to apply). The option holds for
+the block that sets it; a nested block has its own.
 
 ```ruby
 Lyra::Consistency::ReadYourWrites.with_guaranteed_read do
@@ -460,10 +463,26 @@ Lyra::Consistency::ReadYourWrites.with_guaranteed_read do
 end
 Registration.find(@registration.id)   # projected
 
-class RegistrationsController < ApplicationController
-  include Lyra::Consistency::ReadYourWrites::ControllerConcern   # wraps actions in ES-Async
+Lyra::Consistency::ReadYourWrites.with_guaranteed_read(each_write: true) do
+  order.payments.create!(amount: order.total)
+  order.complete!                     # reads the payment: already projected
 end
+
+class RegistrationsController < ApplicationController
+  include Lyra::Consistency::ControllerConcern   # wraps actions in ES-Async
+end
+
+# An application whose actions read back what they have just written, adapted
+# from an initializer without changing its code (applies to subclasses too):
+Spree::BaseController.include Lyra::Consistency::ControllerConcern
+Spree::BaseController.lyra_read_your_writes each_write: true
 ```
+
+`Lyra::Consistency::ControllerConcern` wraps each action in a block under
+ES-Async only. `lyra_read_your_writes each_write: true` makes that block
+project each write as it is made; the default, `false`, projects when the
+action ends. (Earlier versions of this page named the concern
+`ReadYourWrites::ControllerConcern`, which does not exist.)
 
 ### ES-NoProj (`projection_mode :disabled`)
 

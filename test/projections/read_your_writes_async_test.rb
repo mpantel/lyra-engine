@@ -101,6 +101,55 @@ class ReadYourWritesAsyncTest < Minitest::Test
     assert_equal [[inner.id, "Kim"]], rows
   end
 
+  # By default a read inside the block does not see the block's own writes;
+  # with each_write: true it does, as code that reads back what it has just
+  # written in the same unit of work needs (Solidus's order.complete! reads
+  # the payment created a line before).
+  def test_each_write_makes_a_write_visible_to_reads_later_in_the_block
+    seen_default = Lyra::Consistency::ReadYourWrites.with_guaranteed_read do
+      RywUser.create!(name: "Ned", email: "ned@example.com")
+      rows.map(&:last)
+    end
+    seen_each_write = Lyra::Consistency::ReadYourWrites.with_guaranteed_read(each_write: true) do
+      user = RywUser.create!(name: "Ola", email: "ola@example.com")
+      user.update!(name: "Ola2")
+      rows.map(&:last)
+    end
+
+    assert_equal [], seen_default, "the default projects when the block ends"
+    assert_includes seen_each_write, "Ola2", "each_write projects every write as it is made"
+    assert_equal %w[Ned Ola2], rows.map(&:last).sort
+  end
+
+  def test_with_each_write_the_job_still_converges_on_the_same_row
+    user = Lyra::Consistency::ReadYourWrites.with_guaranteed_read(each_write: true) do
+      RywUser.create!(name: "Pia", email: "pia@example.com").tap { _1.update!(name: "Pia2") }
+    end
+
+    @adapter.enqueued_jobs.dup.each do |job|
+      Lyra::Projections::AsyncProjectionJob.perform_now(*ActiveJob::Arguments.deserialize(job[:args]))
+    end
+
+    assert_equal [[user.id, "Pia2"]], rows
+  end
+
+  # A default block nested in an each_write block keeps its own behaviour, and
+  # the outer block's is back after it.
+  def test_each_write_is_per_block
+    inner_seen = outer_seen = nil
+    Lyra::Consistency::ReadYourWrites.with_guaranteed_read(each_write: true) do
+      Lyra::Consistency::ReadYourWrites.with_guaranteed_read do
+        RywUser.create!(name: "Quin", email: "quin@example.com")
+        inner_seen = rows.map(&:last)
+      end
+      RywUser.create!(name: "Rae", email: "rae@example.com")
+      outer_seen = rows.map(&:last)
+    end
+
+    assert_equal [], inner_seen
+    assert_equal %w[Quin Rae], outer_seen.sort
+  end
+
   def test_outside_the_block_the_write_waits_for_the_job
     RywUser.create!(name: "Jo", email: "jo@example.com")
 
