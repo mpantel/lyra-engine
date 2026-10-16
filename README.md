@@ -257,7 +257,34 @@ If you use this software in academic research, please cite:
 }
 ```
 
-### Research Paper Citation
+### Research Paper Citations
+
+Lyra's object-to-events mapping, and how its modes compare in cost:
+
+```bibtex
+@article{pantelelis2026oem,
+  title={From {ORM} to {OEM}: Object-to-Events Mapping for the {OLEP} Era},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  journal={IEEE Software},
+  year={2026},
+  doi={10.1109/MS.2026.3734188}
+}
+```
+
+PAM, the privacy DSL (`gems/pam_dsl`), from regulation to runtime:
+
+```bibtex
+@article{pantelelis2026pam,
+  title={{PAM}: A Domain-Specific Language for Specifying Privacy Requirements from Regulation to Runtime},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  journal={Requirements Engineering},
+  publisher={Springer},
+  year={2026},
+  doi={10.1007/s00766-026-00469-6}
+}
+```
+
+The CRUD-to-events mapping as first proposed:
 
 ```bibtex
 @inproceedings{pantelelis2022mapping,
