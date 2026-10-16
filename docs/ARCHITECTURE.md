@@ -115,7 +115,7 @@ enforcement using the Privacy Attribute Matrix (PAM) model.
 
 Research foundation:
 
-> Pantelelis, M., & Kalloniatis, C. (2024). "Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR". *19th International Conference on Availability, Reliability and Security (ARES 2024)*. DOI: [10.1145/3664476.3669932](https://doi.org/10.1145/3664476.3669932)
+> Pantelelis, M., & Kalloniatis, C. (2024). "Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR". *19th International Conference on Availability, Reliability and Security (ARES 2024)*. DOI: [10.1145/3664476.3670898](https://doi.org/10.1145/3664476.3670898)
 
 **PetriFlow** (gem `orfeas_petri_flow`): modeling and formal verification of
 event flows.
@@ -1277,7 +1277,7 @@ Research questions, from the thesis:
 Publications:
 
 1. Pantelelis, M., & Kalloniatis, C. (2022). "Mapping CRUD to Events: Towards an object to event-sourcing framework". *PCI 2022*. DOI: [10.1145/3575879.3576006](https://doi.org/10.1145/3575879.3576006)
-2. Pantelelis, M., & Kalloniatis, C. (2024). "Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR". *ARES 2024*. DOI: [10.1145/3664476.3669932](https://doi.org/10.1145/3664476.3669932)
+2. Pantelelis, M., & Kalloniatis, C. (2024). "Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR". *ARES 2024*. DOI: [10.1145/3664476.3670898](https://doi.org/10.1145/3664476.3670898)
 
 The sources of the other papers, the thesis and the proposal are in the
 monorepo's `papers/` directory.

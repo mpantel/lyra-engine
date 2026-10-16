@@ -169,9 +169,25 @@ ORFEAS and Lyra are grounded in peer-reviewed research:
 
 ### Published Papers
 
+**Pantelelis, M., & Kalloniatis, C. (2026).** *From ORM to OEM: Object-to-Events Mapping for the OLEP Era.*
+IEEE Software.
+DOI: [10.1109/MS.2026.3734188](https://doi.org/10.1109/MS.2026.3734188)
+
+**Pantelelis, M., & Kalloniatis, C. (2026).** *PAM: A Domain-Specific Language for Specifying Privacy Requirements from Regulation to Runtime.*
+Requirements Engineering, Springer.
+DOI: [10.1007/s00766-026-00469-6](https://doi.org/10.1007/s00766-026-00469-6)
+
+**Pantelelis, M., & Kalloniatis, C. (2024).** *Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR.*
+ARES 2024, 21st International Workshop on Trust, Privacy and Security in the Digital Society (TrustBus), ACM.
+DOI: [10.1145/3664476.3670898](https://doi.org/10.1145/3664476.3670898)
+
 **Pantelelis, M., & Kalloniatis, C. (2022).** *Mapping CRUD to Events: Towards an object to event-sourcing framework.*
 26th Pan-Hellenic Conference on Informatics (PCI 2022).
 DOI: [10.1145/3575879.3576006](https://doi.org/10.1145/3575879.3576006)
+
+**Pantelelis, M., & Kalloniatis, C. (2022).** *Object Relational Mapping vs. Event-Sourcing: Systematic Review.*
+EGOVIS 2022, Lecture Notes in Computer Science 13429, Springer, pp. 18–31.
+DOI: [10.1007/978-3-031-12673-4_2](https://doi.org/10.1007/978-3-031-12673-4_2)
 
 ### Research Areas
 
@@ -257,7 +273,50 @@ If you use this software in academic research, please cite:
 }
 ```
 
-### Research Paper Citation
+### Research Paper Citations
+
+Lyra's object-to-events mapping, and how its modes compare in cost:
+
+```bibtex
+@article{pantelelis2026oem,
+  title={From {ORM} to {OEM}: Object-to-Events Mapping for the {OLEP} Era},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  journal={IEEE Software},
+  year={2026},
+  doi={10.1109/MS.2026.3734188}
+}
+```
+
+PAM, the privacy DSL (`gems/pam_dsl`), from regulation to runtime:
+
+```bibtex
+@article{pantelelis2026pam,
+  title={{PAM}: A Domain-Specific Language for Specifying Privacy Requirements from Regulation to Runtime},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  journal={Requirements Engineering},
+  publisher={Springer},
+  year={2026},
+  doi={10.1007/s00766-026-00469-6}
+}
+```
+
+What each CRUD operation means for GDPR's security and privacy principles, the ground of PAM and Lyra's privacy events:
+
+```bibtex
+@inproceedings{pantelelis2024crud,
+  title={Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding {GDPR}},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  booktitle={Proceedings of the 19th International Conference on Availability, Reliability and Security (ARES 2024), 21st International Workshop on Trust, Privacy and Security in the Digital Society (TrustBus)},
+  articleno={178},
+  pages={1--7},
+  publisher={ACM},
+  address={Vienna, Austria},
+  year={2024},
+  doi={10.1145/3664476.3670898}
+}
+```
+
+The CRUD-to-events mapping as first proposed:
 
 ```bibtex
 @inproceedings{pantelelis2022mapping,
@@ -266,6 +325,22 @@ If you use this software in academic research, please cite:
   booktitle={26th Pan-Hellenic Conference on Informatics (PCI 2022)},
   year={2022},
   doi={10.1145/3575879.3576006}
+}
+```
+
+The literature review behind it, ORM against Event Sourcing:
+
+```bibtex
+@inproceedings{pantelelis2022egovis,
+  title={Object Relational Mapping vs. Event-Sourcing: Systematic Review},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  booktitle={Electronic Government and the Information Systems Perspective (EGOVIS 2022)},
+  series={Lecture Notes in Computer Science},
+  volume={13429},
+  pages={18--31},
+  publisher={Springer},
+  year={2022},
+  doi={10.1007/978-3-031-12673-4_2}
 }
 ```
 
