@@ -55,6 +55,7 @@ require "lyra/id_generator"
 # Strict data access (prevents callback-bypassing operations)
 # Loaded before projections because projections use bypass methods
 require "lyra/advisory_lock"
+require "lyra/own_connection"
 require "lyra/bypass_events"
 require "lyra/strict_data_access"
 

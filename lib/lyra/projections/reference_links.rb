@@ -110,14 +110,30 @@ module Lyra
         # Inside an open transaction (a dependent lookup during a destroy) it
         # runs on a connection of its own, which commits at once: links and
         # checkpoint written in the caller's transaction would vanish with a
-        # rollback while this process took the model for linked.
+        # rollback while this process took the model for linked. Where no
+        # second connection can be had (a pinned test connection, a pool with
+        # none free) it runs in the caller's transaction, and the model counts
+        # as linked only once that transaction commits (Lyra::OwnConnection).
+        #
+        # One thread per model and process catches up; the others wait for it
+        # without taking a connection, so a burst of first lookups needs one
+        # connection beyond the callers' own, not one each (issue #37).
         def catch_up(model_class, force: false)
           model_class = owner(model_class)
           return 0 if !force && ready?(model_class)
 
-          linked = on_own_connection { link_and_checkpoint(model_class, force) }
-          MUTEX.synchronize { ready << model_class.name }
-          linked
+          lock_for(model_class).synchronize do
+            return 0 if !force && ready?(model_class)
+
+            inline = false
+            linked = Lyra::OwnConnection.run do |in_caller_transaction|
+              inline = in_caller_transaction
+              link_and_checkpoint(model_class, force)
+            end
+            mark_ready = -> { MUTEX.synchronize { ready << model_class.name } }
+            inline ? Lyra::OwnConnection.after_commit(&mark_ready) : mark_ready.call
+            linked
+          end
         end
 
         # Forget which models are linked in this process (tests, truncation).
@@ -144,10 +160,9 @@ module Lyra
           MUTEX.synchronize { ready.include?(model_class.name) }
         end
 
-        def on_own_connection(&block)
-          return yield unless ActiveRecord::Base.connection.transaction_open?
-
-          Thread.new { ActiveRecord::Base.connection_pool.with_connection(&block) }.value
+        # The per-model lock of #catch_up.
+        def lock_for(model_class)
+          MUTEX.synchronize { (@locks ||= {})[model_class.name] ||= Mutex.new }
         end
 
         def link_and_checkpoint(model_class, force)

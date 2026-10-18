@@ -453,6 +453,18 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **Genesis and the reference-link catch-up assumed a second connection (#37).** Inside an open
+  transaction both ran their work on a thread that checked out a connection of its own and waited
+  for it. Under Rails' transactional tests the pool's connection is pinned, every checkout returns
+  the caller's own, locked connection, and the wait never ended: the Aegean testbed suite in
+  ES-NoProj deadlocked at its first indexed lookup. Under load each caller took a second
+  connection, and at 64 threads the pool ran out (5 s checkout timeouts, about 0.1% of ES-NoProj's
+  operations in the benchmark's 64-thread cells). `Lyra::OwnConnection` now runs such work: on a
+  connection of its own when one can be had, otherwise inline in the caller's transaction, with
+  the model recorded as linked or imported only once that transaction commits (after a rollback
+  the work runs again on the next use). The catch-up runs once per model and process; concurrent
+  first lookups wait for it without a second connection. `test/projections/reference_links_test.rb`:
+  a pinned connection, and concurrent first lookups inside transactions.
 - **`has_and_belongs_to_many` links were not recorded.** The join table has no model of its own
   (Active Record writes it through an anonymous class), so `item.tags << tag` wrote the join row
   and no event recorded it: a rebuild lost the association and DualView did not compare it. Every

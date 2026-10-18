@@ -131,6 +131,71 @@ class ReferenceLinksTest < Minitest::Test
     assert_operator loads, :>, 0
   end
 
+  # Rails' transactional tests pin one connection: every checkout returns it,
+  # locked by the thread that waits for the catch-up, so a catch-up on a
+  # second connection waited forever (issue #37). It now runs in the caller's
+  # transaction, and the model counts as linked only once that commits.
+  def test_a_catch_up_on_a_pinned_connection_runs_in_the_callers_transaction
+    ReferenceLinks.reset!
+    pool = ActiveRecord::Base.connection_pool
+    pool.pin_connection!(true)
+    begin
+      Timeout.timeout(10) do
+        ActiveRecord::Base.transaction do
+          assert_equal %w[A1 A2], titles(RlAuthor.find(@ann.id).rl_articles)
+          refute linked?(RlArticle), "not linked until the transaction commits"
+          raise ActiveRecord::Rollback
+        end
+      end
+    ensure
+      pool.unpin_connection!
+    end
+
+    refute linked?(RlArticle), "rolled back: the next lookup catches up again"
+    assert_equal %w[A1 A2], titles(RlAuthor.find(@ann.id).rl_articles)
+    assert linked?(RlArticle)
+  end
+
+  # A burst of first lookups, each inside a transaction, used to start one
+  # catch-up per thread, each on a second connection, and at 64 threads the
+  # pool ran out (issue #37). One thread catches up; the others wait for it
+  # without a second connection, so with the test's own connection three
+  # callers and the one catch-up fit a pool of five.
+  def test_concurrent_first_lookups_catch_up_once
+    ReferenceLinks.reset!
+    callers = ActiveRecord::Base.connection_pool.size - 2
+    catch_ups = 0
+    singleton = ReferenceLinks.singleton_class
+    original = singleton.instance_method(:link_and_checkpoint)
+    singleton.define_method(:link_and_checkpoint) do |*args|
+      catch_ups += 1
+      sleep 0.3 # long enough for every caller to arrive while it runs
+      original.bind_call(self, *args)
+    end
+
+    start = Queue.new
+    threads = Array.new(callers) do
+      Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          ActiveRecord::Base.transaction do
+            start.pop
+            titles(RlAuthor.find(@ann.id).rl_articles)
+          end
+        end
+      end
+    end
+    callers.times { start << true }
+    results = Timeout.timeout(20) { threads.map(&:value) }
+
+    assert_equal [%w[A1 A2]] * callers, results
+    assert_equal 1, catch_ups
+  ensure
+    if original
+      singleton.define_method(:link_and_checkpoint, original)
+      singleton.send(:private, :link_and_checkpoint)
+    end
+  end
+
   def test_monitor_mode_writes_no_links
     clean
     ReferenceLinks.reset!
@@ -149,6 +214,10 @@ class ReferenceLinksTest < Minitest::Test
       c.mode = :event_sourcing
       c.projection_mode = :disabled
     end
+  end
+
+  def linked?(model_class)
+    ReferenceLinks.send(:ready?, model_class)
   end
 
   def linked_ids(author_id)

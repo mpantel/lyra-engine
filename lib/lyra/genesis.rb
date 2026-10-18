@@ -30,7 +30,10 @@ module Lyra
   # while importing, not until the caller commits (a long transaction would
   # otherwise block every other first use of the model), and the Imported
   # events stand whether the caller commits or rolls back -- they record rows
-  # that already existed, not the caller's write.
+  # that already existed, not the caller's write. Where no second connection
+  # can be had (Rails' transactional tests pin one; a pool may have none
+  # free), the import runs in the caller's transaction and the model counts as
+  # imported only once it commits (Lyra::OwnConnection).
   #
   # Enabled with config.genesis: :auto (the default) runs it in event-sourcing
   # mode, where the event log is the only source of truth; true also runs it in
@@ -58,15 +61,25 @@ module Lyra
         return 0 if imported?(model_class)
         return 0 if Thread.current[:lyra_genesis_running]
 
-        # Usually every row already has a stream: then nothing is written, so
-        # no lock is needed and the model is done whatever the transaction does.
+        # Usually every row already has a stream: then nothing is written and
+        # no lock is needed. The model counts as done once the caller's
+        # transaction, if any, commits: the streams it sees may be an inline
+        # import's, uncommitted in that transaction (see below).
         if rows_without_stream(model_class.connection, model_class, nil, limit: 1).empty?
-          mark_imported(model_class)
+          Lyra::OwnConnection.after_commit(model_class) { mark_imported(model_class) }
           return 0
         end
 
-        count = on_own_connection(model_class) { import_all(model_class) }
-        mark_imported(model_class)
+        # On a connection of its own when the caller is in a transaction; in
+        # the caller's transaction where none can be had (a pinned test
+        # connection, a pool with none free), and then done only at commit.
+        inline = false
+        count = Lyra::OwnConnection.run(model_class) do |in_caller_transaction|
+          inline = in_caller_transaction
+          import_all(model_class)
+        end
+        mark = -> { mark_imported(model_class) }
+        inline ? Lyra::OwnConnection.after_commit(model_class, &mark) : mark.call
         count
       end
 
@@ -106,14 +119,6 @@ module Lyra
       end
 
       private
-
-      # Run outside the caller's open transaction, if any: a thread checks out
-      # its own connection. Without a transaction, inline is the same thing.
-      def on_own_connection(model_class, &block)
-        return yield unless model_class.connection.transaction_open?
-
-        Thread.new { model_class.connection_pool.with_connection(&block) }.value
-      end
 
       def mark_imported(model_class)
         @mutex.synchronize { @imported[model_class.name] = true }
