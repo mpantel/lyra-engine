@@ -68,22 +68,25 @@ module Lyra
           return 0 if Thread.current[:lyra_lazy_catching_up]
 
           Thread.current[:lyra_lazy_catching_up] = true
-          connection = ActiveRecord::Base.connection
-          ensure_table!(connection)
-          return 0 if up_to_date?(connection)
+          ActiveRecord::Base.with_connection do |connection|
+            ensure_table!(connection)
+            next 0 if up_to_date?(connection)
 
-          applied = 0
-          ActiveRecord::Base.transaction do
-            lock!(connection)
-            applied = apply_pending(connection)
+            applied = 0
+            ActiveRecord::Base.transaction do
+              lock!(connection)
+              applied = apply_pending(connection)
+            end
+            applied
           end
-          applied
         ensure
           Thread.current[:lyra_lazy_catching_up] = nil
         end
 
         # The current checkpoint: [position, { gap_id => first_seen_epoch }].
-        def checkpoint(connection = ActiveRecord::Base.connection)
+        def checkpoint(connection = nil)
+          return ActiveRecord::Base.with_connection { |c| checkpoint(c) } unless connection
+
           ensure_table!(connection)
           row = connection.select_one("SELECT position, gaps FROM #{TABLE} WHERE name = #{connection.quote(NAME)}")
           return [0, {}] unless row
@@ -92,7 +95,9 @@ module Lyra
         end
 
         # Forget the checkpoint, e.g. after the tables were truncated or rebuilt.
-        def reset!(connection = ActiveRecord::Base.connection)
+        def reset!(connection = nil)
+          return ActiveRecord::Base.with_connection { |c| reset!(c) } unless connection
+
           connection.execute("DELETE FROM #{TABLE}") if connection.table_exists?(TABLE)
           @gaps_checked_at = nil
         end

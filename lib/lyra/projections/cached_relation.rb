@@ -580,8 +580,14 @@ module Lyra
         model_class.arel_table
       end
 
+      # As ActiveRecord::Relation delegates them to its model. Lyra's own code
+      # uses with_connection: connection leases one to the thread until it ends.
       def connection
         model_class.connection
+      end
+
+      def with_connection(...)
+        model_class.with_connection(...)
       end
 
       # ActiveRecord::Relation's value readers that its own code (calculations

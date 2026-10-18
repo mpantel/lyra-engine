@@ -292,7 +292,7 @@ module Lyra
       columns = Array(unique_by).map(&:to_s)
       return columns unless columns.size == 1 && !klass.column_names.include?(columns.first)
 
-      index = klass.connection.indexes(klass.table_name).find { |i| i.name == columns.first }
+      index = klass.with_connection { |c| c.indexes(klass.table_name) }.find { |i| i.name == columns.first }
       Array(index&.columns).map(&:to_s)
     end
 

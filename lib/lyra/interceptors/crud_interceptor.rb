@@ -444,24 +444,28 @@ module Lyra
         return unless lyra_hijack_mode? || es_sync || es_async || checks_version
         return if (lyra_hijack_mode? || es_sync) && lyra_lock_own_row(operation)
 
-        Lyra::AdvisoryLock.xact_lock(self.class.connection, "lyra_aggregate/#{lyra_stream_name}",
-                                     purpose: "aggregate write")
+        self.class.with_connection do |connection|
+          Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
+        end
       end
 
       # True when the record's row was found and locked.
       def lyra_lock_own_row(operation)
-        connection = self.class.connection
-        return false unless connection.adapter_name.match?(/postgres/i)
-
         primary_key = self.class.primary_key
         return false unless primary_key.is_a?(String)
 
-        strength = operation == :destroy ? "FOR UPDATE" : "FOR NO KEY UPDATE"
-        key = respond_to?(:id_in_database) ? id_in_database : id
-        sql = "SELECT 1 FROM #{connection.quote_table_name(self.class.table_name)} " \
-              "WHERE #{connection.quote_column_name(primary_key)} = #{connection.quote(key)} #{strength}"
-        # Never from the query cache: a lock is taken by running the statement.
-        connection.uncached { connection.select_value(sql, "Lyra aggregate lock") }.present?
+        # The write's own transaction holds this connection: the lock is taken
+        # on it and lasts until that transaction ends.
+        self.class.with_connection do |connection|
+          next false unless connection.adapter_name.match?(/postgres/i)
+
+          strength = operation == :destroy ? "FOR UPDATE" : "FOR NO KEY UPDATE"
+          key = respond_to?(:id_in_database) ? id_in_database : id
+          sql = "SELECT 1 FROM #{connection.quote_table_name(self.class.table_name)} " \
+                "WHERE #{connection.quote_column_name(primary_key)} = #{connection.quote(key)} #{strength}"
+          # Never from the query cache: a lock is taken by running the statement.
+          connection.uncached { connection.select_value(sql, "Lyra aggregate lock") }.present?
+        end
       end
 
       def lyra_hijack_update

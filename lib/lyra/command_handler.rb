@@ -266,7 +266,7 @@ module Lyra
       @@pending_warned ||= Set.new
       return unless @@pending_warned.add?(model_class.name)
 
-      adapter = model_class.connection.adapter_name rescue "unknown adapter"
+      adapter = model_class.with_connection(&:adapter_name) rescue "unknown adapter"
       Rails.logger.warn(
         "Lyra: hijack mode can't reserve a safe id for #{model_class.name} " \
         "(#{adapter}, integer key without a PostgreSQL sequence); " \

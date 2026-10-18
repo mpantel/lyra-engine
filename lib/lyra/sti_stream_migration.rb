@@ -35,11 +35,12 @@ module Lyra
       # Record streams named after +subclass+ ("Sub$<id>", not a reference
       # stream such as "Sub.foreign_key$<value>").
       def subclass_streams(subclass)
-        connection = ActiveRecord::Base.connection
-        prefix = "#{subclass.name}$"
-        pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
-        connection.select_values("SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{pattern}")
-                  .reject { |stream| stream.delete_prefix(prefix).include?("$") }
+        ActiveRecord::Base.with_connection do |connection|
+          prefix = "#{subclass.name}$"
+          pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
+          connection.select_values("SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{pattern}")
+                    .reject { |stream| stream.delete_prefix(prefix).include?("$") }
+        end
       end
 
       def migrate(old, subclass, base, store, dry_run, result)

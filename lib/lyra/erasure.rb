@@ -226,22 +226,24 @@ module Lyra
 
       # How many streams other than +origin_stream+ hold +value+ (text match).
       def holders(value, origin_stream)
-        conn = ActiveRecord::Base.connection
-        conn.select_value(<<~SQL.squish).to_i
-          SELECT count(DISTINCT s.stream) FROM event_store_events e
-          JOIN event_store_events_in_streams s ON s.event_id = e.event_id
-          WHERE convert_from(e.data, 'UTF8') LIKE #{conn.quote("%#{ActiveRecord::Base.sanitize_sql_like(value)}%")}
-            AND s.stream <> #{conn.quote(origin_stream)}
-        SQL
+        ActiveRecord::Base.with_connection do |conn|
+          conn.select_value(<<~SQL.squish).to_i
+            SELECT count(DISTINCT s.stream) FROM event_store_events e
+            JOIN event_store_events_in_streams s ON s.event_id = e.event_id
+            WHERE convert_from(e.data, 'UTF8') LIKE #{conn.quote("%#{ActiveRecord::Base.sanitize_sql_like(value)}%")}
+              AND s.stream <> #{conn.quote(origin_stream)}
+          SQL
+        end
       end
 
       def events_mentioning(values)
-        conn = ActiveRecord::Base.connection
-        clauses = values.map do |value|
-          "convert_from(data, 'UTF8') LIKE #{conn.quote("%#{ActiveRecord::Base.sanitize_sql_like(value)}%")}"
+        ActiveRecord::Base.with_connection do |conn|
+          clauses = values.map do |value|
+            "convert_from(data, 'UTF8') LIKE #{conn.quote("%#{ActiveRecord::Base.sanitize_sql_like(value)}%")}"
+          end
+          ids = conn.select_values("SELECT event_id FROM event_store_events WHERE #{clauses.join(' OR ')}")
+          ids.filter_map { |event_id| Lyra.config.event_store.read.event(event_id) rescue nil }
         end
-        ids = conn.select_values("SELECT event_id FROM event_store_events WHERE #{clauses.join(' OR ')}")
-        ids.filter_map { |event_id| Lyra.config.event_store.read.event(event_id) rescue nil }
       end
 
       def streams_of(event)

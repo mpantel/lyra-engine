@@ -166,16 +166,17 @@ module Lyra
         end
 
         def link_and_checkpoint(model_class, force)
-          connection = ActiveRecord::Base.connection
-          ActiveRecord::Base.transaction do
-            Lyra::AdvisoryLock.xact_lock(connection, "#{LOCK}/#{model_class.name}", purpose: "reference links")
-            position = force ? 0 : checkpoint(model_class)
-            upto = connection.select_value("SELECT MAX(id) FROM event_store_events").to_i
-            next 0 unless upto > position
+          ActiveRecord::Base.with_connection do |connection|
+            ActiveRecord::Base.transaction do
+              Lyra::AdvisoryLock.xact_lock(connection, "#{LOCK}/#{model_class.name}", purpose: "reference links")
+              position = force ? 0 : checkpoint(model_class)
+              upto = connection.select_value("SELECT MAX(id) FROM event_store_events").to_i
+              next 0 unless upto > position
 
-            linked = link_since(model_class, position, upto)
-            store_checkpoint(model_class, upto)
-            linked
+              linked = link_since(model_class, position, upto)
+              store_checkpoint(model_class, upto)
+              linked
+            end
           end
         end
 
@@ -195,14 +196,15 @@ module Lyra
         # records whose own streams hold the events linked in the reference
         # stream. One query on the stream table; the events are not read.
         def candidate_ids(model_class, key, value)
-          connection = ActiveRecord::Base.connection
-          own = Lyra.stream_prefix(model_class)
-          connection.select_values(<<~SQL.squish).map { |stream| stream.delete_prefix(own) }
-            SELECT DISTINCT s.stream FROM event_store_events_in_streams l
-            JOIN event_store_events_in_streams s
-              ON s.event_id = l.event_id AND s.stream LIKE #{connection.quote("#{ActiveRecord::Base.sanitize_sql_like(own)}%")}
-            WHERE l.stream = #{connection.quote(stream_name(model_class, key, value))}
-          SQL
+          ActiveRecord::Base.with_connection do |connection|
+            own = Lyra.stream_prefix(model_class)
+            connection.select_values(<<~SQL.squish).map { |stream| stream.delete_prefix(own) }
+              SELECT DISTINCT s.stream FROM event_store_events_in_streams l
+              JOIN event_store_events_in_streams s
+                ON s.event_id = l.event_id AND s.stream LIKE #{connection.quote("#{ActiveRecord::Base.sanitize_sql_like(own)}%")}
+              WHERE l.stream = #{connection.quote(stream_name(model_class, key, value))}
+            SQL
+          end
         end
 
         # { foreign key => value } that +event+ sets, for the model's keys.
@@ -231,36 +233,37 @@ module Lyra
         end
 
         def link_since(model_class, position, upto)
-          connection = ActiveRecord::Base.connection
-          prefix = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(Lyra.stream_prefix(model_class))}%")
-          event_ids = connection.select_values(<<~SQL.squish)
-            SELECT e.event_id FROM event_store_events e
-            JOIN event_store_events_in_streams s ON s.event_id = e.event_id
-            WHERE s.stream LIKE #{prefix} AND e.id > #{Integer(position)} AND e.id <= #{Integer(upto)}
-            ORDER BY e.id
-          SQL
-          return 0 if event_ids.empty?
+          ActiveRecord::Base.with_connection do |connection|
+            prefix = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(Lyra.stream_prefix(model_class))}%")
+            event_ids = connection.select_values(<<~SQL.squish)
+              SELECT e.event_id FROM event_store_events e
+              JOIN event_store_events_in_streams s ON s.event_id = e.event_id
+              WHERE s.stream LIKE #{prefix} AND e.id > #{Integer(position)} AND e.id <= #{Integer(upto)}
+              ORDER BY e.id
+            SQL
+            return 0 if event_ids.empty?
 
-          store = Lyra.config.event_store
-          wanted = Hash.new { |h, k| h[k] = [] }
-          event_ids.each_slice(500) do |ids|
-            store.read.events(ids).each do |event|
-              reference_values(model_class, event).each do |key, value|
-                wanted[stream_name(model_class, key, value)] << event.event_id
+            store = Lyra.config.event_store
+            wanted = Hash.new { |h, k| h[k] = [] }
+            event_ids.each_slice(500) do |ids|
+              store.read.events(ids).each do |event|
+                reference_values(model_class, event).each do |key, value|
+                  wanted[stream_name(model_class, key, value)] << event.event_id
+                end
               end
             end
-          end
 
-          linked = 0
-          wanted.each do |stream, ids|
-            present = store.read.stream(stream).to_a.map(&:event_id).to_set
-            missing = ids.uniq.reject { present.include?(_1) }
-            next if missing.empty?
+            linked = 0
+            wanted.each do |stream, ids|
+              present = store.read.stream(stream).to_a.map(&:event_id).to_set
+              missing = ids.uniq.reject { present.include?(_1) }
+              next if missing.empty?
 
-            store.link(missing, stream_name: stream)
-            linked += missing.size
+              store.link(missing, stream_name: stream)
+              linked += missing.size
+            end
+            linked
           end
-          linked
         end
 
         def checkpoint(model_class)

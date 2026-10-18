@@ -46,7 +46,7 @@ module Lyra
       def maybe_sync!
         return nil unless enabled?
         return nil if due_in.positive?
-        return nil if ActiveRecord::Base.connection.transaction_open?
+        return nil if ActiveRecord::Base.with_connection(&:transaction_open?)
 
         sync!
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished

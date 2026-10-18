@@ -128,7 +128,7 @@ module Lyra
       def latest_applied
         return nil unless table_ready?
 
-        row = connection.select_one("SELECT id, to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
+        row = sql(:select_one, "SELECT id, to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
         row && { id: row["id"].to_i, config: row["to_config"] }
       end
 
@@ -197,7 +197,7 @@ module Lyra
       def last_applied
         return nil unless table_ready?
 
-        connection.select_value("SELECT to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
+        sql(:select_value, "SELECT to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
       end
 
       # Every id of +model+ with a row or a stream (Lyra::Repair).
@@ -231,7 +231,7 @@ module Lyra
       def certified_check(from, to)
         return nil unless table_ready?
 
-        row = connection.select_one(
+        row = sql(:select_one,
           "SELECT position, created_at FROM #{TABLE} WHERE kind = 'certificate' AND from_config = #{q(from)} " \
           "AND to_config = #{q(to)} ORDER BY id DESC LIMIT 1"
         )
@@ -258,7 +258,7 @@ module Lyra
 
       def stream_ids(model)
         prefix = Lyra.stream_prefix(model)
-        connection.select_values(
+        sql(:select_values,
           "SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{q(like_prefix(prefix))}"
         ).map { _1.delete_prefix(prefix) }
       end
@@ -292,7 +292,7 @@ module Lyra
       def changed_since(models, position, since)
         models.each_with_object({}) do |model, acc|
           prefix = Lyra.stream_prefix(model)
-          moved = connection.select_values(
+          moved = sql(:select_values,
             "SELECT DISTINCT s.stream FROM event_store_events_in_streams s JOIN event_store_events e " \
             "ON e.event_id = s.event_id WHERE e.id > #{Integer(position)} AND s.stream LIKE #{q(like_prefix(prefix))}"
           ).map { _1.delete_prefix(prefix) }
@@ -309,7 +309,7 @@ module Lyra
       def certify(report)
         return unless table_ready?
 
-        connection.execute(
+        sql(:execute,
           "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at) VALUES " \
           "('certificate', #{q(report.from)}, #{q(report.to)}, #{Integer(report.position)}, #{Integer(report.checked)}, " \
           "#{q(report.finished_at.utc)})"
@@ -320,7 +320,7 @@ module Lyra
       def record_applied(to)
         return nil unless table_ready?
 
-        connection.select_value(
+        sql(:select_value,
           "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at) VALUES " \
           "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}) RETURNING id"
         ).to_i
@@ -341,7 +341,7 @@ module Lyra
       end
 
       def event_position
-        connection.select_value("SELECT COALESCE(MAX(id), 0) FROM event_store_events").to_i
+        sql(:select_value, "SELECT COALESCE(MAX(id), 0) FROM event_store_events").to_i
       end
 
       # Created on first use, so the gate needs no migration. False when the
@@ -349,14 +349,16 @@ module Lyra
       def table_ready?
         return true if @table_ready
 
-        Lyra.create_own_table(connection, TABLE) do |conn|
-          conn.create_table(TABLE) do |t|
-            t.string :kind, null: false
-            t.string :from_config
-            t.string :to_config, null: false
-            t.bigint :position, null: false, default: 0
-            t.integer :checked, null: false, default: 0
-            t.datetime :created_at, null: false
+        ActiveRecord::Base.with_connection do |connection|
+          Lyra.create_own_table(connection, TABLE) do |conn|
+            conn.create_table(TABLE) do |t|
+              t.string :kind, null: false
+              t.string :from_config
+              t.string :to_config, null: false
+              t.bigint :position, null: false, default: 0
+              t.integer :checked, null: false, default: 0
+              t.datetime :created_at, null: false
+            end
           end
         end
         @table_ready = true
@@ -372,9 +374,11 @@ module Lyra
         Thread.current[:lyra_bypass_read_override] = previous
       end
 
-      def connection = ActiveRecord::Base.connection
+      # One statement, on a connection returned after it: a leased one
+      # (ActiveRecord::Base.connection) stayed with the thread until it ended.
+      def sql(method, statement) = ActiveRecord::Base.with_connection { |c| c.public_send(method, statement) }
 
-      def q(value) = connection.quote(value)
+      def q(value) = ActiveRecord::Base.with_connection { |c| c.quote(value) }
 
       def like_prefix(prefix) = "#{ActiveRecord::Base.sanitize_sql_like(prefix)}%"
     end

@@ -65,7 +65,7 @@ module Lyra
         # no lock is needed. The model counts as done once the caller's
         # transaction, if any, commits: the streams it sees may be an inline
         # import's, uncommitted in that transaction (see below).
-        if rows_without_stream(model_class.connection, model_class, nil, limit: 1).empty?
+        if model_class.with_connection { |c| rows_without_stream(c, model_class, nil, limit: 1) }.empty?
           Lyra::OwnConnection.after_commit(model_class) { mark_imported(model_class) }
           return 0
         end
@@ -87,18 +87,19 @@ module Lyra
       # mode. Returns the number of rows imported.
       def import_all(model_class)
         Thread.current[:lyra_genesis_running] = true
-        connection = model_class.connection
         imported = []
 
-        model_class.transaction do
-          lock!(connection, model_class)
-          after = nil
-          loop do
-            rows = rows_without_stream(connection, model_class, after)
-            break if rows.empty?
+        model_class.with_connection do |connection|
+          model_class.transaction do
+            lock!(connection, model_class)
+            after = nil
+            loop do
+              rows = rows_without_stream(connection, model_class, after)
+              break if rows.empty?
 
-            rows.each { |row| (id = import_row(model_class, row)) && imported << id }
-            after = rows.last[model_class.primary_key]
+              rows.each { |row| (id = import_row(model_class, row)) && imported << id }
+              after = rows.last[model_class.primary_key]
+            end
           end
         end
 

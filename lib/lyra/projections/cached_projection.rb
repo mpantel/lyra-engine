@@ -235,11 +235,12 @@ module Lyra
 
         # The id of the last event in a record's stream, or nil if it has none.
         def stream_version(model_class, id)
-          connection = ActiveRecord::Base.connection
-          connection.select_value(
-            "SELECT event_id FROM event_store_events_in_streams " \
-            "WHERE stream = #{connection.quote(Lyra.stream_name(model_class, id))} ORDER BY id DESC LIMIT 1"
-          )
+          ActiveRecord::Base.with_connection do |connection|
+            connection.select_value(
+              "SELECT event_id FROM event_store_events_in_streams " \
+              "WHERE stream = #{connection.quote(Lyra.stream_name(model_class, id))} ORDER BY id DESC LIMIT 1"
+            )
+          end
         end
 
         # The records whose streams' last events are +versions+ ({ id => event
@@ -283,29 +284,31 @@ module Lyra
         # { record id (String) => id of its stream's last event } for the
         # given ids that have a stream. One query.
         def stream_versions_of(model_class, ids)
-          connection = ActiveRecord::Base.connection
-          streams = ids.map { |id| connection.quote(Lyra.stream_name(model_class, id)) }.join(", ")
-          rows = connection.select_rows(<<~SQL.squish)
-            SELECT stream, event_id FROM event_store_events_in_streams
-            WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream IN (#{streams}) GROUP BY stream)
-          SQL
-          prefix = Lyra.stream_prefix(model_class)
-          rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
+          ActiveRecord::Base.with_connection do |connection|
+            streams = ids.map { |id| connection.quote(Lyra.stream_name(model_class, id)) }.join(", ")
+            rows = connection.select_rows(<<~SQL.squish)
+              SELECT stream, event_id FROM event_store_events_in_streams
+              WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream IN (#{streams}) GROUP BY stream)
+            SQL
+            prefix = Lyra.stream_prefix(model_class)
+            rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
+          end
         end
 
         # { record id (String) => id of its stream's last event }, in
         # primary-key order. One query for the whole model.
         def stream_versions(model_class)
-          connection = ActiveRecord::Base.connection
-          prefix = Lyra.stream_prefix(model_class)
-          pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
-          rows = connection.select_rows(<<~SQL.squish)
-            SELECT stream, event_id FROM event_store_events_in_streams
-            WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream LIKE #{pattern} GROUP BY stream)
-          SQL
-          versions = rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
-          ordered = versions.keys.all? { _1.match?(/\A\d+\z/) } ? versions.keys.sort_by(&:to_i) : versions.keys.sort
-          ordered.to_h { |id| [id, versions[id]] }
+          ActiveRecord::Base.with_connection do |connection|
+            prefix = Lyra.stream_prefix(model_class)
+            pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
+            rows = connection.select_rows(<<~SQL.squish)
+              SELECT stream, event_id FROM event_store_events_in_streams
+              WHERE id IN (SELECT MAX(id) FROM event_store_events_in_streams WHERE stream LIKE #{pattern} GROUP BY stream)
+            SQL
+            versions = rows.to_h { |stream, event_id| [stream.delete_prefix(prefix), event_id] }
+            ordered = versions.keys.all? { _1.match?(/\A\d+\z/) } ? versions.keys.sort_by(&:to_i) : versions.keys.sort
+            ordered.to_h { |id| [id, versions[id]] }
+          end
         end
 
         # Shared by find_by and where so both decide a match the same way.

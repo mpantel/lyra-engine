@@ -30,7 +30,9 @@ module Lyra
         end
 
         # Forget every checkpoint (tests; after the tables were truncated).
-        def reset!(connection = ActiveRecord::Base.connection)
+        def reset!(connection = nil)
+          return ActiveRecord::Base.with_connection { |c| reset!(c) } unless connection
+
           connection.execute("DELETE FROM #{TABLE}") if connection.table_exists?(TABLE)
         end
 

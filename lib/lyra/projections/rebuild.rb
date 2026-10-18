@@ -143,7 +143,7 @@ module Lyra
           sql = ActiveRecord::Base.sanitize_sql_array(
             ["SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE ?", "#{prefix}%"]
           )
-          ActiveRecord::Base.connection.select_values(sql).map { |stream| stream.sub(prefix, "") }
+          ActiveRecord::Base.with_connection { |c| c.select_values(sql) }.map { |stream| stream.sub(prefix, "") }
         end
 
         # Clear the read-model table, bypassing callbacks/strict-access guards

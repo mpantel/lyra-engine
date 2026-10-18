@@ -453,6 +453,22 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **A thread that wrote through Lyra kept a database connection until it ended (mpantel/lyra#37).** Lyra
+  called `Model.connection` (Rails' `lease_connection`) in its write, lock and read paths: the
+  aggregate lock, the id generator, Genesis, ES-Async's job, ES-NoProj's cache and reference links,
+  ES-Lazy's catch-up, and its maintenance calls (DualView, Rebuild, mode checks, erasure). Since
+  Rails 7.2 that keeps the connection for the thread, even inside `with_connection`, which then does
+  not return it. So in Hijack and every event-sourcing mode, a thread of the application's own (a
+  job runner, a worker pool) ended still holding one, and the pool got it back only by reaping: the
+  first thread to find the pool full reset every dead thread's connection, one by one, while the
+  others waited. In the benchmark's 64-thread cells such a wait now and then passed the 5 s checkout
+  timeout (0.3 to 3 operations per trial of 12,800 in Hijack, Hijack+PT and ES-Sync; part of
+  ES-NoProj's 14 to 18), and the contention benchmark reset each round's connections inside its
+  timed window. Lyra now uses `with_connection` throughout: inside a transaction it is the
+  transaction's own connection, outside one it is returned after use. `OwnConnection`'s thread
+  returns whatever its work leased. `test/connection_release_test.rb`: in every mode, a thread that
+  writes and reads, bare or in `with_connection`, ends without a connection, and `lib/` has no
+  `Model.connection` call left.
 - **Genesis and the reference-link catch-up assumed a second connection (#37).** Inside an open
   transaction both ran their work on a thread that checked out a connection of its own and waited
   for it. Under Rails' transactional tests the pool's connection is pinned, every checkout returns

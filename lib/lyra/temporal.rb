@@ -110,12 +110,13 @@ module Lyra
       end
 
       def stream_ids
-        connection = ActiveRecord::Base.connection
-        prefix = Lyra.stream_prefix(model_class)
-        pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
-        ids = connection.select_values("SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{pattern}")
-                        .map { _1.delete_prefix(prefix) }
-        ids.all? { _1.match?(/\A\d+\z/) } ? ids.sort_by(&:to_i) : ids.sort
+        ActiveRecord::Base.with_connection do |connection|
+          prefix = Lyra.stream_prefix(model_class)
+          pattern = connection.quote("#{ActiveRecord::Base.sanitize_sql_like(prefix)}%")
+          ids = connection.select_values("SELECT DISTINCT stream FROM event_store_events_in_streams WHERE stream LIKE #{pattern}")
+                          .map { _1.delete_prefix(prefix) }
+          ids.all? { _1.match?(/\A\d+\z/) } ? ids.sort_by(&:to_i) : ids.sort
+        end
       end
     end
   end

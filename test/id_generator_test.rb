@@ -228,6 +228,7 @@ end
       define_singleton_method(:table_name) { table_name }
       define_singleton_method(:columns_hash) { { "id" => mock_column } }
       define_singleton_method(:connection) { mock_connection }
+      define_singleton_method(:with_connection) { |&block| block.call(mock_connection) }
       define_singleton_method(:unscoped) { self }
       define_singleton_method(:maximum) { |_| 100 }
       define_singleton_method(:name) { "PostgresTestModel" }
@@ -268,6 +269,7 @@ end
       define_singleton_method(:table_name) { table_name }
       define_singleton_method(:columns_hash) { { "id" => mock_column } }
       define_singleton_method(:connection) { mock_connection }
+      define_singleton_method(:with_connection) { |&block| block.call(mock_connection) }
       define_singleton_method(:unscoped) { self }
       define_singleton_method(:maximum) { |_| max_id_tracker[:value] }
       define_singleton_method(:name) { model_name }

@@ -74,10 +74,11 @@ module Lyra
       private
 
       def project_stream(model_class, model_id, stream)
-        connection = model_class.connection
-        events = events_to_apply(connection, stream)
-        Rebuild.project_events(model_class, events)
-        AsyncCheckpoint.write(connection, stream, events.last.event_id) if events.any? && incremental?(connection)
+        model_class.with_connection do |connection|
+          events = events_to_apply(connection, stream)
+          Rebuild.project_events(model_class, events)
+          AsyncCheckpoint.write(connection, stream, events.last.event_id) if events.any? && incremental?(connection)
+        end
       end
 
       # The events after the checkpoint when it can be trusted; the whole
@@ -101,7 +102,7 @@ module Lyra
 
       # Serialise projection of one stream across workers (Lyra::AdvisoryLock).
       def lock_stream!(model_class, stream)
-        Lyra::AdvisoryLock.xact_lock(model_class.connection, stream, purpose: "ES-Async projection")
+        model_class.with_connection { |c| Lyra::AdvisoryLock.xact_lock(c, stream, purpose: "ES-Async projection") }
       end
 
       def load_event(event_id)

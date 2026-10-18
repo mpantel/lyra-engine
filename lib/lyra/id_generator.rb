@@ -76,7 +76,7 @@ module Lyra
       end
 
       def adapter_name(model_class)
-        model_class.connection.adapter_name
+        model_class.with_connection(&:adapter_name)
       end
 
       # PostgreSQL: Reserve next sequence value atomically
@@ -88,7 +88,7 @@ module Lyra
 
         if sequence
           # Reserve the next value from the sequence
-          result = model_class.connection.execute("SELECT nextval('#{sequence}')")
+          result = model_class.with_connection { |c| c.execute("SELECT nextval('#{sequence}')") }
           result.first["nextval"].to_i
         else
           # No sequence (maybe not a serial column), fall back to Hi-Lo
@@ -106,9 +106,9 @@ module Lyra
         cached = @sequence_mutex.synchronize { @sequence_names[key] }
         return cached if cached
 
-        result = model_class.connection.execute(
-          "SELECT pg_get_serial_sequence('#{table}', '#{pk}')"
-        )
+        result = model_class.with_connection do |c|
+          c.execute("SELECT pg_get_serial_sequence('#{table}', '#{pk}')")
+        end
         sequence = result.first&.values&.first
         @sequence_mutex.synchronize { @sequence_names[key] = sequence } if sequence
         sequence
@@ -119,9 +119,7 @@ module Lyra
         table = model_class.table_name
         pk = model_class.primary_key
 
-        result = model_class.connection.execute(
-          "SELECT MAX(#{pk}) as max_id FROM #{table}"
-        )
+        result = model_class.with_connection { |c| c.execute("SELECT MAX(#{pk}) as max_id FROM #{table}") }
         max_id = result.first&.fetch("max_id", 0) || 0
         max_id.to_i + 1
       rescue StandardError => e

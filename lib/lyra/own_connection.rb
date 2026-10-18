@@ -26,13 +26,19 @@ module Lyra
       # connection has a transaction open. Yields +inline+; returns the block's
       # value.
       def run(model_class = ActiveRecord::Base, &block)
-        connection = model_class.connection
-        return yield(false) unless connection.transaction_open?
-        return yield(true) if connection.pinned
+        where = model_class.with_connection do |connection|
+          next :here unless connection.transaction_open?
+
+          connection.pinned ? :inline : :own
+        end
+        return yield(false) if where == :here
+        return yield(true) if where == :inline
 
         pool = model_class.connection_pool
         begin
-          Thread.new { pool.with_connection { block.call(false) } }.value
+          # prevent_permanent_checkout: whatever the block leases is returned
+          # with the connection, not left to the thread when it ends.
+          Thread.new { pool.with_connection(prevent_permanent_checkout: true) { block.call(false) } }.value
         rescue ActiveRecord::ConnectionTimeoutError
           yield(true)
         end
