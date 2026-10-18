@@ -194,9 +194,11 @@ module Lyra
         verifier = CrudVerifier.new
         dirs = verifier.send(:find_workflows_dirs)
 
-        # Should include Lyra gem's app/workflows
-        lyra_dir = dirs.find { |d| d.include?("lyra") && d.include?("app/workflows") }
-        assert lyra_dir, "Should include Lyra gem's app/workflows directory"
+        # Should include Lyra's own app/workflows: the one under this
+        # checkout's root, whatever the checkout's directory is called.
+        expected = File.realpath(File.expand_path("../../app/workflows", __dir__))
+        assert_includes dirs.map { |d| File.realpath(d) }, expected,
+                        "Should include Lyra gem's app/workflows directory"
       end
 
       def test_find_workflow_class_finds_top_level_class
