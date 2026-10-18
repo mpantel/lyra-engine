@@ -425,8 +425,9 @@ Everything since 0.8.0, the version the PAM article describes.
   conditions, ordering, limits, loading hints and scopes made of hash conditions work as
   before. This found the Aegean benchmark's own cleanup, `where("email LIKE ?")` under
   ES-NoProj, silently matching every registration.
-- **RailsEventStore 3** — `lyra.gemspec` now requires `rails_event_store ~> 3.0` (3.1.0 in the
-  lockfile), on Ruby 4.0.7 and Rails 8.1.3.1. RES 3 moved the ActiveRecord repository to
+- **RailsEventStore 3** — `lyra.gemspec` now requires `rails_event_store ~> 3.0` (3.2.0 in the
+  lockfile), on Ruby 4.0.7 and Rails 8.1.4 (8.1.3.1 and RES 3.1.0 until 2026-10-19). RES 3 moved
+  the ActiveRecord repository to
   `RubyEventStore::ActiveRecord::EventRepository` and the event base class and errors to
   `RubyEventStore`; `Lyra::Event`, `Lyra::Aggregate` and the default client follow. Apps
   that build their own client must switch from `RailsEventStoreActiveRecord::EventRepository`.
