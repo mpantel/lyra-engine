@@ -198,7 +198,7 @@ with the Olist orders, the BPI 2017 loan application) are in the replication pac
 | Paper | Code | Data and replication material |
 |:------|:-----|:------------------------------|
 | *From ORM to OEM* (IEEE Software, 2026) | tag [`paperoem_final`](https://github.com/mpantel/lyra-engine/tree/paperoem_final), commit `b863d2e` (numbered 0.6.0, three commits after the [`v0.6.0`](https://github.com/mpantel/lyra-engine/tree/v0.6.0) release) | The benchmark run, its SQL statement trace, the per-trial values and 95% confidence intervals, and the harness as measured: [10.5281/zenodo.23648730](https://doi.org/10.5281/zenodo.23648730) |
-| *PAM* (Requirements Engineering, 2026) | tag [`v0.8.0`](https://github.com/mpantel/lyra-engine/tree/v0.8.0) (`pam_dsl` 0.8.0) | The policies, the testbed's models, tests and reports, the Solidus replication and the microbenchmark: [10.5281/zenodo.23649008](https://doi.org/10.5281/zenodo.23649008) |
+| *PAM* (Requirements Engineering, 2026) | tag [`v0.8.0`](https://github.com/mpantel/lyra-engine/tree/v0.8.0); `orfeas_pam_dsl` 0.8.0 on RubyGems | The policies, the testbed's models, tests and reports, the Solidus replication and the microbenchmark: [10.5281/zenodo.23649008](https://doi.org/10.5281/zenodo.23649008) |
 | *ORFEAS* (IEEE Transactions on Software Engineering, under review) | tag [`v0.9.0`](https://github.com/mpantel/lyra-engine/tree/v0.9.0); `orfeas_lyra` 0.9.0 on RubyGems | Replication package: [10.5281/zenodo.23646667](https://doi.org/10.5281/zenodo.23646667) (all versions: [10.5281/zenodo.17770613](https://doi.org/10.5281/zenodo.17770613)); benchmark results (CC BY-NC-SA 4.0): [10.5281/zenodo.23640846](https://doi.org/10.5281/zenodo.23640846) |
 
 ### Research Areas
