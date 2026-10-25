@@ -133,7 +133,7 @@ class ReferenceLinksTest < Minitest::Test
 
   # Rails' transactional tests pin one connection: every checkout returns it,
   # locked by the thread that waits for the catch-up, so a catch-up on a
-  # second connection waited forever (issue #37). It now runs in the caller's
+  # second connection waited forever. It now runs in the caller's
   # transaction, and the model counts as linked only once that commits.
   def test_a_catch_up_on_a_pinned_connection_runs_in_the_callers_transaction
     ReferenceLinks.reset!
@@ -158,7 +158,7 @@ class ReferenceLinksTest < Minitest::Test
 
   # A burst of first lookups, each inside a transaction, used to start one
   # catch-up per thread, each on a second connection, and at 64 threads the
-  # pool ran out (issue #37). One thread catches up; the others wait for it
+  # pool ran out. One thread catches up; the others wait for it
   # without a second connection, so with the test's own connection three
   # callers and the one catch-up fit a pool of five.
   def test_concurrent_first_lookups_catch_up_once

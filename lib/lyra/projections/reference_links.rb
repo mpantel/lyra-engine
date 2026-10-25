@@ -117,7 +117,7 @@ module Lyra
         #
         # One thread per model and process catches up; the others wait for it
         # without taking a connection, so a burst of first lookups needs one
-        # connection beyond the callers' own, not one each (issue #37).
+        # connection beyond the callers' own, not one each.
         def catch_up(model_class, force: false)
           model_class = owner(model_class)
           return 0 if !force && ready?(model_class)

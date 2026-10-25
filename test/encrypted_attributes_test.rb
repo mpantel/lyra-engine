@@ -2,7 +2,7 @@
 
 require "test_helper"
 
-# Active Record Encryption and the event log (issue #19): an encrypted
+# Active Record Encryption and the event log: an encrypted
 # attribute reaches the log as ciphertext, as it reaches the row, in every
 # mode; projections, rebuilds, DualView and ES-NoProj reads decrypt it like
 # Active Record does; events written before (plaintext) still read.

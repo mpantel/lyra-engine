@@ -2,7 +2,7 @@
 
 require "test_helper"
 
-# has_and_belongs_to_many links in every mode (#21). The join table has no
+# has_and_belongs_to_many links in every mode. The join table has no
 # model of its own, so its inserts and deletes went unrecorded: the log never
 # learnt that an item was given a tag. They are now AssociationLinked and
 # AssociationUnlinked events on the owner's stream, linked into the tag's.

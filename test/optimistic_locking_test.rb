@@ -2,7 +2,7 @@
 
 require "test_helper"
 
-# Optimistic locking (a lock_version column) in every mode (#20).
+# Optimistic locking (a lock_version column) in every mode.
 #
 # Active Record checks the column in the UPDATE or DELETE that writes the row
 # and raises ActiveRecord::StaleObjectError when another writer has moved it

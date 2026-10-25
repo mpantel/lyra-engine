@@ -3,7 +3,7 @@
 require "test_helper"
 
 # A thread that uses monitored models ends without holding a connection, in
-# every mode, as it does with plain ActiveRecord (#37).
+# every mode, as it does with plain ActiveRecord.
 #
 # Since Rails 7.2 a query outside with_connection checks a connection out and
 # returns it at once; only Model.connection (lease_connection) keeps one for

@@ -4,7 +4,7 @@ require "test_helper"
 
 # Single-table inheritance: one stream per row, named after the table's class
 # (Lyra.stream_name), whatever the record's concrete class, so readers given
-# the base class or a subclass find it (issue #16). Before, events went to the
+# the base class or a subclass find it. Before, events went to the
 # concrete class's stream and readers given the base class found none.
 class StiStreamsTest < Minitest::Test
   TABLE = "lyra_sti_items"

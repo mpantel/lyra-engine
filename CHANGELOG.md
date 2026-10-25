@@ -454,7 +454,7 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
-- **A thread that wrote through Lyra kept a database connection until it ended (mpantel/lyra#37).** Lyra
+- **A thread that wrote through Lyra kept a database connection until it ended.** Lyra
   called `Model.connection` (Rails' `lease_connection`) in its write, lock and read paths: the
   aggregate lock, the id generator, Genesis, ES-Async's job, ES-NoProj's cache and reference links,
   ES-Lazy's catch-up, and its maintenance calls (DualView, Rebuild, mode checks, erasure). Since
@@ -470,7 +470,7 @@ ignored like any unknown option.
   returns whatever its work leased. `test/connection_release_test.rb`: in every mode, a thread that
   writes and reads, bare or in `with_connection`, ends without a connection, and `lib/` has no
   `Model.connection` call left.
-- **Genesis and the reference-link catch-up assumed a second connection (#37).** Inside an open
+- **Genesis and the reference-link catch-up assumed a second connection.** Inside an open
   transaction both ran their work on a thread that checked out a connection of its own and waited
   for it. Under Rails' transactional tests the pool's connection is pinned, every checkout returns
   the caller's own, locked connection, and the wait never ended: the Aegean testbed suite in
@@ -491,7 +491,7 @@ ignored like any unknown option.
   association's links with the join table, `Rebuild` restores join tables from the events, and
   Genesis records the links pre-existing rows had. Under ES-NoProj, HABTM writes failed before
   reaching Lyra (`CachedRelation` lacked `where_values_hash`); they now work and read back
-  (`test/habtm_links_test.rb`, every mode; mpantel/lyra#21).
+  (`test/habtm_links_test.rb`, every mode).
 - **Optimistic locking: a stale update silently won under event sourcing.** Active Record checks
   `lock_version` in the UPDATE or DELETE that writes the row; ES-Sync, ES-Async, ES-NoProj and
   ES-Lazy skip that statement, so a stale `update` or `destroy` overwrote the newer write (a lost
@@ -503,7 +503,7 @@ ignored like any unknown option.
   model in every event-sourcing mode), and raise `ActiveRecord::StaleObjectError` as Active Record
   does (`Lyra::OptimisticLocking`). A record that expects a newer version than the log's passes,
   so streams written before the change keep working (`test/optimistic_locking_test.rb`, every
-  mode, concurrent writers included; mpantel/lyra#20).
+  mode, concurrent writers included).
 - **Encrypted attributes (Active Record `encrypts`) reached the event log in clear** while their
   row held ciphertext: events are built from attributes Active Record has already decrypted.
   `Lyra.append_events`, through which every event passes, now stores those attributes' values (in
@@ -511,7 +511,7 @@ ignored like any unknown option.
   (`Lyra::EncryptedAttributes`); projections, rebuilds and DualView decrypt them, and records
   instantiated from events are decrypted by Active Record. Events written before keep their clear
   values and still read; rows written from them are encrypted. No mode leaks the value, no value is
-  encrypted twice (`test/encrypted_attributes_test.rb`; mpantel/lyra#19).
+  encrypted twice (`test/encrypted_attributes_test.rb`).
 - **ES-Lazy stopped projecting after the event store was emptied or restored without its
   checkpoint table**: the checkpoint then lay past the newest event, and every new event looked
   applied. A checkpoint past the newest event is now recognised, warned about and reset (applying

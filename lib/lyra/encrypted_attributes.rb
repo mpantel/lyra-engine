@@ -5,7 +5,7 @@ module Lyra
   #
   # Events are built from a model's attributes and changes, which Active
   # Record has already decrypted, so an encrypted column reached the log in
-  # clear while its row held ciphertext (issue #19). Every event Lyra writes
+  # clear while its row held ciphertext. Every event Lyra writes
   # passes through Lyra.append_events, which seals it here: the values of the
   # model's encrypted attributes, in attributes and in changes ([old, new]),
   # are replaced by their ciphertext, as Active Record writes it to the row.

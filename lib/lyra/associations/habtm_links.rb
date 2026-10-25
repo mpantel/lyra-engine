@@ -2,7 +2,7 @@
 
 module Lyra
   module Associations
-    # Links and unlinks of has_and_belongs_to_many associations (#21).
+    # Links and unlinks of has_and_belongs_to_many associations.
     #
     # A HABTM join table has no model of its own: Active Record writes it
     # through an anonymous class (Item::HABTM_Tags), which no interceptor saw,
