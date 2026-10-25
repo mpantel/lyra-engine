@@ -10,7 +10,7 @@ Lyra 0.6.0, an Apple M4) is superseded: it predates the lock on the aggregate,
 the id reservation before a `Created` event, ES-Lazy and one process per mode,
 and its ES-NoProj figure was distorted by two harness defects (see CHANGELOG).
 Its headline, Hijack about 11% slower than the baseline and Monitor about 39%,
-should not be cited.
+is superseded by the figures below.
 
 ## Results
 
