@@ -4,7 +4,7 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-10
+## [0.9.0] - 2026-10-25
 
 ### Added
 - **Terminal-aware deadlock-freedom** — `PetriFlow.verify` and `Verification::LivenessChecker`

@@ -7,24 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-- **Documentation at 0.9.0** — `docs/PERFORMANCE.md` gives the 0.9.0 measurement (three runs, with
-  controls for PaperTrail and for the lock on the aggregate), the SQL statements per write under the
-  lock, and the published runs (https://doi.org/10.5281/zenodo.23640846); the install instructions
-  take the gems from RubyGems (`"~> 0.9"`); the case studies, benchmark harness and formal-model
-  scripts are referred to as the replication package (https://doi.org/10.5281/zenodo.17770613).
-  Comments no longer cite issue numbers. `lib/` changes in comments only.
-- **The Rakefile's testbed tasks** say where the testbed is when it is absent, and `stats:all`
-  skips it.
+## [0.9.0] - 2026-10-25
 
-### Fixed
-- **`trace_conformance_test.rb` on a fresh database** — the recorder took the commit of Lyra's own
-  checkpoint table, created on a connection of its own, for part of the write; it now records only
-  the write's connection. Test only.
-
-## [0.9.0] - 2026-10-14
-
-Everything since 0.8.0, the version the PAM article describes.
+Everything since 0.8.0, the version the PAM article describes. Released on 2026-10-25
+with its documentation, the replication package (https://doi.org/10.5281/zenodo.17770613) and the
+benchmark results (https://doi.org/10.5281/zenodo.23640846). The gems are built from tag `v0.9.0`
+(2026-10-19); the three entries marked *after the tag* are in the repository, not in the gems.
 
 ### Added
 - **`config.models` takes namespace patterns, `:all` and a denylist** (`Lyra::ModelSelection`):
@@ -359,6 +347,14 @@ Everything since 0.8.0, the version the PAM article describes.
   YAML serializer) was not affected. Found by replaying the BPI Challenge 2017 log
   (`examples/bpi2017_loan_app`), whose timestamps carry milliseconds.
 ### Changed
+- **Documentation** (*after the tag*) — `docs/PERFORMANCE.md` gives the 0.9.0 measurement (three runs, with
+  controls for PaperTrail and for the lock on the aggregate), the SQL statements per write under the
+  lock, and the published runs (https://doi.org/10.5281/zenodo.23640846); the install instructions
+  take the gems from RubyGems (`"~> 0.9"`); the case studies, benchmark harness and formal-model
+  scripts are referred to as the replication package (https://doi.org/10.5281/zenodo.17770613).
+  Comments no longer cite issue numbers; `lib/` changes in comments only.
+- **The Rakefile's testbed tasks** (*after the tag*) say where the testbed is when it is absent, and `stats:all`
+  skips it.
 - **ES-NoProj reads**: a stale cache entry is brought up to date from the events after its stamp
   instead of a full replay; cache entries have a process-local copy in front of the shared cache;
   an association's records are read when first needed, and a reference-link lookup intersects
@@ -469,6 +465,9 @@ ignored like any unknown option.
   write path always uses `Lyra::CommandHandler`.
 
 ### Fixed
+- **`trace_conformance_test.rb` on a fresh database** (*after the tag*) — the recorder took the commit of Lyra's own
+  checkpoint table, created on a connection of its own, for part of the write; it now records only
+  the write's connection. Test only.
 - **A thread that wrote through Lyra kept a database connection until it ended.** Lyra
   called `Model.connection` (Rails' `lease_connection`) in its write, lock and read paths: the
   aggregate lock, the id generator, Genesis, ES-Async's job, ES-NoProj's cache and reference links,

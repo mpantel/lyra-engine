@@ -4,7 +4,7 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
-## [0.9.0] - 2026-10-10
+## [0.9.0] - 2026-10-25
 
 ### Added
 - **`online_identifier` is a declarable field type** — the detector had a pattern by that name
