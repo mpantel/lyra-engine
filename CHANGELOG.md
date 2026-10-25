@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.0] - 2026-10-25
 
-Everything since 0.8.0, the version the PAM article describes. Released on 2026-10-25
-with its documentation, the replication package (https://doi.org/10.5281/zenodo.17770613) and the
-benchmark results (https://doi.org/10.5281/zenodo.23640846). The gems are built from tag `v0.9.0`
-(2026-10-19); the three entries marked *after the tag* are in the repository, not in the gems.
+Everything since 0.8.0, the version the PAM article describes.
+
+### Released
+- The gems on RubyGems (`orfeas_lyra`, `orfeas_petri_flow`, `orfeas_pam_dsl`), built from tag
+  `v0.9.0` (2026-10-19); the entries marked *after the tag* are not in them
+- The replication package: https://doi.org/10.5281/zenodo.17770613
+- The benchmark results: https://doi.org/10.5281/zenodo.23640846
 
 ### Added
 - **`config.models` takes namespace patterns, `:all` and a denylist** (`Lyra::ModelSelection`):
