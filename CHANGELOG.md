@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Documentation at 0.9.0** — `docs/PERFORMANCE.md` gives the 0.9.0 measurement (three runs, with
+  controls for PaperTrail and for the lock on the aggregate), the SQL statements per write under the
+  lock, and the published runs (https://doi.org/10.5281/zenodo.23640846); the install instructions
+  take the gems from RubyGems (`"~> 0.9"`); the case studies, benchmark harness and formal-model
+  scripts are referred to as the replication package (https://doi.org/10.5281/zenodo.17770613).
+  Comments no longer cite issue numbers. `lib/` changes in comments only.
+- **The Rakefile's testbed tasks** say where the testbed is when it is absent, and `stats:all`
+  skips it.
+
+### Fixed
+- **`trace_conformance_test.rb` on a fresh database** — the recorder took the commit of Lyra's own
+  checkpoint table, created on a connection of its own, for part of the write; it now records only
+  the write's connection. Test only.
+
 ## [0.9.0] - 2026-10-14
 
 Everything since 0.8.0, the version the PAM article describes.
