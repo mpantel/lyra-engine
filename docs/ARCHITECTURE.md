@@ -1061,9 +1061,8 @@ end
 ## Performance Considerations
 
 The measured overhead of each configuration is in
-[PERFORMANCE.md](PERFORMANCE.md). Monitor costs more throughput than Hijack
-there, for reasons explained in that document; the July 2026 baseline is being
-re-measured.
+[PERFORMANCE.md](PERFORMANCE.md), measured on Lyra 0.9.0. Monitor costs more
+throughput than Hijack there, for reasons explained in that document.
 
 ### Monitor Mode
 - The event is appended in the write's own transaction, in a savepoint; there
@@ -1082,8 +1081,8 @@ re-measured.
   trades read-after-write consistency for a cheaper write
 - **ES-NoProj**: the slowest way to read; cost grows with the log (on the
   1,000-order Olist replay through Solidus it ran about 3x slower than
-  Monitor, slowing as the log grew). Its published benchmark figure was
-  inflated by a since-fixed harness defect and is being re-measured
+  Monitor, slowing as the log grew); on the Aegean testbed it costs about 52%
+  against plain ActiveRecord ([PERFORMANCE.md](PERFORMANCE.md))
 - **ES-Lazy**: write cost as ES-NoProj; a read pays only for the events since
   the last read. It runs Solidus at about half ES-Sync's throughput
 
