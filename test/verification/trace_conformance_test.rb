@@ -87,7 +87,14 @@ module TraceConformance
           super.tap { Recorder.record(:publish) }
         end
       end)
+      # Only the statements of the write's own connection. Lyra creates its own
+      # tables on first use on a separate, short-lived connection when a
+      # transaction is open (Lyra.create_own_table), and that connection's
+      # COMMIT is reported on the same thread: on a fresh database the first
+      # ES-Async job would otherwise show a commit that is not the job's.
       ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+        next unless payload[:connection].equal?(ActiveRecord::Base.connection_pool.active_connection)
+
         sql = payload[:sql].to_s
         if sql.match?(/nextval/i)
           Recorder.record(:reserve)
