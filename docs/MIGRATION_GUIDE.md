@@ -178,7 +178,8 @@ end
 ```
 
 Real initializers: `examples/aegean_epay_testbed/config/initializers/lyra.rb`
-and `examples/solidus_case_study/config/initializers/lyra.rb`.
+and `examples/solidus_case_study/config/initializers/lyra.rb`, in
+the replication package (https://doi.org/10.5281/zenodo.17770613).
 
 **4. Choose the models.** Either in each model:
 
@@ -698,7 +699,7 @@ when you accept that the stores may disagree.
   privacy features.
 - Where you can, replay a real workload and compare the end state with an
   oracle computed from the source data, as `examples/bpi2017_loan_app` and
-  `examples/solidus_case_study/lib/olist` do. DualView compares two views from
+  `examples/solidus_case_study/lib/olist` in the replication package do. DualView compares two views from
   the same system; an oracle also catches writes that never reached the
   database.
 

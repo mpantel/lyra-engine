@@ -241,7 +241,7 @@ results[:boundedness][:is_safe]
 
 ### Use Cases
 
-Each evaluation application in the monorepo exercises Lyra on a different
+Each evaluation application (in the replication package (https://doi.org/10.5281/zenodo.17770613)) exercises Lyra on a different
 domain: a university payment system (the Aegean e-Pay testbed), a
 loan-application process (the BPI Challenge 2017 replay), and an e-commerce
 platform (the Solidus case study with the Olist orders). Typical uses:
@@ -1006,7 +1006,7 @@ created on first use and need no migration.
 
 ### Application Tables (Example: Aegean E-Pay Testbed)
 
-See `examples/aegean_epay_testbed/db/migrate/*` for complete schema.
+See `examples/aegean_epay_testbed/db/migrate/*` in the replication package (https://doi.org/10.5281/zenodo.17770613) for the complete schema.
 
 ## Extensibility Points
 
@@ -1278,9 +1278,6 @@ Publications:
 
 1. Pantelelis, M., & Kalloniatis, C. (2022). "Mapping CRUD to Events: Towards an object to event-sourcing framework". *PCI 2022*. DOI: [10.1145/3575879.3576006](https://doi.org/10.1145/3575879.3576006)
 2. Pantelelis, M., & Kalloniatis, C. (2024). "Create, Read, Update, Delete: Implications on Security and Privacy Principles regarding GDPR". *ARES 2024*. DOI: [10.1145/3664476.3670898](https://doi.org/10.1145/3664476.3670898)
-
-The sources of the other papers, the thesis and the proposal are in the
-monorepo's `papers/` directory.
 
 ### Citation
 

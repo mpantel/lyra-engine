@@ -1,5 +1,5 @@
 # PostgreSQL container for Lyra testing and benchmarks
-# Used by: test/dummy, examples/aegean_epay_testbed, examples/blog_app
+# Used by: test/dummy, examples/blog_app, and the case studies of the replication package
 #
 # Usage:
 #   rake docker:start   # Start PostgreSQL container
@@ -12,7 +12,7 @@ services:
     # (16.11). The floating 16-alpine tag drifts: it resolved to 16.14 in
     # September 2026, which would make later runs incomparable with those.
     # LYRA_PG_IMAGE picks another exact tag for a new baseline (e.g.
-    # LYRA_PG_IMAGE=18.6-alpine); bin/run_benchmarks records the image used.
+    # LYRA_PG_IMAGE=18.6-alpine); the benchmark harness records the image used.
     image: postgres:${LYRA_PG_IMAGE:-16.11-alpine}
     container_name: lyra_postgres
     # Raise max_connections above Postgres's default of 100. The concurrent

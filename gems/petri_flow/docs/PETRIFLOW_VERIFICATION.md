@@ -16,9 +16,9 @@ PetriFlow.
 
 ## Prerequisites
 
-The two verification scripts live in the Lyra monorepo under papers/papertse
-(they are not part of the public lyra-engine repository). Run them from that
-directory: `formal_crud_to_event_model.rb` writes its DOT files to `figures/`
+The two verification scripts are in the replication package (https://doi.org/10.5281/zenodo.17770613),
+under `source/formal_model/` (they are not part of the lyra-engine
+repository). Run them from `source/`: `formal_crud_to_event_model.rb` writes its DOT files to `figures/`
 relative to the current directory.
 
 ```bash
@@ -33,7 +33,7 @@ bundle install  # Ensures PetriFlow gem is available
 Run the formal CPN model verification:
 
 ```bash
-cd papers/papertse && ruby formal_crud_to_event_model.rb
+cd source && ruby formal_model/formal_crud_to_event_model.rb
 ```
 
 This script:
@@ -93,7 +93,7 @@ Properties Verified:
 Run the correspondence verification:
 
 ```bash
-cd papers/papertse && ruby verify_model_correspondence.rb
+cd source && ruby formal_model/verify_model_correspondence.rb
 ```
 
 This script:
@@ -312,15 +312,15 @@ This correctly handles fork patterns where multiple places have tokens simultane
 
 ## Integration with Lyra Tests
 
-The verification scripts could be wired into the monorepo's test suite (no such
-test exists today). A sketch, running each script from papers/papertse:
+The verification scripts could be wired into a test suite (no such test exists
+today). A sketch, for the replication package's layout:
 
 ```ruby
 # test/verification/petriflow_verification_test.rb (sketch)
 require 'test_helper'
 
 class PetriFlowVerificationTest < ActiveSupport::TestCase
-  PAPER_DIR = File.expand_path("../../papers/papertse", __dir__)
+  PAPER_DIR = File.expand_path("../../formal_model", __dir__)
 
   test "formal model verifies successfully" do
     output = Dir.chdir(PAPER_DIR) { `ruby formal_crud_to_event_model.rb` }
@@ -338,4 +338,4 @@ end
 
 - [PetriFlow Gem](../README.md)
 - [Theoretical Model: Colored Petri Nets](THEORETICAL_MODEL_PETRI_NETS.md)
-- IEEE TSE paper, papers/papertse/orfeas_tse.tex in the Lyra monorepo - Section 3: Formal Model
+- The ORFEAS manuscript (IEEE Transactions on Software Engineering, under review), Section III: the formal model

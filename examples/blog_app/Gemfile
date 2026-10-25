@@ -12,10 +12,10 @@ gem "orfeas_petri_flow", path: "../../gems/petri_flow", require: "petri_flow"
 gem "rexml" # petri_flow needs it but does not declare it (not a default gem since Ruby 3.4)
 
 # Lyra, from this checkout (the gem is orfeas_lyra, its entry file lyra.rb).
-# glob: in the monorepo ../.. also holds lyra-engine/, a checkout of the
-# public engine repository with its own lyra.gemspec. Bundler's default
-# search ({,*,*/*}.gemspec) evaluates both, loading two lib/lyra/version.rb
-# files ("already initialized constant Lyra::VERSION"). Only the root's.
+# glob: ../.. may also hold another checkout of the engine with a
+# lyra.gemspec of its own. Bundler's default search ({,*,*/*}.gemspec) would
+# evaluate both, loading two lib/lyra/version.rb files ("already initialized
+# constant Lyra::VERSION"). Only the root's.
 gem "orfeas_lyra", path: "../..", glob: "lyra.gemspec", require: "lyra"
 
 # RailsEventStore 3 stores Lyra's events.

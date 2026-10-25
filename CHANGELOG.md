@@ -589,8 +589,8 @@ ignored like any unknown option.
   are now the same whether one mode or all are generated (`monitor_mode_workflow.rb` defines
   `MonitorModeWorkflow`, `es_sync_mode_workflow.rb` `EsSyncModeWorkflow`;
   `WorkflowGenerator.workflow_file_basename(mode)`, `.workflow_class_name(mode)`).
-- **`already initialized constant Lyra::VERSION` in the monorepo** — Bundler's default gemspec
-  search also loaded the nested `lyra-engine/` checkout's `lyra.gemspec`. The root `Gemfile`
+- **`already initialized constant Lyra::VERSION` in a checkout holding a nested copy of the
+  engine** — Bundler's default gemspec search also loaded the nested copy's `lyra.gemspec`. The root `Gemfile`
   uses `gemspec glob: "lyra.gemspec"`, and the example apps' Gemfiles `glob: "lyra.gemspec"`.
 - **Hijack and event-sourcing events lost who wrote them** — the command handler wrote only
   the causal chain, so `user_id`, `request_id`, the user action and `config.metadata_proc`
@@ -651,11 +651,11 @@ ignored like any unknown option.
   (`CachedRelationDelivery`), as are the class-level `find`, `find_by` and `find_by!`.
 - **The all-modes runner skipped ES-Lazy** — `lyra:test:all_modes` and the PAM-less run now cover
   all seven configurations.
-- **Lyra's rake tasks ran twice, and host apps got the monorepo's maintenance tasks** — Rails
+- **Lyra's rake tasks ran twice, and host apps got the development checkout's maintenance tasks** — Rails
   loads every `lib/tasks/*.rake` under an engine's root, and the engine also loaded its three
   task files explicitly, so each `lyra:mode:*`, `lyra:projections:*` and `lyra:schema:*` task
   ran twice (`lyra:mode:check` ran its full check twice), and `gems:*`, `public:*`, `stats:*` and
-  the other monorepo tasks appeared in every host app. The engine now loads `lyra_*.rake` only,
+  the other maintenance tasks appeared in every host app. The engine now loads `lyra_*.rake` only,
   once.
 - **`lyra:mode:check` could certify a switch having checked nothing** — monitored models register
   as their classes load, which a rake task in development does not do, so the check saw no

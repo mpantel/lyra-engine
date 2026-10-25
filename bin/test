@@ -6,7 +6,7 @@ require "bundler/setup"
 exit_code = 0
 
 puts "=" * 80
-puts "Lyra Monorepo Test Suite"
+puts "Lyra Test Suite"
 puts "=" * 80
 
 # Component test runners

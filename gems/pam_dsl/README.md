@@ -20,7 +20,7 @@ The gem is published as `orfeas_pam_dsl`; the library it loads is `pam_dsl`. Add
 ```ruby
 gem 'orfeas_pam_dsl', require: 'pam_dsl'
 
-# Inside the Lyra monorepo
+# From a checkout of lyra-engine
 gem 'orfeas_pam_dsl', path: 'gems/pam_dsl', require: 'pam_dsl'
 ```
 

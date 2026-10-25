@@ -447,7 +447,7 @@ module Lyra
     # Aegean ePay benchmark this turned
     # `Registration.where(id: created_ids).delete_all` into a bare
     # `DELETE FROM "registrations"`, wiping the whole table (see
-    # examples/aegean_epay_testbed/perf/run_concurrent_benchmark.rb's
+    # the replication package's examples/aegean_epay_testbed/perf/run_concurrent_benchmark.rb's
     # per-thread cleanup) and starving the next mode of the rows it expected
     # to read.
     def test_delete_all_on_filtered_relation_only_deletes_matching_records

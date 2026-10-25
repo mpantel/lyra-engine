@@ -57,6 +57,9 @@ task default: :test
 # Shared constants
 # =============================================================================
 TESTBED_DIR = File.expand_path("examples/aegean_epay_testbed", __dir__)
+# The testbed is in the replication package, not in the lyra-engine repository.
+TESTBED_MISSING = "The Aegean testbed is not in this checkout; it is in the replication package " \
+                  "(https://doi.org/10.5281/zenodo.17770613)."
 
 # =============================================================================
 # Benchmark tasks
@@ -68,6 +71,8 @@ namespace :benchmark do
     # Collect all arguments after the task name
     # Usage: rake benchmark:modes -- --scales=1000,5000 --modes=disabled,monitor
     args = ARGV.drop_while { |a| a != "--" }.drop(1).join(" ")
+
+    abort TESTBED_MISSING unless File.directory?(TESTBED_DIR)
 
     Dir.chdir(TESTBED_DIR) do
       # Use bundle exec with testbed's Gemfile to ensure correct dependencies
@@ -300,8 +305,10 @@ namespace :stats do
     results[:petri_flow] = analyze_directory("gems/petri_flow/lib", "gems/petri_flow/test", "PetriFlow")
 
     # Aegean E-Pay Testbed
-    puts "Analyzing Aegean E-Pay Testbed..."
-    results[:testbed] = analyze_rails_app("examples/aegean_epay_testbed", "Aegean E-Pay Testbed")
+    if File.directory?(TESTBED_DIR)
+      puts "Analyzing Aegean E-Pay Testbed..."
+      results[:testbed] = analyze_rails_app("examples/aegean_epay_testbed", "Aegean E-Pay Testbed")
+    end
 
     puts ""
 
@@ -337,6 +344,7 @@ namespace :stats do
 
   desc "Generate statistics for Aegean E-Pay Testbed"
   task :testbed do
+    abort TESTBED_MISSING unless File.directory?(TESTBED_DIR)
     result = analyze_rails_app("examples/aegean_epay_testbed", "Aegean E-Pay Testbed")
     print_component_report(result)
   end
@@ -538,7 +546,7 @@ namespace :stats do
     require "json"
     require "fileutils"
 
-    report_dir = "examples/aegean_epay_testbed/reports"
+    report_dir = File.directory?(TESTBED_DIR) ? "examples/aegean_epay_testbed/reports" : "tmp/stats"
     FileUtils.mkdir_p(report_dir)
 
     timestamp = Time.now.strftime("%Y%m%d_%H%M%S")

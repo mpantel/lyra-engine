@@ -1,4 +1,4 @@
-# Testing Guide for the Lyra Monorepo
+# Testing Guide for Lyra
 
 This document describes how to run the test suites of Lyra and its component
 gems, and of the example applications that exercise Lyra end to end.
@@ -22,8 +22,9 @@ root bundle.
 
 The example applications have their own suites: the Aegean e-Pay testbed and
 the BPI 2017 loan application (Minitest), and the Solidus case study (RSpec).
-They, `lib/tasks/testbed.rake` and the tasks it defines exist only in the
-monorepo, not in the public `lyra-engine` repository.
+They, `lib/tasks/testbed.rake` and the tasks it defines are in
+the replication package (https://doi.org/10.5281/zenodo.17770613),
+not in the `lyra-engine` repository.
 
 ## Prerequisites: PostgreSQL
 
@@ -82,7 +83,7 @@ PAM DSL is optional. `LYRA_DISABLE_PAM_DSL=true` loads Lyra without it:
 
 ```bash
 LYRA_DISABLE_PAM_DSL=true bundle exec rake test
-bundle exec rake test:without_pam_dsl   # monorepo only: the same run, with a pass/fail summary
+bundle exec rake test:without_pam_dsl   # replication package only: the same run, with a pass/fail summary
 ```
 
 ### Lyra without PetriFlow
@@ -139,7 +140,7 @@ engine's own tests do not read them: each test sets the mode it needs
 `test/multi_mode_test.rb` and `test/integration/multi_mode_integration_test.rb`
 switch between configurations themselves.
 
-### Multi-configuration tasks (monorepo only)
+### Multi-configuration tasks (replication package only)
 
 These tasks are defined in `lib/tasks/testbed.rake` (root) and
 `examples/aegean_epay_testbed/lib/tasks/lyra_test.rake` (testbed).
@@ -167,7 +168,7 @@ failed. It exits non-zero if any configuration failed.
 The testbed runs against the same PostgreSQL container (port 5433); start it
 with `bundle exec rake docker:start` first.
 
-## Example application suites (monorepo only)
+## Example application suites (replication package only)
 
 **BPI 2017 loan application** (`examples/bpi2017_loan_app`, 31 tests). Its
 database is PostgreSQL on port 5435 (`config/database.yml`):

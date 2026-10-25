@@ -3,7 +3,7 @@ source "https://rubygems.org"
 # Specify your gem's dependencies in lyra.gemspec
 gemspec
 
-# Local gems in monorepo (orfeas_ prefix for RubyGems publication)
+# The companion gems, from this checkout (orfeas_ prefix on RubyGems)
 gem "orfeas_pam_dsl", path: "gems/pam_dsl"
 gem "orfeas_petri_flow", path: "gems/petri_flow"
 
