@@ -51,8 +51,8 @@ bundle exec rake test:all   # Lyra, then PAM DSL, then PetriFlow
 bin/test                    # PetriFlow, PAM DSL, then Lyra; exits non-zero if any fails
 ```
 
-At the time of writing the engine suite has 1168 tests, PAM DSL 448 and
-PetriFlow 407.
+At Lyra 0.9.0 the engine suite has 1358 tests, PAM DSL 448 and PetriFlow
+407.
 
 ### One gem
 

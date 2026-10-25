@@ -20,7 +20,7 @@ covered by [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md), and every option by
 ## 1. Install
 
 The gems are named `orfeas_*`, and their entry files are not, so name the
-file to require. From a checkout of the repository:
+file to require. From RubyGems:
 
 ```ruby
 # Gemfile
@@ -29,15 +29,15 @@ gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional, privacy
 gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional, verification
 ```
 
-or the engine straight from GitHub:
+or the engine straight from GitHub, for changes made since the release:
 
 ```ruby
 gem "orfeas_lyra", git: "https://github.com/mpantel/lyra-engine", branch: "main", require: "lyra"
 ```
 
-The `orfeas_*` 0.6.0 releases on rubygems.org date from January 2026 and
-predate this guide (no RailsEventStore 3, Genesis or repair); use the
-repository.
+The 0.9.0 releases on rubygems.org are built from tag `v0.9.0` of
+https://github.com/mpantel/lyra-engine. The earlier 0.6.0 releases (January
+2026) predate this guide (no RailsEventStore 3, Genesis or repair).
 
 Then install, and create the event store tables with the RailsEventStore 3
 generator:

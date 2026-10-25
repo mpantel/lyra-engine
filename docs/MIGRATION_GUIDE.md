@@ -143,9 +143,9 @@ file to require:
 
 ```ruby
 # Gemfile
-gem "orfeas_lyra", path: "path/to/lyra", require: "lyra"
-gem "orfeas_pam_dsl", path: "path/to/lyra/gems/pam_dsl", require: "pam_dsl"          # optional
-gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"  # optional
+gem "orfeas_lyra", "~> 0.9", require: "lyra"
+gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional
+gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional
 ```
 
 **2. Create the event store tables** with the RailsEventStore 3 generator:

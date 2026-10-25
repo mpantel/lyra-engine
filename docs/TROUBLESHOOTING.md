@@ -59,13 +59,13 @@ and finds none.
 **Fix**: Name the file to require in the Gemfile:
 
 ```ruby
-gem "orfeas_lyra", path: "path/to/lyra", require: "lyra"
-gem "orfeas_pam_dsl", path: "path/to/lyra/gems/pam_dsl", require: "pam_dsl"          # optional
-gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"  # optional
+gem "orfeas_lyra", "~> 0.9", require: "lyra"
+gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional
+gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional
 ```
 
 See [GETTING_STARTED.md](GETTING_STARTED.md#1-install) for installing from
-GitHub, and why not to use the 0.6.0 releases on rubygems.org.
+RubyGems or GitHub; use 0.9.0 or later, not the 0.6.0 releases.
 
 ### `NameError: uninitialized constant PetriFlow::Workflow` when eager loading
 

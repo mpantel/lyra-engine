@@ -54,7 +54,7 @@ For the CRUD-to-event mapping check that runs the full set of nets, see
 
 ```ruby
 # Gemfile
-gem "orfeas_petri_flow", path: "path/to/lyra/gems/petri_flow", require: "petri_flow"
+gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"
 ```
 
 2. **A Rails application that loads Lyra.** The rake tasks depend on
