@@ -84,6 +84,15 @@ module Lyra
         after_update :lyra_intercept_update, if: :lyra_events_enabled?
         after_destroy :lyra_intercept_destroy, if: :lyra_events_enabled?
 
+        # Every event-producing write runs in a write scope
+        # (config.correlate_writes): its event id is fixed before any of its
+        # callbacks, so the writes they make record it as their cause, and the
+        # outermost write opens the correlation when none is in scope. First
+        # in each chain, so it wraps the model's own callbacks, whatever order
+        # the model declares them in.
+        around_save :lyra_write_scope, if: :lyra_events_enabled?, prepend: true
+        around_destroy :lyra_write_scope, if: :lyra_events_enabled?, prepend: true
+
         # Hijack and event-sourcing modes build their event in WriteHooks, after
         # every before_* callback and just before the row write (see below).
         # Only PaperTrail is switched off here, first, so that its own
@@ -147,12 +156,42 @@ module Lyra
           user_id: lyra_current_user_id,
           request_id: lyra_current_request_id,
           correlation_id: Lyra::Correlation.current_id,
-          causation_id: Lyra::Causation.current_id,
+          # Inside its own write scope the current cause is this write itself;
+          # its own cause is the one in scope when the write began.
+          causation_id: @lyra_in_write_scope ? @lyra_write_cause_id : Lyra::Causation.current_id,
           action_id: lyra_current_action_id,
           user_action: lyra_current_user_action
         }
 
         base_metadata.merge(lyra_custom_metadata(operation))
+      end
+
+      # The event id fixed for this write by its write scope, for the write's
+      # own event: given once, so no two events can share it; nil outside a
+      # scope or once taken (the store then assigns one).
+      def lyra_take_own_event_id
+        return nil unless @lyra_in_write_scope && !@lyra_write_event_id_taken
+
+        @lyra_write_event_id_taken = true
+        @lyra_write_event_id
+      end
+
+      # around_save/around_destroy (see the callbacks above). Nested scopes of
+      # the same record (a save inside its own callbacks) restore the outer
+      # one on the way out.
+      def lyra_write_scope
+        return yield unless Lyra.config.correlate_writes
+
+        outer = [@lyra_in_write_scope, @lyra_write_event_id, @lyra_write_cause_id, @lyra_write_event_id_taken]
+        @lyra_write_cause_id = Lyra::Causation.current_id
+        @lyra_write_event_id = SecureRandom.uuid
+        @lyra_write_event_id_taken = false
+        @lyra_in_write_scope = true
+        Lyra::Correlation.with_id(Lyra::Correlation.current_id || @lyra_write_event_id) do
+          Lyra::Causation.with_id(@lyra_write_event_id) { yield }
+        end
+      ensure
+        @lyra_in_write_scope, @lyra_write_event_id, @lyra_write_cause_id, @lyra_write_event_id_taken = outer if outer
       end
 
       class_methods do
@@ -808,7 +847,8 @@ module Lyra
         events = Lyra::DomainEvents.build(
           self.class, operation, data: data, metadata: metadata,
           default_class: lyra_event_class_for(operation),
-          record: self, changes: operation == :destroyed ? {} : previous_changes
+          record: self, changes: operation == :destroyed ? {} : previous_changes,
+          event_id: lyra_take_own_event_id
         )
 
         Lyra.append_events(events, stream_name: lyra_stream_name)

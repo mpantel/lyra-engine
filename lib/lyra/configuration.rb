@@ -33,6 +33,12 @@ module Lyra
     # (default) follows mode_transition_gate; true; false. Checked at most
     # every mode_sync_interval seconds.
     attr_accessor :mode_sync, :mode_sync_interval
+    # Group writes into causal chains (Lyra::Correlation): the writes of one
+    # HTTP request share a correlation (the request id); a write made inside
+    # another write's callbacks records that write's event as its cause; the
+    # outermost write opens the correlation when none is in scope. On by
+    # default; false leaves both to the application's own with_id calls.
+    attr_accessor :correlate_writes
     # Stamp each event's metadata with the privacy annotation of the personal
     # data it carries (Lyra::Privacy.stamp). Off by default: it adds work to
     # every write, measured separately.
@@ -110,6 +116,7 @@ module Lyra
       @dual_view_discrepancy_handler = nil
       @mode_sync = nil
       @mode_sync_interval = 5
+      @correlate_writes = true
       @annotate_privacy = false
       @record_access_events = false
       @access_metadata_proc = nil

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Writes are grouped into causal chains by default** (`config.correlate_writes`, on). Before,
+  Lyra carried correlation and causation only where the application called
+  `Lyra::Correlation.with_id`/`Lyra::Causation.with_id`, which no example did: every event was its
+  own chain. Now:
+  - every event-producing write runs in a write scope (`around_save`/`around_destroy`, first in
+    the chain) that fixes its event id before its callbacks run, so a write made inside them
+    records that event as its `causation_id`; a record saving itself inside its own callbacks is
+    caused by the outer save;
+  - the outermost write opens the correlation when none is in scope, its own event id, as the
+    event store does for a root event;
+  - `Lyra::Correlation::Middleware`, installed by the engine, gives the writes of one HTTP request
+    one correlation, the request id; a correlation already in scope is kept;
+  - `Lyra::Correlation::Job`, included into `ActiveJob::Base` by the engine, gives the writes of
+    one job the correlation in scope where the job was created, or the job id without one, and a
+    write in scope there as their cause. Both are taken when the job is created, so a job deferred
+    to after the commit (`enqueue_after_transaction_commit`) keeps them, and travel in its payload
+    (`lyra_correlation_id`, `lyra_causation_id`), so a retry does too. A job created inside a
+    transaction and sent at once (the Rails default) could outlive a rollback of its cause; its
+    cause is kept when it runs only if that event is in the log, so no job names a cause the log
+    lacks (one that runs before the enqueuing transaction commits loses the link).
+  Monitor, Hijack and event-sourcing events alike (`DomainEvents.build` takes the pre-assigned
+  `event_id:`, given once per write). The Olist replay runs each step as one request would
+  (`test/write_correlation_test.rb`).
+
+### Fixed
+- **`AsyncProjectionJob` warns again when its event is not in the log.** The warning sat in a
+  rescue of `RubyEventStore::EventNotFound`, which `read.event` never raises (it returns nil;
+  `read.event!` raises), so it was never logged. The job still did nothing for a missing event.
+
 ## [0.9.0] - 2026-10-25
 
 Everything since 0.8.0, the version the PAM article describes.

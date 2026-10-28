@@ -84,6 +84,14 @@ module Lyra
         end
       end
 
+      # Lyra::Correlation::Middleware and Lyra::Correlation::Job: the writes of
+      # one request share a correlation, and a job's writes the one in scope
+      # where it was created (config.correlate_writes).
+      initializer "lyra.request_correlation" do |app|
+        app.config.middleware.use Lyra::Correlation::Middleware
+        ActiveSupport.on_load(:active_job) { include Lyra::Correlation::Job }
+      end
+
       # config.verify_mapping!: verify at boot, once the models are
       # instrumented; a failure stops the boot.
       initializer "lyra.verify_mapping", after: "lyra.apply_declared_models" do

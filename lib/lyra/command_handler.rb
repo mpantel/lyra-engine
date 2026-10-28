@@ -139,9 +139,13 @@ module Lyra
     # domain events (Lyra::DomainEvents).
     def create_events(operation, id, data)
       own = create_event(operation, id, data)
+      record = command.record
       Lyra::DomainEvents.build(
         command.model_class, operation, data: own.data, metadata: own.metadata.to_h,
-        default_class: own.class, record: command.record, changes: changes_for(operation, data)
+        default_class: own.class, record: record, changes: changes_for(operation, data),
+        # The id the record's write scope fixed, so the writes its callbacks
+        # made can name this event as their cause.
+        event_id: record.respond_to?(:lyra_take_own_event_id) ? record.lyra_take_own_event_id : nil
       )
     end
 

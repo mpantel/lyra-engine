@@ -89,16 +89,20 @@ module Lyra
       #
       # @param default_class [Class] the CRUD event class for the operation
       # @param data [Hash] the event envelope; metadata [Hash] its metadata
-      def build(model_class, operation, data:, metadata:, default_class:, record:, changes:)
+      # @param event_id [String, nil] the write's own event id when its write
+      #   scope fixed one (CrudInterceptor#lyra_write_scope); nil lets the
+      #   store assign one
+      def build(model_class, operation, data:, metadata:, default_class:, record:, changes:, event_id: nil)
+        id = event_id ? { event_id: event_id } : {}
         rules = rules_for(model_class)
-        return [default_class.new(data: data, metadata: metadata)] if rules.empty? || record.nil?
+        return [default_class.new(**id, data: data, metadata: metadata)] if rules.empty? || record.nil?
 
         changes = normalize_changes(changes)
         matching = rules.select { |rule| rule.applies?(operation, record, changes) }
         own_rule = matching.find { |rule| !rule.also }
 
         own = event_class_for(own_rule, default_class).new(
-          data: with_payload(data, own_rule, record, changes), metadata: metadata
+          **id, data: with_payload(data, own_rule, record, changes), metadata: metadata
         )
         extras = matching.select(&:also).map do |rule|
           event_class_for(rule, nil).new(
