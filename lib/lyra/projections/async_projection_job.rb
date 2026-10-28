@@ -105,11 +105,12 @@ module Lyra
         model_class.with_connection { |c| Lyra::AdvisoryLock.xact_lock(c, stream, purpose: "ES-Async projection") }
       end
 
+      # read.event returns nil for a missing event (read.event! raises): the
+      # warning sat in a rescue of EventNotFound and was never logged.
       def load_event(event_id)
-        Lyra.config.event_store.read.event(event_id)
-      rescue RubyEventStore::EventNotFound
-        Rails.logger.warn("Lyra::AsyncProjectionJob: Event #{event_id} not found")
-        nil
+        event = Lyra.config.event_store.read.event(event_id)
+        Rails.logger.warn("Lyra::AsyncProjectionJob: Event #{event_id} not found") unless event
+        event
       end
     end
   end

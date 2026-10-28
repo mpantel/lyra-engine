@@ -41,6 +41,14 @@ module Lyra
         end
         assert_no_enqueued_jobs only: AsyncProjectionJob
       end
+
+      test "warns and does nothing when its event is not in the log" do
+        log = StringIO.new
+        Rails.logger.stub(:warn, ->(message) { log.puts(message) }) do
+          assert_nil AsyncProjectionJob.perform_now(SecureRandom.uuid, "Article", "create")
+        end
+        assert_match(/Lyra::AsyncProjectionJob: Event \S+ not found/, log.string)
+      end
     end
   end
 end
