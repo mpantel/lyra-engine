@@ -22,10 +22,11 @@
   .lyra-discrepancies .comparison-col h4 { margin: 0 0 10px 0; font-size: 14px; color: #495057; }
   .lyra-discrepancies .comparison-col .source-label { font-size: 12px; color: #6c757d; margin-bottom: 5px; }
   .lyra-discrepancies .field-list { list-style: none; padding: 0; margin: 0; }
-  .lyra-discrepancies .field-list li { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; }
+  .lyra-discrepancies .field-list li { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; gap: 10px; }
   .lyra-discrepancies .field-list li:last-child { border-bottom: none; }
   .lyra-discrepancies .field-name { font-weight: 500; color: #1a1a2e; }
-  .lyra-discrepancies .field-value { color: #495057; font-family: monospace; font-size: 13px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+  .lyra-discrepancies .field-value { color: #495057; font-family: monospace; font-size: 13px; max-width: 70%; overflow-wrap: anywhere; text-align: right; }
+  .lyra-discrepancies .existence-note { margin: 0 0 15px 0; color: #495057; font-size: 14px; }
   .lyra-discrepancies .field-mismatch { background: #fff3cd; padding: 2px 6px; border-radius: 3px; }
   .lyra-discrepancies .empty-state { text-align: center; padding: 60px 40px; color: #6c757d; background: #d4edda; border: 1px solid #28a745; border-radius: 8px; }
   .lyra-discrepancies .empty-state h3 { color: #155724; margin-bottom: 10px; }
@@ -45,9 +46,14 @@
     Overview of data consistency between the database and event store.
   </p>
   <%
-    total_records = @discrepancies.count
-    mismatches = @discrepancies.count { |d| d[:status] == :mismatch || d[:differences]&.any? }
+    # DualView.find_discrepancies returns only the records that differ, each
+    # a DualView#compare result: differences maps a field to
+    # { crud:, event_sourced: }, or is { exists_mismatch: true } when the row
+    # and the log disagree on whether the record exists.
+    mismatches = @discrepancies.size
+    total_records = [@records_checked.to_i, mismatches].max
     matches = total_records - mismatches
+    show_value = ->(value) { value.nil? ? "(none)" : value.to_s }
   %>
   <div class="summary-cards">
     <div class="summary-card">
@@ -69,7 +75,7 @@
     Per-record comparison showing differences between database values and event-reconstructed state.
   </p>
 
-  <% if @discrepancies.empty? || mismatches == 0 %>
+  <% if mismatches == 0 %>
     <div class="empty-state">
       <h3>All Records Match</h3>
       <p>No discrepancies found between the database and event store.</p>
@@ -77,48 +83,71 @@
     </div>
   <% else %>
     <% @discrepancies.each do |discrepancy| %>
-      <% has_differences = discrepancy[:status] == :mismatch || discrepancy[:differences]&.any? %>
+      <%
+        differences = discrepancy[:differences] || {}
+        crud_view = discrepancy[:crud_view] || {}
+        es_view = discrepancy[:event_sourced_view] || {}
+        record_id = discrepancy.dig(:metadata, :model_id)
+      %>
       <div class="discrepancy-card">
-        <div class="discrepancy-header <%= has_differences ? '' : 'match' %>">
-          <h3><%= @model_class.name %> #<%= discrepancy[:id] || discrepancy[:record_id] %></h3>
-          <span class="status <%= has_differences ? 'mismatch' : 'match' %>">
-            <%= has_differences ? 'Mismatch' : 'Match' %>
-          </span>
+        <div class="discrepancy-header">
+          <h3><%= @model_class.name %> #<%= record_id %></h3>
+          <span class="status mismatch">Mismatch</span>
         </div>
-        <% if has_differences %>
-          <div class="discrepancy-body">
-            <div class="comparison-grid">
-              <div class="comparison-col">
-                <p class="source-label">Database State</p>
-                <h4>Current Values</h4>
-                <ul class="field-list">
-                  <% (discrepancy[:differences] || discrepancy[:db_state] || {}).each do |field, values| %>
+        <div class="discrepancy-body">
+          <% if differences[:exists_mismatch] %>
+            <p class="existence-note">
+              <% if crud_view[:exists] %>
+                The row exists, but the event log does not describe this record
+                (<%= es_view[:destroyed] ? "its events end in a destroy" : "no events" %>):
+                it was written before Lyra was enabled, or by a write that bypassed it.
+              <% else %>
+                The event log describes this record, but its row is gone: it was
+                deleted by a write that bypassed Lyra.
+              <% end %>
+            </p>
+          <% end %>
+          <div class="comparison-grid">
+            <div class="comparison-col">
+              <p class="source-label">Database State</p>
+              <h4>Current Values</h4>
+              <ul class="field-list">
+                <% if differences[:exists_mismatch] %>
+                  <li>
+                    <span class="field-name">row</span>
+                    <span class="field-value field-mismatch"><%= crud_view[:exists] ? "present" : "absent" %></span>
+                  </li>
+                <% else %>
+                  <% differences.each do |field, values| %>
                     <li>
                       <span class="field-name"><%= field %></span>
-                      <span class="field-value field-mismatch">
-                        <%= values.is_a?(Array) ? values[0] : values %>
-                      </span>
+                      <span class="field-value field-mismatch"><%= show_value.(values[:crud]) %></span>
                     </li>
                   <% end %>
-                </ul>
-              </div>
-              <div class="comparison-col">
-                <p class="source-label">Event-Sourced State</p>
-                <h4>Projected Values</h4>
-                <ul class="field-list">
-                  <% (discrepancy[:differences] || discrepancy[:event_state] || {}).each do |field, values| %>
+                <% end %>
+              </ul>
+            </div>
+            <div class="comparison-col">
+              <p class="source-label">Event-Sourced State</p>
+              <h4>Projected Values</h4>
+              <ul class="field-list">
+                <% if differences[:exists_mismatch] %>
+                  <li>
+                    <span class="field-name">events</span>
+                    <span class="field-value field-mismatch"><%= es_view[:events_count].to_i %></span>
+                  </li>
+                <% else %>
+                  <% differences.each do |field, values| %>
                     <li>
                       <span class="field-name"><%= field %></span>
-                      <span class="field-value field-mismatch">
-                        <%= values.is_a?(Array) ? values[1] : values %>
-                      </span>
+                      <span class="field-value field-mismatch"><%= show_value.(values[:event_sourced]) %></span>
                     </li>
                   <% end %>
-                </ul>
-              </div>
+                <% end %>
+              </ul>
             </div>
           </div>
-        <% end %>
+        </div>
       </div>
     <% end %>
   <% end %>

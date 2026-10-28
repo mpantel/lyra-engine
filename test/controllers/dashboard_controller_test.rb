@@ -188,6 +188,39 @@ module Lyra
       assert_equal [], json["discrepancies"]
     end
 
+    # The page renders DualView#compare results: each column shows its own
+    # side of a field, the heading the record's id, and the summary counts
+    # every record checked, not only the ones that differ.
+    def test_discrepancies_page_shows_each_side_of_a_mismatch
+      discrepancies = [
+        {
+          crud_view: { exists: true }, event_sourced_view: { exists: true, events_count: 2 },
+          differences: { city: { crud: "SQL_CITY", event_sourced: "Patras" } },
+          metadata: { model_class: "TestModel", model_id: 7 }
+        },
+        {
+          crud_view: { exists: true }, event_sourced_view: { exists: false, events_count: 0 },
+          differences: { exists_mismatch: true },
+          metadata: { model_class: "TestModel", model_id: 9 }
+        }
+      ]
+      DualView.stubs(:find_discrepancies).returns(discrepancies)
+      TestModel.stubs(:count).returns(12)
+
+      get :discrepancies, params: { model_class: "TestModel" }
+      assert_response :success
+
+      body = response.body
+      assert_includes body, "TestModel #7"
+      assert_includes body, "TestModel #9"
+      assert_match %r{<span class="field-value field-mismatch">SQL_CITY</span>}, body
+      assert_match %r{<span class="field-value field-mismatch">Patras</span>}, body
+      refute_includes body, "event_sourced:"
+      assert_includes body, "written before Lyra was enabled"
+      assert_match %r{<div class="value">12</div>\s*<div class="label">Total Records Checked}, body
+      assert_match %r{<div class="value">10</div>\s*<div class="label">Matching}, body
+    end
+
     # Tests for private methods
     def test_count_events_for_model
       # This tests the private method indirectly through model_overview

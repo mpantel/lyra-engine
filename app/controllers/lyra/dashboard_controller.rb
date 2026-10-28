@@ -36,6 +36,8 @@ module Lyra
     def discrepancies
       @model_class = params[:model_class].constantize
       @discrepancies = DualView.find_discrepancies(@model_class)
+      # find_discrepancies returns only the records that differ
+      @records_checked = @model_class.count
 
       respond_to do |format|
         format.html
