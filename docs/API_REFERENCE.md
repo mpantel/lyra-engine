@@ -264,9 +264,11 @@ is one link.
 ### Who wrote it
 
 Events take `user_id` from `Current.user` and `request_id` from
-`Current.request_id` when the application defines them, in every mode. A model
+`Current.request_id` when the application defines them, in every mode, including
+writes that skip callbacks (`update_columns`, `touch`, `update_all`, ...). A model
 may override the private hooks `lyra_current_user_id` and
-`lyra_current_request_id`. `record.lyra_event_metadata(operation)` returns the
+`lyra_current_request_id` for writes through callbacks; writes that skip them read
+`Current` directly. `record.lyra_event_metadata(operation)` returns the
 attribution metadata a write by that record would carry.
 
 ---

@@ -173,7 +173,7 @@ module Lyra
             rows: rows,
             timestamp: Time.current
           }
-          metadata = { correlation_id: Lyra::Correlation.current_id, causation_id: Lyra::Causation.current_id }.compact
+          metadata = Lyra::BypassEvents.current_metadata
           metadata[:genesis] = true if genesis
           event_class = operation == LINKED ? Lyra::Events::AssociationLinked : Lyra::Events::AssociationUnlinked
           event_class.new(data: data, metadata: Lyra::Privacy.stamp(owner, data, metadata))

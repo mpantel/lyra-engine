@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`test/write_correlation_test.rb`).
 
 ### Fixed
+- **Writes that skip callbacks name who made them.** Events of `update_columns`, `touch`,
+  `delete`, `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify`, and
+  `has_and_belongs_to_many` links, carried correlation and causation but neither `user_id` nor
+  `request_id`, so the same request's writes named a user only if they ran callbacks. They now
+  take both from `Current`, as the documentation already said. Events written before this keep no
+  actor; their correlation still ties them to the request's other writes.
 - **`AsyncProjectionJob` warns again when its event is not in the log.** The warning sat in a
   rescue of `RubyEventStore::EventNotFound`, which `read.event` never raises (it returns nil;
   `read.event!` raises), so it was never logged. The job still did nothing for a missing event.

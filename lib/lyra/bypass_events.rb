@@ -55,11 +55,7 @@ module Lyra
 
       def publish(model_class, id, operation, attributes:, changes: {}, source:)
         event_class = event_class_for(model_class, operation)
-        metadata = {
-          correlation_id: Lyra::Correlation.current_id,
-          causation_id: Lyra::Causation.current_id,
-          source_key(source) => source
-        }.compact
+        metadata = current_metadata.merge(source_key(source) => source)
 
         data = {
           model_class: model_class.name,
@@ -77,6 +73,19 @@ module Lyra
         if Lyra.config.projection_mode == :disabled
           Lyra::Projections::EventStoreReader.invalidate(model_class, id)
         end
+      end
+
+      # Who made the change and what it belongs with, for a write no record's
+      # callbacks attribute. Read from the application's Current, as for a write
+      # through callbacks; a bulk write has no record to ask, so a model's
+      # lyra_current_user_id hook does not apply here.
+      def current_metadata
+        {
+          user_id: current(:user)&.id,
+          request_id: current(:request_id),
+          correlation_id: Lyra::Correlation.current_id,
+          causation_id: Lyra::Causation.current_id
+        }.compact
       end
 
       # Attributes of every row the relation matches, keyed by primary key.
@@ -161,6 +170,10 @@ module Lyra
       end
 
       private
+
+      def current(attribute)
+        defined?(::Current) && ::Current.respond_to?(attribute) ? ::Current.public_send(attribute) : nil
+      end
 
       # Column => [old, new] for every non-timestamp column that changed.
       def diff(old_attrs, new_attrs)

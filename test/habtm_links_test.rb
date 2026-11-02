@@ -12,6 +12,13 @@ class HabtmLinksTest < Minitest::Test
   JOIN = "lyra_habtm_items_tags"
   MODES = %i[monitor hijack es_sync es_async es_noproj es_lazy].freeze
 
+  # Named, not anonymous: Rails keeps one CurrentAttributes instance per
+  # thread under the class's name, so an anonymous class bound to ::Current
+  # would share its slot with any other test's ::Current.
+  class HabtmLinksCurrent < ActiveSupport::CurrentAttributes
+    attribute :user, :request_id
+  end
+
   def setup
     skip "Requires Rails and PostgreSQL" unless defined?(ActiveRecord::Base) && connection.adapter_name.match?(/postgres/i)
 
@@ -118,6 +125,26 @@ class HabtmLinksTest < Minitest::Test
       assert_equal [["linked", [item.id]]], links(HabtmItem, item.id)
       assert_clean(item, tag)
     end
+  end
+
+  def test_a_link_names_the_user_and_the_request
+    use(:monitor)
+    item = HabtmItem.create!(label: "item")
+    tag = HabtmTag.create!(name: "red")
+    original = Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+    Object.const_set(:Current, HabtmLinksCurrent)
+    HabtmLinksCurrent.user = Struct.new(:id).new(7)
+    HabtmLinksCurrent.request_id = "req-1"
+
+    item.tags << tag
+
+    event = Lyra.config.event_store.read.of_type([Lyra::Events::AssociationLinked]).to_a.last
+    assert_equal 7, event.metadata[:user_id]
+    assert_equal "req-1", event.metadata[:request_id]
+  ensure
+    HabtmLinksCurrent.reset
+    Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+    Object.const_set(:Current, original) if original
   end
 
   def test_the_link_events_leave_the_records_state_alone

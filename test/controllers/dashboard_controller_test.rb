@@ -905,16 +905,28 @@ module Lyra
 
     def test_user_tracking_configured_returns_true_when_current_class_has_user
       # Temporarily define Current class with user attribute if not present
+      original_current = nil
       unless defined?(::Current) && ::Current.respond_to?(:user)
         current_class = Class.new(ActiveSupport::CurrentAttributes) do
           attribute :user
         end
-        Object.const_set(:Current, current_class) unless Object.const_defined?(:Current)
+        original_current = Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+        Object.const_set(:Current, current_class)
       end
 
-      controller = DashboardController.new
-      result = controller.send(:user_tracking_configured?)
-      assert result, "user_tracking_configured? should return true when Current.user is defined"
+      begin
+        controller = DashboardController.new
+        result = controller.send(:user_tracking_configured?)
+        assert result, "user_tracking_configured? should return true when Current.user is defined"
+      ensure
+        # Leave no ::Current, nor its per-thread instance, to later tests
+        if current_class
+          current_class.reset
+          ActiveSupport::ExecutionContext.current_attributes_instances.delete(:Current)
+          Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+          Object.const_set(:Current, original_current) if original_current
+        end
+      end
     end
 
     def test_user_tracking_configured_returns_false_when_current_class_missing

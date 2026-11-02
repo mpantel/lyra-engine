@@ -16,6 +16,10 @@ if defined?(ActiveRecord::Base)
     monitor_with_lyra
   end
 
+  class BypassTestCurrent < ActiveSupport::CurrentAttributes
+    attribute :user, :request_id
+  end
+
   # Parent side of dependent: :nullify. Not monitored: the point is what
   # happens to the monitored children when Rails nullifies them.
   class BypassTestAuthor < ActiveRecord::Base
@@ -322,7 +326,74 @@ module Lyra
       assert_equal author.id, BypassTestArticle.find_by!(title: "Via association").author_id
     end
 
+    # Who made the change is known whichever way the write went: a write that
+    # skips callbacks still happens inside the request that made it.
+    def test_writes_that_skip_callbacks_carry_the_user_and_the_request
+      article = create_article("One")
+      kept = create_article("Two")
+      author = BypassTestAuthor.create!(email: "bypass-actor@example.com", name: "Author")
+      owned = create_article("Three", author_id: author.id)
+      clear_event_store
+
+      with_current_user do
+        article.update_column(:status, "a")
+        article.update_columns(status: "b")
+        article.touch
+        BypassTestArticle.where(id: article.id).update_all(status: "c")
+        BypassTestArticle.insert_all([{ title: "Inserted", status: "draft", created_at: Time.current, updated_at: Time.current }])
+        BypassTestArticle.upsert_all([{ id: article.id, title: "One", status: "d", created_at: Time.current, updated_at: Time.current }], unique_by: :id)
+        author.destroy
+        kept.delete
+        BypassTestArticle.where(id: article.id).delete_all
+      end
+
+      events = Lyra.config.event_store.read.to_a.select do |event|
+        event.metadata[:bypass_source] || event.metadata[:nullify_source]
+      end
+      sources = events.map { _1.metadata[:bypass_source] || _1.metadata[:nullify_source] }
+      assert_equal %w[delete delete_all dependent_association insert_all touch update_all update_columns upsert_all],
+                   sources.uniq.sort
+      assert_equal [7], events.map { _1.metadata[:user_id] }.uniq
+      assert_equal ["req-1"], events.map { _1.metadata[:request_id] }.uniq
+      assert_equal 7, events_for(owned).first.metadata[:user_id]
+    end
+
+    # A console, a job or a guest: nobody to name, and nothing made up.
+    def test_a_write_with_nobody_signed_in_names_nobody
+      article = create_article("One")
+      clear_event_store
+
+      with_current_user(user: nil, request_id: nil) { article.update_column(:status, "a") }
+
+      event = only_event(article)
+      assert_nil event.metadata[:user_id]
+      assert_nil event.metadata[:request_id]
+    end
+
+    def test_a_write_in_an_application_without_current_names_nobody
+      skip "the application defines Current" if Object.const_defined?(:Current, false)
+      article = create_article("One")
+      clear_event_store
+
+      article.update_column(:status, "a")
+
+      assert_nil only_event(article).metadata[:user_id]
+    end
+
     private
+
+    # The application's Current, for the block only.
+    def with_current_user(user: Struct.new(:id).new(7), request_id: "req-1")
+      original = Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+      Object.const_set(:Current, BypassTestCurrent)
+      BypassTestCurrent.user = user
+      BypassTestCurrent.request_id = request_id
+      yield
+    ensure
+      BypassTestCurrent.reset
+      Object.send(:remove_const, :Current) if Object.const_defined?(:Current, false)
+      Object.const_set(:Current, original) if original
+    end
 
     def create_user(email, name)
       BypassTestUser.create!(email: email, name: name)
