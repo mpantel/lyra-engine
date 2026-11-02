@@ -13,7 +13,7 @@ Lyra's changes since 0.9.0; PAM DSL and PetriFlow change only in their gem descr
 
 ### Released
 - The gems on RubyGems (`orfeas_lyra`, `orfeas_petri_flow`, `orfeas_pam_dsl`), built from tag
-  `v0.9.1`
+  `v0.9.1` and pushed on 2026-11-02
 
 ### Added
 - **Writes are grouped into causal chains by default** (`config.correlate_writes`, on). Before,
