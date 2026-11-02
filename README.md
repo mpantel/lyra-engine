@@ -2,7 +2,7 @@
 
 **CRUD to Event Sourcing Transformation Engine**
 
-*Part of the ORFEAS (Object-Relational to Event-Sourcing Architecture) Framework*
+*Part of ORFEAS (Object-Relational Framework for Event-Aware Systems)*
 
 Lyra is a Rails engine that records the writes an ActiveRecord application
 makes as events (RailsEventStore), and can then move the application, one

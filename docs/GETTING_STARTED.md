@@ -35,8 +35,8 @@ or the engine straight from GitHub, for changes made since the release:
 gem "orfeas_lyra", git: "https://github.com/mpantel/lyra-engine", branch: "main", require: "lyra"
 ```
 
-The 0.9.0 releases on rubygems.org are built from tag `v0.9.0` of
-https://github.com/mpantel/lyra-engine. The earlier 0.6.0 releases (January
+Each release on rubygems.org from 0.8.0 on is built from the tag of its version
+(`v0.9.1` for 0.9.1) of https://github.com/mpantel/lyra-engine. The earlier 0.6.0 releases (January
 2026) predate this guide (no RailsEventStore 3, Genesis or repair).
 
 Then install, and create the event store tables with the RailsEventStore 3

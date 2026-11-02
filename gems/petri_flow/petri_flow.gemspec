@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email       = ["mpantel@aegean.gr"]
   spec.homepage    = "https://github.com/mpantel/lyra-engine/tree/main/gems/petri_flow"
   spec.summary     = "Petri Net and Matrix Analysis for ORFEAS Framework"
-  spec.description = "A comprehensive gem for Petri net modeling, colored Petri nets, matrix analysis, visualization, and formal verification for event sourcing and CRUD-to-Event mapping analysis. Part of the ORFEAS (Object-Relational to Event-Sourcing Architecture) framework."
+  spec.description = "A comprehensive gem for Petri net modeling, colored Petri nets, matrix analysis, visualization, and formal verification for event sourcing and CRUD-to-Event mapping analysis. Part of ORFEAS (Object-Relational Framework for Event-Aware Systems)."
   spec.license     = "MIT"
   spec.required_ruby_version = ">= 4.0"
 

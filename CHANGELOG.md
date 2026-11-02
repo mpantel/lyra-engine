@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-02
+
+Lyra's changes since 0.9.0; PAM DSL and PetriFlow change only in their gem descriptions.
+
+### Released
+- The gems on RubyGems (`orfeas_lyra`, `orfeas_petri_flow`, `orfeas_pam_dsl`), built from tag
+  `v0.9.1`
+
 ### Added
 - **Writes are grouped into causal chains by default** (`config.correlate_writes`, on). Before,
   Lyra carried correlation and causation only where the application called
@@ -31,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Monitor, Hijack and event-sourcing events alike (`DomainEvents.build` takes the pre-assigned
   `event_id:`, given once per write). The Olist replay runs each step as one request would
   (`test/write_correlation_test.rb`).
+
+### Changed
+- **ORFEAS is expanded as the words its letters stand for**: Object-Relational Framework for
+  Event-Aware Systems (README, `docs/ARCHITECTURE.md` and its citation, gem descriptions). It
+  read "Object-Relational to Event-Sourcing Architecture", which has no F.
 
 ### Fixed
 - **Writes that skip callbacks name who made them.** Events of `update_columns`, `touch`,

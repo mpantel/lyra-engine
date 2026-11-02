@@ -7,7 +7,7 @@ Gem::Specification.new do |spec|
   spec.email       = ["mpantel@aegean.gr"]
   spec.homepage    = "https://github.com/mpantel/lyra-engine/tree/main/gems/pam_dsl"
   spec.summary     = "Privacy Attribute Matrix (PAM) DSL for ORFEAS Framework"
-  spec.description = "A declarative DSL for defining privacy policies, PII fields, consent requirements, and retention rules using the Privacy Attribute Matrix (PAM) model for privacy-aware event monitoring. Part of the ORFEAS (Object-Relational to Event-Sourcing Architecture) framework."
+  spec.description = "A declarative DSL for defining privacy policies, PII fields, consent requirements, and retention rules using the Privacy Attribute Matrix (PAM) model for privacy-aware event monitoring. Part of ORFEAS (Object-Relational Framework for Event-Aware Systems)."
   spec.license     = "MIT"
   spec.required_ruby_version = ">= 4.0"
 

@@ -4,6 +4,13 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-02
+
+### Changed
+- **The gem's description expands ORFEAS as the words its letters stand for**:
+  Object-Relational Framework for Event-Aware Systems. It read "Object-Relational to
+  Event-Sourcing Architecture", which has no F. No code changed since 0.9.0.
+
 ## [0.9.0] - 2026-10-25
 
 ### Added

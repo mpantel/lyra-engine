@@ -23,8 +23,8 @@
 
 ## About ORFEAS
 
-Lyra is the engine of ORFEAS (Object-Relational to Event-Sourcing
-Architecture), a framework for moving applications built on Object-Relational
+Lyra is the engine of ORFEAS (Object-Relational Framework for Event-Aware Systems),
+a framework for moving applications built on Object-Relational
 Mapping (ORM) to event sourcing one checked step at a time, with privacy
 compliance built in. ORFEAS is developed by Michail Pantelelis as part of his
 PhD research at the University of the Aegean, Department of Information and
@@ -1282,7 +1282,7 @@ Publications:
 
 ```bibtex
 @software{orfeas2026,
-  title={ORFEAS: Object-Relational to Event-Sourcing Architecture Framework},
+  title={ORFEAS: Object-Relational Framework for Event-Aware Systems},
   author={Pantelelis, Michail},
   year={2026},
   url={https://github.com/mpantel/lyra-engine},
