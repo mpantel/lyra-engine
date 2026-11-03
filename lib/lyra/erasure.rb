@@ -71,8 +71,8 @@ module Lyra
             resolve = ->(key, value) { resolve_in(model, id, replacements, originals, key, value) }
             rewritten = events.filter_map { |event| rewrite(event, resolve) }
             Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
-            row_erased = erase_row(model, id, replacements)
-            record_erasure(model, id, stream, personal, reason, erased_by)
+            row_erased, row_copies = erase_row(model, id, replacements, originals)
+            record_erasure(model, id, stream, personal | row_copies, reason, erased_by)
             if everywhere
               copies, shared = erase_copies(model, id, stream, originals, replacements, reason, erased_by, max_copies)
             end
@@ -175,15 +175,24 @@ module Lyra
         end
       end
 
-      def erase_row(model, id, replacements)
-        return false if events_only?
+      # The erased fields, and any other column of the row that still holds
+      # one of their values (a username that is the email): its events were
+      # rewritten with that column's replacement, so the row gets it too and
+      # still equals its replay. Returns [erased?, the copied columns].
+      def erase_row(model, id, replacements, originals)
+        return [false, []] if events_only?
 
         row = model.unscoped.lock.find_by(model.primary_key => id)
-        return false unless row
+        return [false, []] unless row
 
         columns = replacements.slice(*row.attribute_names)
-        write_columns(model, id, columns)
-        true
+        copies = row.attributes.each_with_object({}) do |(column, value), acc|
+          next if columns.key?(column) || !value.is_a?(String) || !originals.key?(value)
+
+          acc[column] = replacement_for(model, id, column, replacements[originals[value]])
+        end
+        write_columns(model, id, columns.merge(copies))
+        [true, copies.keys]
       end
 
       # everywhere: events of other streams holding the erased values, and

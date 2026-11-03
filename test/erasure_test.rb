@@ -75,6 +75,34 @@ class ErasureTest < Minitest::Test
     assert_equal ["Ann", "erased:#{user.id}"], raw("SELECT name, email FROM users WHERE id = #{user.id}", :rows).first
   end
 
+  # A column of the record's own row that is not erased but holds a copy of
+  # an erased value (a username that is the email address): its events are
+  # rewritten, so the row must be too, or replay and row part.
+  def test_a_copy_in_another_column_of_the_row_is_erased_with_its_events
+    user = EraseUser.create!(name: "ann@example.com", email: "ann@example.com")
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email])
+
+    assert_equal ["erased:#{user.id}"] * 2, raw("SELECT name, email FROM users WHERE id = #{user.id}", :rows).first
+    refute_match(/ann@/, log_text)
+    assert_nil MT.discrepancy(EraseUser, user.id.to_s), "the stream still replays to the row"
+    assert_equal %w[email name], stream(user).last.data[:fields].sort, "the copy is named in the record"
+    assert_equal %w[email], result.fields, "the fields asked for"
+  end
+
+  # A copy the row no longer holds is left in the row: its later events set
+  # the current value, which is not the erased one.
+  def test_a_copy_the_row_no_longer_holds_is_left_in_the_row
+    user = EraseUser.create!(name: "ann@example.com", email: "ann@example.com")
+    user.update!(name: "Ann")
+
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email])
+
+    assert_equal ["Ann", "erased:#{user.id}"], raw("SELECT name, email FROM users WHERE id = #{user.id}", :rows).first
+    refute_match(/ann@/, log_text)
+    assert_nil MT.discrepancy(EraseUser, user.id.to_s)
+  end
+
   def test_a_domain_event_payload_under_the_attribute_s_name_is_erased_too
     monitor(privacy_policy: :erase_policy,
             domain_events: [{ name: "MemberJoined", on: :create, payload: ->(u, _c) { { email: u.email } } }])
