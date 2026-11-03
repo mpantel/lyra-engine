@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    orfeas_lyra (0.9.1)
+    orfeas_lyra (0.9.2)
       pg (~> 1.0)
       rails (>= 8.0)
       rails_event_store (~> 3.0)

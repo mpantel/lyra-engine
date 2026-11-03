@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-03
+
+One fix in Lyra; PAM DSL and PetriFlow are unchanged (0.9.1).
+
+### Fixed
+- **ES-Async read-your-writes no longer races a projection job.** With read-your-writes
+  (`each_write: true`), the writer projected its own event without the per-stream lock that
+  `AsyncProjectionJob` holds. A job that had read the record's stream before that event
+  committed could write the row afterwards, putting it back to the older value until the newer
+  event's job ran: a reader in between saw the record step back (an application's suite, run
+  with real background projection, read a refund as "approved" just after it was "processed").
+  `Lyra::Consistency::ReadYourWrites` now takes the job's lock before projecting, held to the
+  end of the writer's transaction. Final states converged before as well. Plain ES-Async (no
+  read-your-writes) was not affected. `test/concurrent_same_record_test.rb` reproduces the
+  interleaving.
+
 ## [0.9.1] - 2026-11-02
 
 Lyra's changes since 0.9.0; PAM DSL and PetriFlow change only in their gem descriptions.
