@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 One fix in Lyra; PAM DSL and PetriFlow are unchanged (0.9.1).
 
+### Released
+- `orfeas_lyra` on RubyGems, built from tag `v0.9.2` and pushed on 2026-11-03
+
 ### Fixed
 - **ES-Async read-your-writes no longer races a projection job.** With read-your-writes
   (`each_write: true`), the writer projected its own event without the per-stream lock that
