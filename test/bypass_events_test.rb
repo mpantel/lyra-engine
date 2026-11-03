@@ -26,6 +26,13 @@ if defined?(ActiveRecord::Base)
     self.table_name = "users"
     has_many :articles, class_name: "BypassTestArticle", foreign_key: :author_id, dependent: :nullify
   end
+
+  # Parent side of dependent: :delete_all, which deletes the children with
+  # one DELETE and no callbacks.
+  class BypassTestDeletingAuthor < ActiveRecord::Base
+    self.table_name = "users"
+    has_many :articles, class_name: "BypassTestArticle", foreign_key: :author_id, dependent: :delete_all
+  end
 end
 
 module Lyra
@@ -324,6 +331,130 @@ module Lyra
         assert_equal "created", value(event.data, :operation).to_s
       end
       assert_equal author.id, BypassTestArticle.find_by!(title: "Via association").author_id
+    end
+
+    # The other callback-skipping writes ActiveRecord offers all reach the
+    # relation's update_all, delete_all or upsert_all, so the bypass events
+    # cover them without overrides of their own. One test each pins that
+    # routing: a Rails upgrade that changed it would fail here.
+    def test_update_counters_and_increment_counter_publish_updates
+      a = create_article("Counted", author_id: 5)
+      clear_event_store
+
+      BypassTestArticle.update_counters(a.id, author_id: 2)
+      BypassTestArticle.increment_counter(:author_id, a.id)
+
+      events = events_for(a)
+      assert_equal 2, events.size
+      assert_equal [{ "author_id" => [5, 7] }, { "author_id" => [7, 8] }], events.map { value(_1.data, :changes) }
+      assert(events.all? { _1.metadata[:bypass_source] == "update_all" })
+    end
+
+    def test_increment_bang_publishes_an_update
+      a = create_article("Counted", author_id: 1)
+      clear_event_store
+
+      a.increment!(:author_id)
+
+      assert_equal({ "author_id" => [1, 2] }, value(only_event(a).data, :changes))
+      assert_equal 2, a.reload.author_id
+    end
+
+    # Events never carry created_at/updated_at, so a bare touch_all changes
+    # nothing an event records; a named column is recorded like any other.
+    def test_touch_all_publishes_an_update_per_row_for_a_named_column
+      a = create_article("One")
+      b = create_article("Two")
+      clear_event_store
+
+      BypassTestArticle.where(id: [a.id, b.id]).touch_all(time: 1.day.from_now)
+      assert_empty events_for(a) + events_for(b)
+
+      BypassTestArticle.where(id: [a.id, b.id]).touch_all(:published_at)
+
+      [a, b].each do |article|
+        event = only_event(article)
+        assert_equal "update_all", event.metadata[:bypass_source]
+        assert_equal ["published_at"], value(event.data, :changes).keys
+        assert_nil value(event.data, :changes)["published_at"].first
+      end
+    end
+
+    def test_delete_by_publishes_a_destroyed_event
+      a = create_article("One")
+      clear_event_store
+
+      BypassTestArticle.delete_by(id: a.id)
+
+      event = only_event(a)
+      assert_equal "delete_all", event.metadata[:bypass_source]
+      assert_equal "destroyed", value(event.data, :operation).to_s
+    end
+
+    def test_singular_upsert_publishes_created_then_updated
+      now = Time.current
+      BypassTestUser.upsert({ email: "bypass-upsert@example.com", name: "First", created_at: now, updated_at: now },
+                            unique_by: :email)
+      user = BypassTestUser.find_by!(email: "bypass-upsert@example.com")
+      BypassTestUser.upsert({ email: "bypass-upsert@example.com", name: "Second", created_at: now, updated_at: now },
+                            unique_by: :email)
+
+      events = events_for(user)
+      assert_equal %w[created updated], events.map { value(_1.data, :operation).to_s }
+      assert_equal %w[First Second], value(events.last.data, :changes)["name"]
+    end
+
+    def test_dependent_delete_all_publishes_a_destroyed_event_per_child
+      author = BypassTestDeletingAuthor.create!(name: "Author", email: "bypass-deleting@example.com")
+      a = create_article("Child one", author_id: author.id)
+      b = create_article("Child two", author_id: author.id)
+      clear_event_store
+
+      author.destroy
+
+      assert_empty BypassTestArticle.where(id: [a.id, b.id])
+      [a, b].each { assert_equal "destroyed", value(only_event(_1).data, :operation).to_s }
+    end
+
+    def test_strict_mode_rejects_the_routed_writes
+      Lyra.config.strict_data_access = true
+      a = create_article("One", author_id: 1)
+      now = Time.current
+      writes = {
+        update_counters: -> { BypassTestArticle.update_counters(a.id, author_id: 1) },
+        increment!: -> { a.increment!(:author_id) },
+        touch_all: -> { BypassTestArticle.where(id: a.id).touch_all },
+        delete_by: -> { BypassTestArticle.delete_by(id: a.id) },
+        upsert: lambda {
+          BypassTestUser.upsert({ email: "bypass-strict@example.com", name: "S", created_at: now, updated_at: now },
+                                unique_by: :email)
+        }
+      }
+      clear_event_store
+
+      writes.each do |name, write|
+        assert_raises(Lyra::StrictDataAccessViolation, "#{name} was not rejected") { write.call }
+      end
+      assert_empty events_for(a)
+      assert_equal [1, "One"], a.reload.then { [_1.author_id, _1.title] }
+      assert_nil BypassTestUser.find_by(email: "bypass-strict@example.com")
+    end
+
+    # Unlike dependent: :nullify, dependent: :delete_all is not exempt: it
+    # deletes rows outright, so strict mode refuses it and the parent's
+    # destroy rolls back with it.
+    def test_strict_mode_rejects_dependent_delete_all
+      Lyra.config.strict_data_access = true
+      author = BypassTestDeletingAuthor.create!(name: "Author", email: "bypass-strict-deleting@example.com")
+      child = create_article("Child", author_id: author.id)
+      clear_event_store
+
+      assert_raises(Lyra::StrictDataAccessViolation) do
+        BypassTestDeletingAuthor.transaction { author.destroy }
+      end
+      assert BypassTestDeletingAuthor.exists?(author.id)
+      assert BypassTestArticle.exists?(child.id)
+      assert_empty events_for(child)
     end
 
     # Who made the change is known whichever way the write went: a write that
