@@ -89,11 +89,33 @@ module Lyra
           (Thread.current[:lyra_pending_writes] || []).each { |write| project(write) }
         end
 
+        # Projects under the lock AsyncProjectionJob holds per stream, taken
+        # in the writer's transaction (or one of its own) and held to its end.
+        # A job that had read the stream before this write committed would
+        # otherwise write the row after this projection, putting it back to
+        # the older value until the newer event's job ran. With the lock, this
+        # projection waits for a job in flight; a job that starts after it
+        # reads a stream that already holds this write's event.
         def project(write)
-          Lyra::Projections::ModelProjection.project(write[:model_class], write[:operation], write[:result])
+          model_class = write[:model_class]
+          model_class.transaction do
+            lock_stream(model_class, write[:result])
+            Lyra::Projections::ModelProjection.project(model_class, write[:operation], write[:result])
+          end
         rescue => e
           Rails.logger.error("Lyra: Failed to ensure projection - #{e.message}")
           raise if Lyra.config.strict_projections
+        end
+
+        # The same key AsyncProjectionJob#lock_stream! locks: the record's
+        # stream name, from the model id its event carries.
+        def lock_stream(model_class, result)
+          data = result.events&.first&.data
+          model_id = data && (data[:model_id] || data["model_id"])
+          return unless model_id
+
+          stream = Lyra.stream_name(model_class, model_id)
+          model_class.with_connection { |c| Lyra::AdvisoryLock.xact_lock(c, stream, purpose: "read-your-writes projection") }
         end
       end
     end

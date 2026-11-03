@@ -50,11 +50,21 @@ class ConcurrentSameRecordTest < Minitest::Test
         result
       end
     end
+
+    # A projection job that has taken its stream's lock and read the stream,
+    # and has not yet written the row.
+    module JobRead
+      def project_events(*args)
+        Pause.at(:job_read_stream)
+        super
+      end
+    end
   end
 
   Lyra::CommandHandler.singleton_class.prepend(Pause::Handler)
   Lyra::Projections::ModelProjection.singleton_class.prepend(Pause::Projection)
   Lyra.singleton_class.prepend(Pause::Append)
+  Lyra::Projections::Rebuild.singleton_class.prepend(Pause::JobRead)
 
   def setup
     skip "Requires Rails and PostgreSQL" unless defined?(ActiveRecord::Base) && connection.adapter_name.match?(/postgres/i)
@@ -218,6 +228,52 @@ class ConcurrentSameRecordTest < Minitest::Test
 
     assert_equal "from-t2", replayed_label(id)
     assert_equal "from-t2", row_label(id), "the row follows the log"
+  end
+
+  # ES-Async with read-your-writes (each_write: true): the writer projects its
+  # own event, in its transaction, while the record's jobs still run. A job
+  # that had read the stream before that event committed, and wrote the row
+  # after the writer had projected it, put the row back to the older value
+  # until the newer event's job ran: a reader in between saw the record step
+  # back (the Aegean ePay testbed caught a refund read as "approved" after
+  # "processed"). The writer now takes the job's per-stream lock to project,
+  # so it waits for a job in flight, and a job that starts after it reads a
+  # stream that already holds its event.
+  def test_es_async_read_your_writes_does_not_race_a_job_in_flight
+    previous = ActiveJob::Base.queue_adapter
+    adapter = ActiveJob::QueueAdapters::TestAdapter.new
+    ActiveJob::Base.queue_adapter = adapter
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :async
+    Lyra.config.async_projections_inline = false
+    id = RaceItem.create!(label: "initial").id
+    run_enqueued(adapter)
+
+    RaceItem.find(id).update!(label: "from-t1")
+    job = adapter.enqueued_jobs.shift
+    gate = { point: :job_read_stream, reached: Queue.new, resume: Queue.new }
+    first = Thread.new do
+      Thread.current[:race_gate] = gate
+      with_connection { job[:job].perform_now(*job[:args]) }
+    end
+    gate[:reached].pop
+
+    second = Thread.new do
+      with_connection do
+        Lyra::Consistency::ReadYourWrites.with_guaranteed_read(each_write: true) do
+          RaceItem.find(id).update!(label: "from-t2")
+        end
+      end
+    end
+    refute second.join(0.5), "the read-your-writes projection ran past the job's lock"
+
+    gate[:resume] << true
+    first.value
+    second.value
+
+    assert_equal "from-t2", row_label(id), "the row stays at the writer's value once both have committed"
+  ensure
+    ActiveJob::Base.queue_adapter = previous if previous
   end
 
   # Monitor: the first writer's row write holds the row lock until its
