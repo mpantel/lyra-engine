@@ -321,9 +321,22 @@ module Lyra
         return nil unless table_ready?
 
         sql(:select_value,
-          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at) VALUES " \
-          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}) RETURNING id"
-        ).to_i
+          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at, actor) VALUES " \
+          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}, #{q(actor)}) RETURNING id"
+        ).to_i.tap { |id| Rails.logger&.warn("[Lyra] Mode switched to #{to} by #{actor} (lyra_mode_transitions #{id})") }
+      end
+
+      # Who is making a change: the given operator, else the signed-in user
+      # (Current.user), else LYRA_OPERATOR, else the operating-system user and
+      # process of a task or console. Recorded with every mode switch and, from
+      # lyra:erase, every erasure (0.9.3; before, neither named anyone).
+      public def actor(operator = nil)
+        return operator.to_s if operator.present?
+
+        user = defined?(::Current) && ::Current.respond_to?(:user) ? ::Current.user : nil
+        return "user:#{user.respond_to?(:id) ? user.id : user}" if user
+
+        ENV["LYRA_OPERATOR"].presence || ["process", ENV["USER"], Process.pid].compact.join(":")
       end
 
       # Say what a switch reaches: with ModeSync, every process within its
@@ -358,8 +371,11 @@ module Lyra
               t.bigint :position, null: false, default: 0
               t.integer :checked, null: false, default: 0
               t.datetime :created_at, null: false
+              t.string :actor
             end
           end
+          # Tables created before 0.9.3 have no actor column.
+          connection.add_column(TABLE, :actor, :string) unless connection.column_exists?(TABLE, :actor)
         end
         @table_ready = true
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished

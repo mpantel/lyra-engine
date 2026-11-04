@@ -14,7 +14,10 @@ module Lyra
   #
   # Personal fields are those the record's policy declares plus those the
   # events' privacy stamps (config.annotate_privacy) list, or exactly the
-  # +fields:+ given. In the record's events a value is erased wherever it
+  # +fields:+ given, which must be among those unless +any_fields: true+
+  # (from 0.9.3: an erasure rewrites history in place, so naming any column,
+  # a payment's status, say, would rewrite non-personal history under an
+  # Art. 17 reason). In the record's events a value is erased wherever it
   # appears: under the attribute's own name (attributes, both sides of each
   # change, payload keys), and under any other name, matched by value (a
   # domain-event payload that copies the email as payer_email).
@@ -53,10 +56,17 @@ module Lyra
                         keyword_init: true)
 
     class << self
-      def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false, max_copies: MAX_COPIES)
+      def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false, max_copies: MAX_COPIES,
+                 any_fields: false)
         stream = Lyra.stream_name(model, id)
         events = Lyra.config.event_store.read.stream(stream).to_a
-        personal = (fields || personal_fields(model, events)).map(&:to_s).uniq
+        declared = personal_fields(model, events)
+        personal = (fields || declared).map(&:to_s).uniq
+        undeclared = any_fields || fields.nil? ? [] : personal - declared
+        if undeclared.any?
+          raise Unsupported, "#{model.name} #{id}: #{undeclared.join(', ')} not declared personal by its policy " \
+                             "or the events' privacy stamps; pass any_fields: true to erase them anyway"
+        end
         raise Unsupported, "#{model.name} #{id}: no personal fields to erase" if personal.empty?
 
         replacements = personal.to_h { |field| [field, replacement(model, id, field)] }

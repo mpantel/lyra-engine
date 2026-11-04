@@ -51,7 +51,8 @@ namespace :lyra do
     abort e.message
   end
   desc "Erase one record's personal data from its row and its events (Art. 17) " \
-       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [FIELDS=email,phone] [EVERYWHERE=1] " \
+       "(MODEL=Registration ID=5 REASON='Art. 17 request #12' [OPERATOR=jdoe] [FIELDS=email,phone] " \
+       "[ANY_FIELDS=1: FIELDS may name columns the policy does not declare personal] [EVERYWHERE=1] " \
        "[MAX_COPIES=10: with EVERYWHERE, a value held by more other records is left as shared])"
   task erase: :environment do
     model = ENV.fetch("MODEL").constantize
@@ -62,7 +63,9 @@ namespace :lyra do
     end
     result = Lyra::Erasure.erase!(model, ENV.fetch("ID"), reason: ENV.fetch("REASON"),
                                   fields: ENV["FIELDS"]&.split(",")&.map(&:strip),
-                                  everywhere: ENV["EVERYWHERE"].present?, max_copies: max_copies)
+                                  everywhere: ENV["EVERYWHERE"].present?, max_copies: max_copies,
+                                  any_fields: ENV["ANY_FIELDS"].present?,
+                                  erased_by: Lyra::ModeTransition.actor(ENV["OPERATOR"]))
     puts "Erased #{result.fields.join(', ')} of #{result.model} #{result.id}: " \
          "#{result.events_rewritten} events rewritten, row #{result.row_erased ? 'erased' : 'absent'}."
     puts "Copies erased: #{result.copies.join(', ')}" if result.copies.any?

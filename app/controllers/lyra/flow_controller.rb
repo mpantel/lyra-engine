@@ -39,7 +39,7 @@ module Lyra
 
     # GET /lyra/flow/event_chain/:model_class/:model_id
     def event_chain
-      model_class = params[:model_class].constantize
+      model_class = monitored_model!(params[:model_class])
       model_id = params[:model_id]
 
       flow = EventFlow.new
@@ -89,7 +89,7 @@ module Lyra
 
     # GET /lyra/flow/visualization/:model_class/:model_id
     def visualization
-      model_class = params[:model_class].constantize
+      model_class = monitored_model!(params[:model_class])
       model_id = params[:model_id]
       format = params[:format] || 'json'
 
@@ -212,9 +212,10 @@ module Lyra
       events = Lyra.config.event_store.read.to_a
 
       if subject_id && subject_type
+        # The subject's own record. What a user did is user_actions; their
+        # edits of other records are not part of their timeline.
         events = events.select do |event|
-          event.metadata[:user_id] == subject_id.to_i ||
-          (event_model_class(event) == subject_type && event_model_id(event) == subject_id.to_i)
+          event_model_class(event).to_s == subject_type.to_s && event_model_id(event).to_s == subject_id.to_s
         end
       end
 

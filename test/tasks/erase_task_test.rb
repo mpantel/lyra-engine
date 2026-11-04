@@ -6,7 +6,7 @@ require "rake"
 # lyra:erase passes MAX_COPIES through to Lyra::Erasure.erase! and refuses
 # anything but a positive integer.
 class EraseTaskTest < Minitest::Test
-  ENV_KEYS = %w[MODEL ID REASON FIELDS EVERYWHERE MAX_COPIES].freeze
+  ENV_KEYS = %w[MODEL ID REASON FIELDS EVERYWHERE MAX_COPIES OPERATOR ANY_FIELDS LYRA_OPERATOR].freeze
 
   def setup
     @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
@@ -17,6 +17,7 @@ class EraseTaskTest < Minitest::Test
     ENV.update("MODEL" => "String", "ID" => "5", "REASON" => "Art. 17", "EVERYWHERE" => "1")
     ENV.delete("FIELDS")
     ENV.delete("MAX_COPIES")
+    %w[OPERATOR ANY_FIELDS LYRA_OPERATOR].each { ENV.delete(_1) }
   end
 
   def teardown
@@ -33,6 +34,29 @@ class EraseTaskTest < Minitest::Test
     end
     out, = capture_io { Lyra::Erasure.stub(:erase!, fake) { @rake["lyra:erase"].invoke } }
     [calls.first, out]
+  end
+
+  # From 0.9.3 the task names who erased (before: nobody) and keeps FIELDS
+  # to declared personal fields unless ANY_FIELDS is set.
+  def test_the_operator_is_recorded
+    ENV["OPERATOR"] = "jdoe"
+    call, = run_erase
+
+    assert_equal "jdoe", call[:erased_by]
+    refute call[:any_fields]
+  end
+
+  def test_without_an_operator_the_process_is_recorded
+    call, = run_erase
+
+    assert_match(/\Aprocess:/, call[:erased_by])
+  end
+
+  def test_any_fields_is_passed_through
+    ENV["ANY_FIELDS"] = "1"
+    call, = run_erase
+
+    assert call[:any_fields]
   end
 
   def test_default_max_copies

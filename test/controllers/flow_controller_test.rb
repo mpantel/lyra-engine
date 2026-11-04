@@ -20,6 +20,9 @@ module Lyra
       end
 
       stub_const("TestModel", @mock_model)
+      # The routes resolve only monitored models (0.9.3).
+      Lyra.config.stubs(:monitored_model_named).returns(nil)
+      Lyra.config.stubs(:monitored_model_named).with("TestModel").returns(@mock_model)
 
       # Create mock events
       @mock_events = [

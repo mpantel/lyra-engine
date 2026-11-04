@@ -104,6 +104,20 @@ class ModeTransitionTest < Minitest::Test
     assert_equal :monitor, Lyra.config.mode
   end
 
+  # From 0.9.3 every switch names who made it (before: nobody), so a switch
+  # to Disabled, which turns purpose checks and the access log off, is
+  # attributable.
+  def test_a_switch_records_who_made_it
+    ENV["LYRA_OPERATOR"] = "ops-jdoe"
+    id = MT.send(:record_applied, "monitor")
+
+    actor = ActiveRecord::Base.connection.select_value("SELECT actor FROM lyra_mode_transitions WHERE id = #{id}")
+    assert_equal "ops-jdoe", actor
+    assert_equal "jdoe", MT.actor("jdoe"), "an explicit operator wins"
+  ensure
+    ENV.delete("LYRA_OPERATOR")
+  end
+
   def test_the_boot_gate_refuses_an_uncertified_switch
     MT.send(:record_applied, "monitor")
     Lyra.config.mode = :hijack

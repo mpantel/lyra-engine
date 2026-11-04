@@ -800,10 +800,14 @@ module Lyra
       def lyra_disable_paper_trail!
         return unless defined?(PaperTrail)
 
-        # PaperTrail 17+ uses PaperTrail.request.enabled
-        # This disables versioning for the current request/thread
-        if PaperTrail.respond_to?(:request)
-          PaperTrail.request.enabled = false
+        # PaperTrail's request store: switch versioning off for this model
+        # only. Before 0.9.3 this set PaperTrail.request.enabled = false,
+        # which switched it off for every model for the rest of the request
+        # or job thread and was never restored, so writes to versioned models
+        # Lyra does not monitor lost their versions with no event in their
+        # place.
+        if PaperTrail.respond_to?(:request) && PaperTrail.request.respond_to?(:disable_model)
+          PaperTrail.request.disable_model(self.class)
         elsif respond_to?(:paper_trail) && paper_trail.respond_to?(:enabled=)
           # Older PaperTrail versions use instance-level enabled
           paper_trail.enabled = false

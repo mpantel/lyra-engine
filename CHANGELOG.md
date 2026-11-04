@@ -7,6 +7,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-04
+
+**Security update.** A thorough review of Lyra's code against the claims made for it found the
+defects below. None of them touches the gradual migration itself: the modes, the interception
+of writes, the mapping of operations to events, the checked transitions between modes, and the
+results that rest on them are unchanged. The defects are in the dashboard, the GDPR helpers, the
+hand-over from PaperTrail and the operator tasks. Upgrade if the dashboard is open to anyone, or if
+the Art. 15/20 export, the retention check or `lyra:erase` is used. PAM DSL and PetriFlow are
+unchanged (0.9.1).
+
+### Security
+- **The dashboard resolves only monitored models.** The routes that take a model
+  (`dashboard/compare`, `discrepancies`, `model_overview`, `audit_trail`, `model_heatmap`,
+  `event_list`, `flow/event_chain`, `flow/visualization`) called `constantize` on the request
+  parameter and returned the record's attributes. Any user the dashboard admitted could therefore
+  read the rows of any Active Record model, monitored or not, including password digests and
+  tokens. They now answer 404 for a model Lyra does not monitor. List sizes, day ranges and graph
+  depth are clamped (`limit` at most 1,000, 500 or 100 by route, `days` at most 90, `depth` at most
+  3). As before, the dashboard is closed outside development and test unless
+  `config.dashboard_authorization` admits the request.
+- **The Art. 15/20 export gathers the subject's data, not the subject's edits.**
+  `Lyra::Privacy::GDPRCompliance` selected every event whose metadata named the subject as its
+  *actor*. A staff member's export therefore held the records they had edited, which is other
+  people's data, while a subject's own records written by staff could be missed. It now gathers
+  the events of the subject's own record, of records that refer to the subject by foreign key
+  (`<subject_type>_id`, e.g. `user_id`), and of events that name the subject explicitly. The
+  dashboard's subject timeline does the same; who did what remains the `user_actions` view.
+
+### Fixed
+- **PaperTrail is switched off per model, not per request.** Where Lyra takes over a write
+  (Hijack and the event-sourcing modes), it set `PaperTrail.request.enabled = false`. That turned
+  versioning off for every model for the rest of the request or job thread and never turned it
+  back on, so writes to versioned models Lyra does not monitor lost their versions, with no event
+  in their place. Lyra now calls `PaperTrail.request.disable_model` for the model it takes over.
+- **The retention check reads the policies.** `GDPRCompliance#retention_compliance_check` ignored
+  the policies' `retention` blocks in favour of hard-coded periods for models named Payment,
+  Invoice, Student and Enrollment, and raised `TypeError` when `config.retention_policy` was a
+  single duration such as `7.years`. It now takes each monitored model's period from its policy,
+  over the configured default. `retention_compliance_with_policy` called a method that did not
+  exist.
+- **Erasures and mode switches name who made them.** `rake lyra:erase` passes `OPERATOR=` as
+  `erased_by`, falling back to `LYRA_OPERATOR`, then the operating-system user and process; before,
+  it recorded no one. Every mode switch records the same in a new `actor` column of
+  `lyra_mode_transitions`, added on first use to an existing table, and logs it. A switch to
+  Disabled turns purpose checks and the access log off, so it is now attributable.
+- **Erasure is limited to personal fields.** `Lyra::Erasure.erase!` (and `lyra:erase FIELDS=`)
+  erased any column it was named, rewriting history in place under an Art. 17 reason. It now
+  refuses a column that neither the record's policy declares personal nor the events' privacy
+  stamps list, unless called with `any_fields: true` (`ANY_FIELDS=1`).
+
+### Known limitations (unchanged)
+- PAM DSL keeps consent records in memory, per process. Persistent consent storage is future
+  work; an application that relies on consent must store it.
+- The snapshot `update_all` takes before it writes is a plain read. Under READ COMMITTED, a row
+  another transaction changes or inserts between the snapshot and the update can be updated
+  without an event.
+
 ## [0.9.2] - 2026-11-03
 
 One fix in Lyra; PAM DSL and PetriFlow are unchanged (0.9.1).

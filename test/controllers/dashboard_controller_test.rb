@@ -83,9 +83,25 @@ module Lyra
     end
 
     def test_model_overview_with_invalid_model_class
-      assert_raises(NameError) do
-        get :model_overview, params: { model_class: "NonExistentModel" }
-      end
+      get :model_overview, params: { model_class: "NonExistentModel" }
+      assert_response :not_found
+    end
+
+    # Only monitored models can be named: an existing but unmonitored model
+    # (or any other constant) is not resolved, so its rows are never read.
+    def test_routes_refuse_a_model_lyra_does_not_monitor
+      get :compare, params: { model_class: "ActiveRecord::InternalMetadata", id: 1 }, format: :json
+      assert_response :not_found
+      get :discrepancies, params: { model_class: "Kernel" }
+      assert_response :not_found
+    end
+
+    def test_list_sizes_are_bounded
+      @controller.params = ActionController::Parameters.new(limit: "1000000", days: "-5")
+      assert_equal 500, @controller.send(:bounded_param, :limit, default: 50, max: 500)
+      assert_equal 1, @controller.send(:bounded_param, :days, default: 7, max: 90)
+      @controller.params = ActionController::Parameters.new({})
+      assert_equal 7, @controller.send(:bounded_param, :days, default: 7, max: 90)
     end
 
     # Tests for compare action

@@ -103,6 +103,27 @@ class ErasureTest < Minitest::Test
     assert_nil MT.discrepancy(EraseUser, user.id.to_s)
   end
 
+  # From 0.9.3 named fields must be personal: an erasure rewrites history in
+  # place, so a column the policy does not declare is refused unless asked.
+  def test_a_field_the_policy_does_not_declare_is_refused
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+
+    error = assert_raises(Lyra::Erasure::Unsupported) do
+      Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email created_at])
+    end
+    assert_match(/created_at not declared personal/, error.message)
+    assert_equal "ann@example.com", user.reload.email, "nothing erased"
+  end
+
+  def test_any_fields_erases_an_undeclared_column
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    with_policy_without_name do
+      Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[name], any_fields: true)
+    end
+
+    assert_equal "erased:#{user.id}", user.reload.name
+  end
+
   def test_a_domain_event_payload_under_the_attribute_s_name_is_erased_too
     monitor(privacy_policy: :erase_policy,
             domain_events: [{ name: "MemberJoined", on: :create, payload: ->(u, _c) { { email: u.email } } }])
@@ -217,6 +238,19 @@ class ErasureTest < Minitest::Test
     EraseNote.include(Lyra::Interceptors::CrudInterceptor)
     EraseNote.monitor_with_lyra
     Lyra.config.monitor_model(EraseNote)
+  end
+
+  # The test policy with only email declared, so name is an undeclared column.
+  def with_policy_without_name
+    PamDsl.reset!
+    PamDsl.define_policy(:erase_policy) do
+      field :email, type: :email, sensitivity: :confidential
+      purpose :contact do
+        basis :contract
+        requires :email
+      end
+    end
+    yield
   end
 
   def monitor(**options)

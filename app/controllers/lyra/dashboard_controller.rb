@@ -11,14 +11,14 @@ module Lyra
 
     # GET /lyra/dashboard/model/:model_class
     def model_overview
-      @model_class = params[:model_class].constantize
+      @model_class = monitored_model!(params[:model_class])
       @records_count = @model_class.count
       @events_count = count_events_for_model(@model_class)
     end
 
     # GET /lyra/dashboard/compare/:model_class/:id
     def compare
-      model_class = params[:model_class].constantize
+      model_class = monitored_model!(params[:model_class])
       model_id = params[:id]
 
       @comparison = DualView.new(model_class, model_id).compare
@@ -34,7 +34,7 @@ module Lyra
 
     # GET /lyra/dashboard/discrepancies/:model_class
     def discrepancies
-      @model_class = params[:model_class].constantize
+      @model_class = monitored_model!(params[:model_class])
       @discrepancies = DualView.find_discrepancies(@model_class)
       # find_discrepancies returns only the records that differ
       @records_checked = @model_class.count
@@ -120,7 +120,7 @@ module Lyra
 
       # If a model is selected, load available records for the picker
       if @selected_model.present?
-        @model_class = @selected_model.constantize
+        @model_class = monitored_model!(@selected_model)
         @available_records = fetch_available_records(@model_class, @search_query)
       end
 
@@ -132,7 +132,7 @@ module Lyra
 
     # GET /lyra/dashboard/audit_trail/:model_class/:id
     def audit_trail_for_record
-      @model_class = params[:model_class].constantize
+      @model_class = monitored_model!(params[:model_class])
       @model_id = params[:id]
       @record = @model_class.find_by(id: @model_id)
       @audit_entries = AuditProjection.audit_trail(@model_class, @model_id)
@@ -146,7 +146,7 @@ module Lyra
 
     # GET /lyra/dashboard/visualizations/timeline
     def timeline
-      events = fetch_recent_events(limit: params[:limit]&.to_i || 100)
+      events = fetch_recent_events(limit: bounded_param(:limit, default: 100, max: 1000))
       timeline = Visualization::Timeline.new(events)
 
       render json: timeline.to_data
@@ -158,7 +158,7 @@ module Lyra
       events = fetch_filtered_events(
         model_class: params[:model_class],
         operation: params[:operation],
-        limit: params[:limit]&.to_i || 50
+        limit: bounded_param(:limit, default: 50, max: 500)
       )
       graph = Visualization::EventGraph.new(events)
 
@@ -170,7 +170,7 @@ module Lyra
     def entity_graph
       model_class = params[:model_class]
       model_id = params[:id]
-      depth = params[:depth]&.to_i || 1  # How many related entities to include
+      depth = bounded_param(:depth, default: 1, max: 3) # How many related entities to include
 
       events = fetch_entity_events(model_class, model_id, depth: depth)
       graph = Visualization::EventGraph.new(events)
@@ -184,10 +184,10 @@ module Lyra
     # Returns list of entities with event counts for the picker UI
     def event_list
       model_filter = params[:model_class]
-      limit = params[:limit]&.to_i || 20
+      limit = bounded_param(:limit, default: 20, max: 100)
 
       entities = []
-      models = model_filter.present? ? [model_filter.constantize] : Lyra.config.monitored_models
+      models = model_filter.present? ? [monitored_model!(model_filter)] : Lyra.config.monitored_models
 
       models.each do |model_class|
         model_class.order(updated_at: :desc).limit(limit).each do |record|
@@ -224,7 +224,7 @@ module Lyra
 
     # GET /lyra/dashboard/visualizations/heatmap
     def heatmap
-      events = fetch_events_for_period(days: params[:days]&.to_i || 7)
+      events = fetch_events_for_period(days: bounded_param(:days, default: 7, max: 90))
       heatmap = Visualization::ActivityHeatmap.new(events)
 
       render json: heatmap.to_data
@@ -232,7 +232,7 @@ module Lyra
 
     # GET /lyra/visualizations/event_graph (HTML view)
     def event_graph_view
-      @limit = params[:limit]&.to_i || 50
+      @limit = bounded_param(:limit, default: 50, max: 500)
       events = fetch_recent_events(limit: @limit)
       graph = Visualization::EventGraph.new(events)
       @graph_data = graph.to_data
@@ -241,7 +241,7 @@ module Lyra
 
     # GET /lyra/visualizations/heatmap (HTML view)
     def heatmap_view
-      @days = params[:days]&.to_i || 7
+      @days = bounded_param(:days, default: 7, max: 90)
       events = fetch_events_for_period(days: @days)
       heatmap = Visualization::ActivityHeatmap.new(events)
       @heatmap_data = heatmap.to_data
@@ -362,8 +362,8 @@ module Lyra
 
     # GET /lyra/dashboard/visualizations/model_heatmap/:model_class
     def model_heatmap
-      model_class = params[:model_class].constantize
-      events = fetch_events_for_model(model_class, days: params[:days]&.to_i || 7)
+      model_class = monitored_model!(params[:model_class])
+      events = fetch_events_for_model(model_class, days: bounded_param(:days, default: 7, max: 90))
       heatmap = Visualization::ActivityHeatmap.new(events)
 
       render json: {
@@ -475,7 +475,7 @@ module Lyra
 
     def fetch_filtered_events(model_class: nil, operation: nil, limit: 50)
       events = []
-      models = model_class.present? ? [model_class.constantize] : Lyra.config.monitored_models
+      models = model_class.present? ? [monitored_model!(model_class)] : Lyra.config.monitored_models
 
       models.each do |klass|
         klass.order(updated_at: :desc).limit(limit).each do |record|

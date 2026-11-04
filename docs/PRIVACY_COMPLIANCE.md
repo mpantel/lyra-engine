@@ -168,9 +168,11 @@ export = compliance.data_export
 # - Processing activities record
 ```
 
-`GDPRCompliance` selects the events whose
-metadata or data name the subject as `user_id`, or whose `model_class` and `model_id` are the
-subject. The keys of the export are shown under [GDPR Data Export](#gdpr-data-export).
+`GDPRCompliance` selects the events of the subject's own record (`model_class` and `model_id`
+are the subject), of records that refer to the subject by foreign key (`user_id` for subject type
+`User`), and of events that name the subject explicitly (`subject_id`, `subject_type`). It does not
+select events by their actor: what a staff member edited is other people's data (before 0.9.3 it
+did). The keys of the export are shown under [GDPR Data Export](#gdpr-data-export).
 
 **API Endpoint**:
 ```
@@ -204,11 +206,12 @@ Lyra::Erasure.erase!(Registration, 5, reason: "Art. 17 request #12")
 # => #<Result fields: ["email", "firstname", ...], events_rewritten: 4, row_erased: true>
 ```
 ```bash
-bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELDS=email,phone] [EVERYWHERE=1]
+bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" OPERATOR=jdoe [FIELDS=email,phone] [EVERYWHERE=1]
 ```
 
 - Erases the personal attributes (declared by the policy, or listed by the events' privacy
-  stamps, or exactly `fields:`) from the row and from every event in the record's stream,
+  stamps, or exactly `fields:`, which must be among those unless `any_fields: true`,
+  `ANY_FIELDS=1`, since 0.9.3) from the row and from every event in the record's stream,
   overwriting each event in place (same id, position and time): attributes, both sides of each
   change, and payload keys with the attribute's name, plus any copy of an erased value under
   another name (matched by value: a payload's `payer_email`).
@@ -224,7 +227,9 @@ bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" [FIELD
   only.
 - Rows are written with one `UPDATE` by id, so records the application marks read-only (Solidus
   freezes an address once an order uses it) are erased too.
-- Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). It is not
+- Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). The task
+  records `OPERATOR=` as `erased_by`, else `LYRA_OPERATOR`, else the operating-system user and
+  process (since 0.9.3; before, it recorded no one). It is not
   replayed; the stream still replays to the anonymized row.
 - Replacement: `nil` where the column allows it, `"erased:<id>"` for a NOT NULL string column,
   the column default otherwise.

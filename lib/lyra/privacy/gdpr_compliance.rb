@@ -37,7 +37,7 @@ module Lyra
           model_class_extractor: method(:extract_model_class),
           model_id_extractor: method(:extract_model_id),
           changes_extractor: method(:extract_changes),
-          retention_policy: Lyra.config.retention_policy || default_retention_policy
+          retention_policy: retention_policy
         )
       end
 
@@ -92,15 +92,34 @@ module Lyra
         end
       end
 
-      # Check if an event relates to the subject
+      # Whether an event holds the subject's data: an event of the subject's
+      # own record, or of a record that refers to the subject through its
+      # foreign key (a Registration's user_id, for subject type User).
+      #
+      # Who *made* a change is not whose data it is: before 0.9.3 an event
+      # whose metadata named the subject as its actor (metadata[:user_id])
+      # was exported too, so a staff member's export held every record they
+      # had edited, other people's data, while a subject's own records written
+      # by staff could be missed.
       def event_relates_to_subject?(event, subject_id, subject_type)
-        metadata = event.respond_to?(:metadata) ? event.metadata : {}
         data = event.respond_to?(:data) ? event.data : {}
+        id = subject_id.to_s
+        return true if extract_model_class(event).to_s == subject_type.to_s && extract_model_id(event).to_s == id
 
-        metadata[:user_id] == subject_id ||
-        data[:user_id] == subject_id ||
-        data[:subject_id] == subject_id ||
-        (extract_model_class(event) == subject_type && extract_model_id(event) == subject_id)
+        explicit = data[:subject_id] || data["subject_id"]
+        if explicit
+          type = data[:subject_type] || data["subject_type"]
+          return explicit.to_s == id && (type.nil? || type.to_s == subject_type.to_s)
+        end
+
+        attributes = extract_attributes(event)
+        value = attributes[subject_foreign_key(subject_type)] || attributes[subject_foreign_key(subject_type).to_sym]
+        !value.nil? && value.to_s == id
+      end
+
+      # The foreign key a record uses to refer to a subject of +subject_type+.
+      def subject_foreign_key(subject_type)
+        "#{subject_type.to_s.demodulize.underscore}_id"
       end
 
       # Lyra-specific extractors
@@ -147,14 +166,32 @@ module Lyra
         {}
       end
 
-      def default_retention_policy
-        {
-          default: { duration: 7.years },
-          'Payment' => { duration: 10.years },
-          'Invoice' => { duration: 10.years },
-          'Student' => { duration: 10.years },
-          'Enrollment' => { duration: 10.years }
-        }
+      # The retention periods the compliance check applies, as PAM's check
+      # expects them ({ "Model" => { duration: d }, default: { duration: d } }):
+      # each monitored model's period from its privacy policy's retention block,
+      # over config.retention_policy, which may be a single duration (7.years) or
+      # such a hash.
+      #
+      # Before 0.9.3 the policies' retention blocks were ignored in favour of
+      # hard-coded periods for models named Payment, Invoice, Student and
+      # Enrollment, and a single duration in config.retention_policy raised
+      # TypeError.
+      def retention_policy
+        configured = Lyra.config.retention_policy
+        policy =
+          case configured
+          when nil then { default: { duration: 7.years } }
+          when Hash then configured.transform_values { |v| v.is_a?(Hash) ? v : { duration: v } }
+          else { default: { duration: configured } }
+          end
+
+        Lyra.config.monitored_models.each do |model|
+          duration = Lyra::Privacy.policy_for(model).retention_for(model)
+          policy[model.name] = { duration: duration } if duration.is_a?(ActiveSupport::Duration)
+        rescue StandardError
+          next
+        end
+        policy
       end
     end
 
@@ -175,9 +212,9 @@ module Lyra
       # Returns nil for models without defined retention (infinite/manual)
       def retention_compliance_with_policy(policy_name)
         integration = PolicyIntegration.new(policy_name)
-        events = collect_all_events
+        events = Lyra.config.event_store.read.to_a
 
-        events.group_by { |e| e.model_class }.map do |model_class, model_events|
+        events.group_by { |e| extract_model_class(e) }.map do |model_class, model_events|
           retention_duration = integration.retention_duration(model_class)
 
           # nil means infinite/manual retention - always compliant
@@ -192,7 +229,8 @@ module Lyra
             }
           else
             expired = model_events.select do |event|
-              event.timestamp && event.timestamp < (Time.current - retention_duration)
+              timestamp = extract_timestamp(event)
+              timestamp && timestamp < (Time.current - retention_duration)
             end
 
             {
@@ -201,7 +239,7 @@ module Lyra
               expired_events: expired.count,
               retention_period: retention_duration,
               compliance_status: expired.empty? ? :compliant : :requires_action,
-              expired_event_ids: expired.map(&:event_id)
+              expired_event_ids: expired.map { |e| e.respond_to?(:event_id) ? e.event_id : e.object_id }
             }
           end
         end

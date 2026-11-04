@@ -9,6 +9,10 @@ module Lyra
     # Lyra::Configuration#dashboard_authorization.
     before_action :authorize_lyra_dashboard!
 
+    # A model_class parameter that names no monitored model answers 404.
+    class UnknownModel < StandardError; end
+    rescue_from(UnknownModel) { head :not_found }
+
     helper_method :pam_dsl_available?, :user_tracking_configured?, :petri_flow_available?
 
     # Check if PAM DSL is available for privacy features
@@ -55,6 +59,21 @@ module Lyra
         end
 
       head :forbidden unless allowed
+    end
+
+    # The monitored model a request names, or 404. The routes that take a model
+    # read its records and return their attributes, so only models Lyra monitors
+    # may be named: resolving any constant (as 0.9.2 and earlier did) let a
+    # dashboard user read any table, unmonitored ones included.
+    def monitored_model!(name)
+      Lyra.config.monitored_model_named(name) || raise(UnknownModel, name.to_s)
+    end
+
+    # An integer parameter, clamped to 1..max; the default when absent. Bounds
+    # the work a single dashboard request can ask for.
+    def bounded_param(key, default:, max:)
+      value = params[key].presence&.to_i || default
+      value.clamp(1, max)
     end
 
     def lyra_dashboard_open_by_default?
