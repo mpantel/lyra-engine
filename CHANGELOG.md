@@ -15,7 +15,8 @@ of writes, the mapping of operations to events, the checked transitions between 
 results that rest on them are unchanged. The defects are in the dashboard, the GDPR helpers, the
 hand-over from PaperTrail and the operator tasks. Upgrade if the dashboard is open to anyone, or if
 the Art. 15/20 export, the retention check, `lyra:erase` or the policy generator is used. PAM DSL
-moves to 0.9.3 for its policy generator (below); PetriFlow is unchanged (0.9.1).
+moves to 0.9.3 for its policy generator, and PetriFlow to 0.9.3 for the way it runs Graphviz
+(below).
 
 ### Security
 - **The dashboard resolves only monitored models.** The routes that take a model
@@ -34,6 +35,12 @@ moves to 0.9.3 for its policy generator (below); PetriFlow is unchanged (0.9.1).
   the events of the subject's own record, of records that refer to the subject by foreign key
   (`<subject_type>_id`, e.g. `user_id`), and of events that name the subject explicitly. The
   dashboard's subject timeline does the same; who did what remains the `user_actions` view.
+- **PetriFlow runs Graphviz without a shell.** `VerificationRunner` (its PNG, PDF and SVG
+  images) and `Visualization::Graphviz#render` built a shell command from the report directory,
+  the workflow's name, the output path and the layout, so a path or name with shell syntax in it
+  would have run as a command. They now pass Graphviz its arguments one by one, and `render`
+  accepts only Graphviz's layout engines (`Graphviz::LAYOUTS`) and plain format names. The
+  values come from the developer, not from a request; a static analysis (Brakeman) flagged both.
 
 ### Fixed
 - **PaperTrail is switched off per model, not per request.** Where Lyra takes over a write
@@ -83,6 +90,12 @@ moves to 0.9.3 for its policy generator (below); PetriFlow is unchanged (0.9.1).
   data subject's records and history, with no declared purpose and no access-log entry, and the
   rule covers the whole dashboard. What bringing it to production would take is listed in the
   README (Dashboard) as a future feature.
+
+### Dependencies
+- **The development lockfile is updated against published advisories** (bundler-audit,
+  2026-11-04): `rack`, `nokogiri`, `loofah`, `rails-html-sanitizer`, `crass` and `sqlite3` (tests
+  only). The gems' own dependency declarations are unchanged: none pins a vulnerable version, and
+  an application resolves its own.
 
 ### Known limitations (unchanged)
 - PAM DSL keeps consent records in memory, per process. Persistent consent storage is future

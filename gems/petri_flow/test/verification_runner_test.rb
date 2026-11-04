@@ -314,5 +314,24 @@ module PetriFlow
     ensure
       Object.send(:remove_const, :TestVerificationWorkflow) if defined?(TestVerificationWorkflow)
     end
+
+    # ===========================================
+    # Graphviz images: arguments, never a shell string
+    # ===========================================
+
+    def test_graphviz_images_pass_paths_as_separate_arguments
+      runner = VerificationRunner.new(base_dir: @tmpdir, output: @output)
+      calls = []
+      runner.define_singleton_method(:system) { |*args, **kw| calls << [args, kw]; true }
+      dot_file = File.join(@tmpdir, "net; touch pwned.dot")
+
+      runner.send(:generate_graphviz_images, dot_file, "wf$(id)")
+
+      assert_equal %w[png pdf svg], calls.map { |args, _| args[1].delete_prefix("-T") }
+      calls.each do |args, kw|
+        assert_equal ["dot", args[1], dot_file, "-o", File.join(runner.reports_dir, "wf$(id)_petri.#{args[1].delete_prefix("-T")}")], args
+        assert_equal File::NULL, kw[:err]
+      end
+    end
   end
 end

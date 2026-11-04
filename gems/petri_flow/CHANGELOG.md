@@ -4,6 +4,15 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-04
+
+### Security
+- **Graphviz is run without a shell.** `VerificationRunner#generate_graphviz_images` and
+  `Visualization::Graphviz#render` built a shell command from the report directory, the
+  workflow's name, the output path and the layout. They now pass Graphviz its arguments one by
+  one, and `render` accepts only Graphviz's layout engines (`Graphviz::LAYOUTS`) and plain format
+  names, raising `ArgumentError` otherwise. The version moves to 0.9.3, with Lyra and PAM DSL.
+
 ## [0.9.1] - 2026-11-02
 
 ### Changed

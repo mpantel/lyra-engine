@@ -21,6 +21,9 @@ module PetriFlow
         rankdir: "TB"  # TB (top-bottom), LR (left-right)
       }.freeze
 
+      # Graphviz layout engines render accepts, each the name of its executable.
+      LAYOUTS = %w[dot neato fdp sfdp circo twopi osage patchwork].freeze
+
       def initialize(net, options = {})
         @net = net
         @options = DEFAULT_OPTIONS.merge(options)
@@ -69,10 +72,13 @@ module PetriFlow
       def render(output_file, format: "png")
         require 'open3'
 
-        dot_content = to_dot
-        cmd = "#{@options[:layout]} -T#{format} -o #{output_file}"
+        layout = @options[:layout].to_s
+        raise ArgumentError, "unknown Graphviz layout #{layout.inspect} (one of #{LAYOUTS.join(', ')})" unless LAYOUTS.include?(layout)
+        raise ArgumentError, "invalid Graphviz format #{format.inspect}" unless format.to_s.match?(/\A[a-z0-9:]+\z/)
 
-        stdout, stderr, status = Open3.capture3(cmd, stdin_data: dot_content)
+        dot_content = to_dot
+        # Arguments, not a shell string: no path or option reaches a shell.
+        stdout, stderr, status = Open3.capture3(layout, "-T#{format}", "-o", output_file.to_s, stdin_data: dot_content)
 
         unless status.success?
           raise "Graphviz rendering failed: #{stderr}"

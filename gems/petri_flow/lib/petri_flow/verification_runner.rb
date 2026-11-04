@@ -169,13 +169,14 @@ module PetriFlow
     end
 
     def graphviz_available?
-      system("which dot > /dev/null 2>&1")
+      system("which", "dot", out: File::NULL, err: File::NULL)
     end
 
     def generate_graphviz_images(dot_file, workflow_id)
       %w[png pdf svg].each do |format|
         output_file = File.join(@reports_dir, "#{workflow_id}_petri.#{format}")
-        system("dot -T#{format} #{dot_file} -o #{output_file} 2>/dev/null")
+        # Arguments, not a shell string: the paths never reach a shell.
+        system("dot", "-T#{format}", dot_file, "-o", output_file, err: File::NULL)
       end
     end
 
