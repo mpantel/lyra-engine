@@ -59,7 +59,8 @@ unchanged (0.9.1).
 
 ### Known limitations (unchanged)
 - PAM DSL keeps consent records in memory, per process. Persistent consent storage is future
-  work; an application that relies on consent must store it.
+  work; an application that relies on consent must store it. Documented in the PAM DSL README
+  ("Runtime consent store"), on `ConsentStore`, and in `docs/PRIVACY_COMPLIANCE.md`.
 - The snapshot `update_all` takes before it writes is a plain read. Under READ COMMITTED, a row
   another transaction changes or inserts between the snapshot and the update can be updated
   without an event.

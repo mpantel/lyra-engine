@@ -501,6 +501,13 @@ audit = compliance.consent_audit
 # - Expired consents
 ```
 
+The audit reads consent from the events in the log. The consent that `validate_access!` checks is
+PAM DSL's runtime consent store, which is held in memory per process and not persisted: a restart
+loses it, and a withdrawal made in one process is not seen by the others. Lyra does not persist
+it. An application that relies on consent keeps the decisions in its own durable store, such as
+events in the data subject's stream, and loads them into PAM DSL's store (PAM DSL README, "Runtime
+consent store"). Persistent, event-backed consent is future work.
+
 ### 9. Data Retention Compliance
 
 Check compliance with retention policies:

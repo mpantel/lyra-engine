@@ -333,6 +333,16 @@ end
 
 Before calling `validate_access!` for a consent-based purpose, populate the store with the subject's actual consent decision. The store is the runtime $CS$ component from the formal model — indexed by `(purpose, subject)` pairs.
 
+> **The store is held in memory, per process.** `ConsentStore` keeps its records in a hash inside
+> the policy object and does not persist them. A restart or deploy loses every record, so the store
+> alone cannot demonstrate that a consent was given (GDPR Art. 7(1)). A grant or withdrawal made in
+> one process (a Puma worker, a job worker) is not seen by the others, so it alone cannot make a
+> withdrawal take effect everywhere (Art. 7(3)). An application that relies on consent must keep
+> the decisions in its own durable store (a table, or events in the data subject's stream) and load
+> them into this store, at start-up and on every change, or per request. `granular!` and
+> `withdrawable!` are recorded with the requirement but not enforced. Persistent, event-backed
+> consent is future work.
+
 Each `(purpose, subject)` pair has a `ConsentRecord` in one of four states:
 
 - `:pending` - consent requested (`request_consent`), not yet granted

@@ -59,6 +59,12 @@ module PamDsl
 
   # Runtime consent state store — the CS component of the formal runtime context C.
   # Indexed by [purpose, subject] pairs.
+  #
+  # Held in memory, per process, and not persisted: a restart loses every record,
+  # and a grant or withdrawal in one process is not seen by the others. An
+  # application that relies on consent keeps the decisions in its own durable
+  # store and loads them here (see the README, "Runtime consent store").
+  # Persistent, event-backed consent is future work.
   class ConsentStore
     def initialize
       @records = {}
