@@ -14,8 +14,8 @@ defects below. None of them touches the gradual migration itself: the modes, the
 of writes, the mapping of operations to events, the checked transitions between modes, and the
 results that rest on them are unchanged. The defects are in the dashboard, the GDPR helpers, the
 hand-over from PaperTrail and the operator tasks. Upgrade if the dashboard is open to anyone, or if
-the Art. 15/20 export, the retention check or `lyra:erase` is used. PAM DSL and PetriFlow are
-unchanged (0.9.1).
+the Art. 15/20 export, the retention check, `lyra:erase` or the policy generator is used. PAM DSL
+moves to 0.9.3 for its policy generator (below); PetriFlow is unchanged (0.9.1).
 
 ### Security
 - **The dashboard resolves only monitored models.** The routes that take a model
@@ -56,14 +56,38 @@ unchanged (0.9.1).
   erased any column it was named, rewriting history in place under an Art. 17 reason. It now
   refuses a column that neither the record's policy declares personal nor the events' privacy
   stamps list, unless called with `any_fields: true` (`ANY_FIELDS=1`).
+- **Bulk writes lock the rows they write.** `update_all` and `delete_all` (and the writes routed
+  through them: `update_counters`, `touch_all`, `delete_by`, `dependent: :delete_all`) took their
+  snapshot with a plain read, so under READ COMMITTED a row another transaction changed or
+  inserted between the snapshot and the write could be written without an event. They now lock
+  the matched rows (`FOR UPDATE`, through a subquery of keys so DISTINCT and joins work) and write
+  exactly those, inside a transaction in every mode that keeps tables. A failed append rolls back
+  only its savepoint, so in Monitor the write still stands.
+- **A destroyed record is not written again.** Two writers of one record, a destroy and an
+  update, could both pass: the second found no row to lock, fell back to the advisory lock and
+  appended after the Destroyed event, leaving a stream that brought the record back
+  (`Lyra.state_at`, DualView). An update or destroy of a record whose stream ends in a destroy now
+  raises `Lyra::RecordDestroyedError` (a `RecordNotFound`). To check it, ES-NoProj and ES-Lazy now
+  take the lock on the aggregate for updates and destroys, as the other event-sourcing modes did.
+- **PAM DSL 0.9.3: the policy generator no longer chooses legal bases.** It wrote one for each
+  purpose it drafted: contract for billing, which tax law often makes a legal obligation;
+  legitimate interests for analytics, which a public authority cannot use for its tasks; consent
+  without a consent block. A drafted purpose now reads `basis :undetermined` with the usual
+  candidate and its caveats as a comment. Access under it is refused
+  (`PamDsl::UndeterminedBasisError`), and the Article 30 register lists it as a gap, until the
+  controller decides.
+
+### Documented
+- **The dashboard is a development tool.** Opening it in production with
+  `config.dashboard_authorization` is at the deployer's risk: whoever the rule admits reads every
+  data subject's records and history, with no declared purpose and no access-log entry, and the
+  rule covers the whole dashboard. What bringing it to production would take is listed in the
+  README (Dashboard) as a future feature.
 
 ### Known limitations (unchanged)
 - PAM DSL keeps consent records in memory, per process. Persistent consent storage is future
   work; an application that relies on consent must store it. Documented in the PAM DSL README
   ("Runtime consent store"), on `ConsentStore`, and in `docs/PRIVACY_COMPLIANCE.md`.
-- The snapshot `update_all` takes before it writes is a plain read. Under READ COMMITTED, a row
-  another transaction changes or inserts between the snapshot and the update can be updated
-  without an event.
 
 ## [0.9.2] - 2026-11-03
 

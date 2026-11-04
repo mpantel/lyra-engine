@@ -89,6 +89,66 @@ module Lyra
       assert_empty events_for(untouched)
     end
 
+    # From 0.9.3 a bulk write locks the rows it matches and writes exactly
+    # those. A matching row that appears after the snapshot (here inserted
+    # inside it, as another transaction could at READ COMMITTED) used to be
+    # updated with no event; it is now left for a later write.
+    def test_update_all_writes_only_the_rows_it_recorded
+      a = create_article("One")
+      clear_event_store
+      late_id = nil
+      original = Lyra::BypassEvents.method(:snapshot)
+      snapshot = lambda do |model, relation, **kwargs|
+        rows = original.call(model, relation, **kwargs)
+        now = Time.current
+        late_id ||= Lyra.projection_write do
+          BypassTestArticle.insert({ title: "Late", status: "draft", created_at: now, updated_at: now }, returning: :id).rows.first.first
+        end
+        rows
+      end
+
+      Lyra::BypassEvents.stub(:snapshot, snapshot) do
+        assert_equal 1, BypassTestArticle.where(status: "draft").update_all(status: "published")
+      end
+
+      assert_equal "published", a.reload.status
+      assert_equal "update_all", only_event(a).metadata[:bypass_source]
+      assert_equal "draft", BypassTestArticle.find(late_id).status, "not written without its event"
+      assert_empty events_for(BypassTestArticle.find(late_id))
+    end
+
+    def test_delete_all_deletes_only_the_rows_it_recorded
+      a = create_article("One")
+      clear_event_store
+      late_id = nil
+      original = Lyra::BypassEvents.method(:snapshot)
+      snapshot = lambda do |model, relation, **kwargs|
+        rows = original.call(model, relation, **kwargs)
+        now = Time.current
+        late_id ||= Lyra.projection_write do
+          BypassTestArticle.insert({ title: "Late", status: "draft", created_at: now, updated_at: now }, returning: :id).rows.first.first
+        end
+        rows
+      end
+
+      Lyra::BypassEvents.stub(:snapshot, snapshot) do
+        assert_equal 1, BypassTestArticle.where(status: "draft").delete_all
+      end
+
+      assert_equal "destroyed", value(only_event(a).data, :operation).to_s
+      assert BypassTestArticle.exists?(late_id), "not deleted without its event"
+    end
+
+    def test_update_all_on_a_distinct_relation_still_locks
+      a = create_article("One")
+      clear_event_store
+
+      BypassTestArticle.distinct.where(id: a.id).update_all(status: "published")
+
+      assert_equal "published", a.reload.status
+      assert_equal({ "status" => %w[draft published] }, value(only_event(a).data, :changes))
+    end
+
     def test_update_all_with_sql_fragment_records_the_resulting_values
       a = create_article("One")
       clear_event_store

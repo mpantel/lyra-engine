@@ -41,6 +41,8 @@ module PamDsl
   class UndeclaredPurposeError < Error; end
   class PurposeFieldMismatchError < Error; end
   class ConsentRequiredError < Error; end
+  # Access under a purpose whose legal basis the controller has not yet decided.
+  class UndeterminedBasisError < Error; end
   class SensitivityViolationError < Error; end
 
   # Class used to recognise duration values in case/when: ActiveSupport::Duration

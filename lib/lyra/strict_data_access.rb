@@ -170,8 +170,9 @@ module Lyra
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
       Lyra::BypassEvents.atomically(klass) do
-        before = Lyra::BypassEvents.snapshot(klass, self)
-        result = super
+        lock = Lyra::BypassEvents.locks_rows?
+        before = Lyra::BypassEvents.snapshot(klass, self, lock: lock)
+        result = lock ? write_snapshotted(before) { |rows| rows.update_all(updates) } : super
         safely_publish_bulk("update_all") { Lyra::BypassEvents.publish_updates(klass, before, source: "update_all") }
         result
       end
@@ -186,8 +187,9 @@ module Lyra
       return super unless Lyra::BypassEvents.enabled_for?(klass)
 
       Lyra::BypassEvents.atomically(klass) do
-        before = Lyra::BypassEvents.snapshot(klass, self)
-        result = super
+        lock = Lyra::BypassEvents.locks_rows?
+        before = Lyra::BypassEvents.snapshot(klass, self, lock: lock)
+        result = lock ? write_snapshotted(before) { |rows| rows.delete_all } : super
         safely_publish_bulk("delete_all") { Lyra::BypassEvents.publish_destroys(klass, before, source: "delete_all") }
         result
       end
@@ -303,6 +305,15 @@ module Lyra
       raise StrictDataAccessViolation.new(method_name, klass)
     end
 
+    # The bulk write, on exactly the rows the locked snapshot holds: no row
+    # another transaction inserted since is written without its event. Runs as
+    # Lyra's own write, so it is not intercepted a second time.
+    def write_snapshotted(before)
+      return 0 if before.empty?
+    
+      Lyra.projection_write { yield where(klass.primary_key => before.keys) }
+    end
+    
     def safely_publish_bulk(source)
       yield
     rescue => e

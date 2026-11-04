@@ -462,7 +462,8 @@ module PamDsl
       legal_obligation:     "Legal obligation (Art. 6(1)(c))",
       vital_interests:      "Vital interests (Art. 6(1)(d))",
       public_task:          "Public task (Art. 6(1)(e))",
-      legitimate_interests: "Legitimate interests (Art. 6(1)(f))"
+      legitimate_interests: "Legitimate interests (Art. 6(1)(f))",
+      undetermined:         "Undetermined: the controller decides"
     }.freeze
 
     def determine_legal_basis(source, _events)

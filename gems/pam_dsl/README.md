@@ -173,6 +173,7 @@ end
 - `:vital_interests` - Protection of vital interests
 - `:public_task` - Task in public interest
 - `:legitimate_interests` - Legitimate interests
+- `:undetermined` - Not a legal basis: what the policy generator writes until the controller decides one. Access under it is refused (`PamDsl::UndeterminedBasisError`) and the Article 30 register lists it as a gap.
 
 #### Legitimate Interests Assessment (LIA)
 
@@ -764,6 +765,8 @@ bundle exec rake "pam_dsl:generate:policy[my_app_policy]"
 # Replace an existing config/initializers/pam_dsl_policy.rb
 FORCE=1 bundle exec rake "pam_dsl:generate:from_models[my_app_policy]"
 ```
+
+The generator drafts purposes but does not choose their legal bases, which are the controller's decision: each drafted purpose reads `basis :undetermined`, with the usual candidate and its caveats as a comment (from 0.9.3; it used to write a basis). Until each is replaced, access under it is refused.
 
 Both tasks write `config/initializers/pam_dsl_policy.rb` and refuse to overwrite an existing file there unless `FORCE=1` is set, so a reviewed policy is not replaced by a fresh draft. The policy name defaults to `application`.
 

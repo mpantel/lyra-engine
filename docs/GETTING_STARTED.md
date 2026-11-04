@@ -169,7 +169,8 @@ The dashboard is at `/lyra/dashboard` (the engine's root redirects to
 `dashboard` under wherever you mount it), with record comparisons, audit
 trails, event flow views and privacy pages. It is open in development and
 test; elsewhere it answers 403 until you say who may use it, because its
-privacy pages show personal data:
+privacy pages show personal data. It is a development tool: see the README's Dashboard section
+before opening it in production. To admit a role:
 
 ```ruby
 # config/initializers/lyra.rb

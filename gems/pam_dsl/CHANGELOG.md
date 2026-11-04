@@ -4,6 +4,24 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-04
+
+### Changed
+- **The policy generator no longer chooses legal bases.** Each purpose it drafts, from models or
+  as a template, reads `basis :undetermined` with the usual candidate and its caveats as a comment;
+  it used to write one (contract for billing, which tax law often makes a legal obligation;
+  legitimate interests for analytics, not available to a public authority for its tasks; consent
+  with no consent block). The basis is the controller's decision.
+
+### Added
+- **`basis :undetermined`**, not a legal basis but a marker: access under such a purpose raises
+  `PamDsl::UndeterminedBasisError`, and `article_30_gaps` lists the purpose, until a basis is
+  declared.
+
+### Documented
+- The runtime consent store is held in memory, per process, and not persisted (README, "Runtime
+  consent store"; `ConsentStore`). Persistent, event-backed consent is future work.
+
 ## [0.9.1] - 2026-11-02
 
 ### Changed

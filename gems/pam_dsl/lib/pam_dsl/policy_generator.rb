@@ -71,6 +71,18 @@ module PamDsl
       }
     }.freeze
 
+    # The comment a generated purpose carries about its usual basis. A hint,
+    # not a decision: the same purpose rests on different bases in different
+    # organizations (invoicing is a legal obligation where tax law requires
+    # it, not a contract), and a public authority cannot rely on legitimate
+    # interests for its tasks (Art. 6(1), last subparagraph).
+    BASIS_HINTS = {
+      contract: "Often :contract (Art. 6(1)(b)) where the processing is necessary to perform a contract with the person; :legal_obligation where a law requires it; :public_task for a public body's task.",
+      legal_obligation: "Often :legal_obligation (Art. 6(1)(c)): name the law that requires it.",
+      legitimate_interests: "Often :legitimate_interests (Art. 6(1)(f)), which needs a documented balancing test (lia_documented!) and is not available to a public authority for its tasks.",
+      consent: "Often :consent (Art. 6(1)(a)), which needs a consent block (required!, withdrawable!) and a way to record the person's decision."
+    }.freeze
+
     # Raised instead of overwriting an existing policy file (a policy the
     # team has reviewed and edited) unless the generator was told to force.
     class FileExistsError < StandardError; end
@@ -183,22 +195,23 @@ module PamDsl
           #   :vital_interests    - Protection of vital interests
           #   :public_task        - Task in public interest
           #   :legitimate_interests - Legitimate interests
+          #   :undetermined       - Not a basis: refuses access until the controller decides
 
           purpose :service_delivery do
             describe "Core service delivery and functionality"
-            basis :contract
+            basis :undetermined  # TO DECIDE. Often :contract (Art. 6(1)(b)); :public_task for a public body
             requires :email, :first_name, :last_name
           end
 
           purpose :communication do
             describe "Sending transactional and service-related communications"
-            basis :contract
+            basis :undetermined  # TO DECIDE. Often :contract (Art. 6(1)(b))
             requires :email
           end
 
           purpose :audit_trail do
             describe "Maintaining security and audit logs"
-            basis :legal_obligation
+            basis :undetermined  # TO DECIDE. Often :legal_obligation (Art. 6(1)(c)): name the law
             requires :ip_address, :email
           end
 
@@ -437,15 +450,15 @@ module PamDsl
         matching_fields = required_types.flat_map { |t| fields_by_type[t] }
         requires_clause = matching_fields.map { |f| ":#{f}" }.join(", ")
 
-        lia_line = config[:basis] == :legitimate_interests \
-          ? "# lia_documented!  # uncomment after conducting the LIA balancing test\n              " \
-          : ""
-
+        # The basis is the controller's decision, which a generator cannot
+        # make (from 0.9.3: it used to write one). The draft says
+        # :undetermined, which refuses access until it is replaced, and names
+        # the usual candidate as a comment, with the caveats that apply.
+        requires_line = requires_clause.empty? ? "" : "\n  requires #{requires_clause}"
         purposes << <<~RUBY
             purpose :#{purpose_name} do
               describe "#{config[:description]}"
-              basis :#{config[:basis]}
-              #{lia_line}#{"requires #{requires_clause}" unless requires_clause.empty?}
+              basis :undetermined  # TO DECIDE. #{BASIS_HINTS.fetch(config[:basis])}#{requires_line}
             end
         RUBY
       end

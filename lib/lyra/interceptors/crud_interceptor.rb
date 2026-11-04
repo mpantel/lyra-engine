@@ -1,4 +1,9 @@
 module Lyra
+  # An update or destroy of a record whose event stream says it was destroyed
+  # (see CrudInterceptor#lyra_lock_aggregate_unless_destroyed!). A
+  # RecordNotFound, as for any write to a record that is gone.
+  class RecordDestroyedError < ActiveRecord::RecordNotFound; end
+
   module Interceptors
     # Where hijack and event-sourcing modes take over a write.
     #
@@ -481,11 +486,37 @@ module Lyra
         es_async = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :async
         es_sync = lyra_event_sourcing_mode? && Lyra.config.projection_mode == :sync
         return unless lyra_hijack_mode? || es_sync || es_async || checks_version
-        return if (lyra_hijack_mode? || es_sync) && lyra_lock_own_row(operation)
+        return :row if (lyra_hijack_mode? || es_sync) && lyra_lock_own_row(operation)
 
         self.class.with_connection do |connection|
           Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
         end
+        :advisory
+      end
+
+      # The lock on the aggregate, then a refusal if the record's stream says
+      # it was destroyed (from 0.9.3). A destroy and an update of one record
+      # could both pass before: the second writer found no row to lock, fell
+      # back to the advisory lock and appended after the Destroyed event,
+      # leaving a stream that brings the record back (state_at, DualView).
+      # Where the record's row was found and locked it exists, so there is
+      # nothing to check. Elsewhere the stream's last event is read under the
+      # advisory lock, which this takes in ES-NoProj and ES-Lazy too, for
+      # updates and destroys only. With lock_aggregate_before_append off, as
+      # in the benchmarks' no-lock controls, nothing is checked.
+      def lyra_lock_aggregate_unless_destroyed!(operation = :update)
+        locked = lyra_lock_aggregate!(operation)
+        return if locked == :row || id.nil? || !Lyra.config.lock_aggregate_before_append
+
+        unless locked == :advisory
+          self.class.with_connection do |connection|
+            Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
+          end
+        end
+        last = Lyra.config.event_store.read.stream(lyra_stream_name).backward.limit(1).to_a.first
+        return unless last && Lyra::Event.operation_of(last) == :destroyed
+
+        raise Lyra::RecordDestroyedError, "#{self.class.name} #{id} was destroyed; its #{operation} is refused"
       end
 
       # True when the record's row was found and locked.
@@ -510,7 +541,7 @@ module Lyra
       def lyra_hijack_update
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!
+        lyra_lock_aggregate_unless_destroyed!
 
         # Active Record checks and increments lock_version in the row write
         # that follows; the event records the increment it makes.
@@ -529,7 +560,7 @@ module Lyra
       def lyra_hijack_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!(:destroy)
+        lyra_lock_aggregate_unless_destroyed!(:destroy)
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)
         command.record = self
@@ -575,7 +606,7 @@ module Lyra
       def lyra_prepare_event_source_update
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!
+        lyra_lock_aggregate_unless_destroyed!
         # Active Record checks and increments lock_version only when it writes
         # the row, that is when something changed.
         lock_was = lyra_take_lock_version!("update") if has_changes_to_save?
@@ -643,7 +674,7 @@ module Lyra
       def lyra_prepare_event_source_destroy
         @lyra_hijacked = true
         lyra_disable_paper_trail!
-        lyra_lock_aggregate!(:destroy)
+        lyra_lock_aggregate_unless_destroyed!(:destroy)
         Lyra::OptimisticLocking.check!(self, "destroy")
 
         command = Lyra::Commands::DestroyCommand.new(self.class, id)

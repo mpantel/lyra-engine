@@ -126,11 +126,17 @@ class AggregateLockStatementsTest < Minitest::Test
     assert_locked(statements { created.destroy! }, "an ES-Async destroy")
   end
 
-  def test_es_noproj_takes_no_lock
+  # From 0.9.3 ES-NoProj takes the advisory lock for updates and destroys,
+  # under which it checks that the record's stream does not end in a destroy
+  # (CrudInterceptor#lyra_lock_aggregate_unless_destroyed!). Before, it took
+  # no lock at all.
+  def test_es_noproj_locks_updates_and_destroys
     Lyra.config.enable_event_sourcing!
     Lyra.config.projection_mode = :disabled
     item = LockItem.create!(label: "a")
-    refute_locked(statements { item.update!(label: "b") }, "an ES-NoProj update")
+    sql = statements { item.update!(label: "b") }
+    assert sql.any? { |s| s.include?("pg_advisory_xact_lock") }, "an ES-NoProj update took no lock"
+    refute sql.any? { |s| s.match?(ROW_LOCK) }, "an ES-NoProj update locked a row it does not have"
   end
 
   def test_the_lock_can_be_turned_off

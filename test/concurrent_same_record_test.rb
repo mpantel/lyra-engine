@@ -165,6 +165,56 @@ class ConcurrentSameRecordTest < Minitest::Test
                  Lyra.config.event_store.read.stream("RaceItem$#{id}").map { |e| e.event_type[/[A-Z][a-z]+\z/] }
   end
 
+  # The race the other way round (from 0.9.3): a destroy holds the lock, an
+  # update of the same record waits for it, and when the destroy commits the
+  # update finds no row. It used to fall back to the advisory lock and append
+  # after the Destroyed event; it is now refused, and the stream ends with the
+  # destroy.
+  def test_hijack_update_waiting_on_a_destroy_is_refused
+    Lyra.config.enable_hijack!
+    id = RaceItem.create!(label: "initial").id
+
+    gate = { point: :after_command, reached: Queue.new, resume: Queue.new }
+    first = Thread.new do
+      Thread.current[:race_gate] = gate
+      with_connection { RaceItem.find(id).destroy! }
+    end
+    gate[:reached].pop
+
+    second = Thread.new do
+      with_connection do
+        RaceItem.find(id).update!(label: "late")
+        :updated
+      rescue Lyra::RecordDestroyedError
+        :refused
+      end
+    end
+    refute second.join(0.5), "the update ran past the destroy's lock"
+
+    gate[:resume] << true
+    first.value
+    assert_equal :refused, second.value
+    assert_equal %w[Created Destroyed], stream_types(id)
+  end
+
+  # The end state of that race, in each event-writing configuration: a stale
+  # copy of a destroyed record can neither update nor destroy it again.
+  def test_a_destroyed_record_is_not_written_again_in_any_event_writing_mode
+    [[:hijack, nil], [:event_sourcing, :sync], [:event_sourcing, :async],
+     [:event_sourcing, :disabled], [:event_sourcing, :lazy]].each do |mode, projection|
+      Lyra.config.mode = mode
+      Lyra.config.projection_mode = projection if projection
+      id = RaceItem.create!(label: "initial").id
+      stale = RaceItem.find(id)
+      other = RaceItem.find(id)
+      RaceItem.find(id).destroy!
+
+      assert_raises(Lyra::RecordDestroyedError, "#{mode}/#{projection} update") { stale.update!(label: "late") }
+      assert_raises(Lyra::RecordDestroyedError, "#{mode}/#{projection} destroy") { other.destroy! }
+      assert_equal %w[Created Destroyed], stream_types(id), "#{mode}/#{projection}"
+    end
+  end
+
   # ES-Async: the writers only append, under the lock on the aggregate, so a
   # second writer waits for the first and the record's events commit in the
   # order they were appended; the projection job applies them in order under a
@@ -289,6 +339,10 @@ class ConcurrentSameRecordTest < Minitest::Test
   end
 
   private
+
+  def stream_types(id)
+    Lyra.config.event_store.read.stream("RaceItem$#{id}").map { |e| e.event_type[/[A-Z][a-z]+\z/] }
+  end
 
   # The first writer runs to +pause_at+ and waits, holding whatever it holds;
   # the second must not get past it; the first is released and both finish.

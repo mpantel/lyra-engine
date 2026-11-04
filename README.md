@@ -89,7 +89,13 @@ Beyond the modes above (see the [API Reference](docs/API_REFERENCE.md) for each)
 - **Dashboard**: `mount Lyra::Engine, at: "/lyra"`. Outside development and
   test it answers 403 until `config.dashboard_authorization` (a proc run on the
   controller, e.g. `->(controller) { controller.current_user&.admin? }`) says
-  who may use it.
+  who may use it. The dashboard is a development tool. In production, whoever
+  the rule admits reads every data subject's records and history, with no
+  declared purpose and no access-log entry, and the rule covers the whole
+  dashboard, not single pages. Bringing it to production is a future feature:
+  per-page and per-role authorization, a declared purpose and an access-log
+  entry for every subject shown or exported, masking by sensitivity, retention
+  for what it records, and a security review of its routes.
 
 ---
 

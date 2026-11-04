@@ -720,6 +720,8 @@ module PamDsl
         "Public interest (GDPR Art. 6(1)(e))"
       when :legitimate_interests
         "Legitimate interests (GDPR Art. 6(1)(f))"
+      when :undetermined
+        "Undetermined: the controller decides"
       else
         basis.to_s.titleize
       end

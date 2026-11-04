@@ -40,6 +40,7 @@ module PamDsl
           [purpose.name, clause] unless declared
         end
       end
+      @purposes.each_value { |p| gaps << [p.name, "Art. 6(1) legal basis (undetermined)"] if p.basis_undetermined? }
       gaps << [nil, "Art. 30(1)(g) security measures"] if @security_measures.empty?
       gaps
     end
@@ -154,8 +155,11 @@ module PamDsl
       end
       violations = []
 
-      # Condition 4 (Def. 1): legal basis satisfied — consent check delegates to CS
-      if purpose.requires_consent?
+      # Condition 4 (Def. 1): legal basis satisfied — none yet for a generated
+      # purpose whose basis is still to be decided; consent delegates to CS
+      if purpose.basis_undetermined?
+        violations << UndeterminedBasisError.new("Purpose #{purpose_name} has no legal basis yet: the controller decides one")
+      elsif purpose.requires_consent?
         begin
           @consent_policy.validate!(purpose_name, subject: subject)
         rescue ConsentRequiredError => e

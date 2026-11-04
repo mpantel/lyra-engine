@@ -35,7 +35,19 @@ module Lyra
       # matched nothing, recorded no event, and the change was lost.
       def atomically(model_class, &block)
         Lyra::Projections::LazyProjection.before_read(model_class)
-        required? ? model_class.transaction(&block) : yield
+        required? || locks_rows? ? model_class.transaction(&block) : yield
+      end
+
+      # Whether a bulk write locks the rows it matches and writes exactly
+      # those (snapshot(lock: true), then write_snapshotted): wherever the
+      # rows live in a table, so in every mode but the events-only store.
+      # From 0.9.3: before, the snapshot was a plain read, and under READ
+      # COMMITTED a row another transaction changed or inserted between the
+      # snapshot and the write could be written without an event. A failed
+      # append inside the transaction rolls back only its own savepoint, so in
+      # Monitor the write still stands when its event fails.
+      def locks_rows?
+        !(Lyra.config.event_sourcing_mode? && Lyra.config.projection_mode == :disabled)
       end
 
       # Report a failed publish: raise when the events are required (see
@@ -90,9 +102,16 @@ module Lyra
 
       # Attributes of every row the relation matches, keyed by primary key.
       # Taken before a bulk write so the events can carry old values.
-      def snapshot(model_class, relation)
+      def snapshot(model_class, relation, lock: false)
         pk = model_class.primary_key
-        rows = Lyra::PurposeBoundReads.internal { relation.to_a }
+        scope = relation
+        if lock
+          # Lock through a subquery of keys, so a relation with DISTINCT,
+          # GROUP BY or joins, which FOR UPDATE refuses, can still be locked.
+          keys = relation.reselect(model_class.arel_table[pk])
+          scope = model_class.unscoped.where(pk => keys).lock
+        end
+        rows = Lyra::PurposeBoundReads.internal { scope.to_a }
         rows.to_h { |record| [record.public_send(pk), record.attributes] }
       end
 

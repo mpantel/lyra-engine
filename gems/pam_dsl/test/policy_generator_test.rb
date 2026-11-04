@@ -352,7 +352,9 @@ module PamDsl
       code = generator.send(:generate_purposes_code, detected)
 
       assert_includes code, "purpose :service_delivery"
-      assert_includes code, "basis :contract"
+      # A suggestion, not a decision (from 0.9.3)
+      assert_includes code, "basis :undetermined  # TO DECIDE. Often :contract"
+      refute_match(/^\s*basis :contract/, code)
     end
 
     def test_generates_billing_purpose_when_address_present
@@ -371,6 +373,32 @@ module PamDsl
       assert_includes code, ":vat_number"
     end
 
+    # A generated draft cannot run as if its basis were settled: access under
+    # an undetermined purpose is refused, and the register lists it as a gap.
+    def test_an_undetermined_basis_refuses_access_and_is_a_register_gap
+      PamDsl.define_policy(:undetermined_draft) do
+        field :email, type: :email, sensitivity: :confidential
+        purpose :billing do
+          basis :undetermined
+          requires :email
+        end
+      end
+      policy = PamDsl.policy(:undetermined_draft)
+
+      assert policy.get_purpose(:billing).basis_undetermined?
+      assert_raises(UndeterminedBasisError) { policy.validate_access!([:email], :billing, subject: 1) }
+      assert_includes policy.article_30_gaps, [:billing, "Art. 6(1) legal basis (undetermined)"]
+    ensure
+      PamDsl.reset!
+    end
+
+    def test_a_purpose_without_requires_leaves_no_blank_line
+      generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
+      code = generator.send(:generate_purposes_code, { email: { type: :email, sensitivity: :confidential, models: ["User"] } })
+
+      refute_match(/^\s+\nend/, code)
+    end
+
     def test_generates_audit_trail_purpose_when_ip_address_present
       generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
       detected = { ip_address: { type: :ip_address, sensitivity: :internal, models: ["Log"] } }
@@ -378,7 +406,7 @@ module PamDsl
       code = generator.send(:generate_purposes_code, detected)
 
       assert_includes code, "purpose :audit_trail"
-      assert_includes code, "basis :legal_obligation"
+      assert_includes code, "basis :undetermined  # TO DECIDE. Often :legal_obligation"
       assert_includes code, ":ip_address"
     end
 

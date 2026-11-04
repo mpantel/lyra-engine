@@ -27,6 +27,12 @@ module PamDsl
       :legitimate_interests  # Article 6(1)(f) - Legitimate interests
     ].freeze
 
+    # Not a legal basis: the marker a generated draft carries until the
+    # controller decides one (PolicyGenerator). Access under such a purpose
+    # is refused (UndeterminedBasisError) and the register lists the purpose
+    # among its gaps, so a draft cannot run as if its basis were settled.
+    UNDETERMINED = :undetermined
+
     def initialize(name)
       @name = name.to_sym
       @description = ""
@@ -50,6 +56,7 @@ module PamDsl
     # Set legal basis
     def basis(legal_basis)
       legal_basis_sym = legal_basis.to_sym
+      return @legal_basis = UNDETERMINED if legal_basis_sym == UNDETERMINED
       unless LEGAL_BASES.include?(legal_basis_sym)
         raise Error, "Invalid legal basis: #{legal_basis}. Must be one of #{LEGAL_BASES.join(', ')}"
       end
@@ -146,6 +153,10 @@ module PamDsl
     # Check if purpose requires consent
     def requires_consent?
       @legal_basis == :consent
+    end
+
+    def basis_undetermined?
+      @legal_basis == UNDETERMINED
     end
 
     # Get all fields (required + optional)
