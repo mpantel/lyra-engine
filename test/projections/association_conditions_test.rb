@@ -109,9 +109,19 @@ class AssociationConditionsTest < Minitest::Test
 
   def titles(relation) = relation.map(&:title).sort
 
+  # Only this thread's own statements: a thread left by an earlier test (an
+  # async projection job, a mode-sync check) can run a query inside the window
+  # (CI, 2026-11-05: 2 against 1). Schema lookups and cached reads are not the
+  # query being measured.
   def capture_sql
     statements = []
-    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") { |*, payload| statements << payload[:sql] }
+    caller_thread = Thread.current
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      next unless Thread.current == caller_thread
+      next if payload[:name].to_s == "SCHEMA" || payload[:cached]
+
+      statements << payload[:sql]
+    end
     yield
     statements
   ensure
