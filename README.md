@@ -1,5 +1,7 @@
 # Lyra
 
+[![Tests](https://github.com/mpantel/lyra-engine/actions/workflows/test.yml/badge.svg)](https://github.com/mpantel/lyra-engine/actions/workflows/test.yml)
+
 **CRUD to Event Sourcing Transformation Engine**
 
 *Part of ORFEAS (Object-Relational Framework for Event-Aware Systems)*
