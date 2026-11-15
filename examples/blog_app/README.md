@@ -95,7 +95,7 @@ events.last.metadata[:source]           # => "blog_app", from config.metadata_pr
 
 # The row against the state replayed from its events
 Lyra::DualView.new(Post, post.id).compare[:differences]
-# => {no_differences: true}
+# => {}
 Lyra::DualView.find_discrepancies(Post) # => [] (every post)
 
 # The post as it was when it was created

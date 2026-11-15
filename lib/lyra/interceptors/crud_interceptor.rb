@@ -847,18 +847,18 @@ module Lyra
         # Silently ignore if PaperTrail integration fails
       end
 
+      # Monitor's event data. attributes is the record's every column,
+      # created_at and updated_at included, as in Hijack and the event-sourcing
+      # modes (CommandHandler#create_event), so replay and projection reproduce
+      # the two timestamps from a create. DualView compares them like any
+      # other column.
       def build_event_data(operation)
-        merged_metadata = lyra_event_metadata(operation)
+        # source is Lyra's default: a metadata_proc that sets its own wins, as
+        # its other keys do.
+        merged_metadata = { source: "lyra_interceptor" }.merge(lyra_event_metadata(operation))
 
-        {
-          model_class: self.class.name,
-          model_id: id,
-          operation: operation,
-          attributes: attributes.except("created_at", "updated_at"),
-          changes: previous_changes,
-          timestamp: Time.current,
-          metadata: merged_metadata
-        }
+        Lyra::EventData.build(self.class, id, operation, attributes: attributes, changes: previous_changes)
+                       .merge(metadata: merged_metadata)
       end
 
       # Get custom metadata from configured metadata_proc

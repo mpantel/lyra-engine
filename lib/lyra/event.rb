@@ -18,12 +18,46 @@ module Lyra
       data = event.data.is_a?(Hash) ? event.data : {}
       return nil if data[:replay] == false || data["replay"] == false
 
+      recorded_operation(data) || operation_from_name(event)
+    end
+
+    # The operation the data records, or nil.
+    def self.recorded_operation(data)
       case (data[:operation] || data["operation"]).to_s
       when "created", "create" then :created
       when "imported" then :imported
       when "updated", "update" then :updated
       when "destroyed", "destroy", "deleted" then :destroyed
-      when "" then operation_from_name(event)
+      end
+    end
+
+    # The attributes a create or an import gives its record: the event's
+    # attributes, every column, created_at and updated_at included. They are
+    # ordinary columns from 1.0.0, in every mode and every event; logs written
+    # by earlier versions, whose Monitor creates left the two out, are not
+    # supported (CHANGELOG, 1.0.0, Breaking).
+    def self.created_attributes(data)
+      data = {} unless data.is_a?(Hash)
+      data[:attributes] || data["attributes"] || {}
+    end
+
+    # The fields an event gives or changes, as name => value: a create's or an
+    # import's attributes, an update's changes as their new values, and for a
+    # destroy whatever attributes the event holds (none from Lyra::EventData).
+    # What the
+    # privacy views and reports detect personal data in, whatever mode wrote
+    # the event.
+    def self.fields_of(event)
+      data = event.respond_to?(:data) && event.data.is_a?(Hash) ? event.data : nil
+      return(event.respond_to?(:attributes) && event.attributes.is_a?(Hash) ? event.attributes : {}) unless data
+
+      case recorded_operation(data)
+      when :created, :imported
+        created_attributes(data)
+      when :updated
+        (data[:changes] || data["changes"] || {}).to_h { |field, change| [field, change.is_a?(Array) ? change.last : change] }
+      else
+        data[:attributes] || data["attributes"] || {}
       end
     end
 

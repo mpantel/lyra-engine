@@ -193,8 +193,8 @@ class HabtmLinksTest < Minitest::Test
     Lyra::Genesis.import_all(HabtmTag)
 
     assert_equal [["linked", [tag_id]]], links(HabtmItem, item_id)
-    assert_equal({ no_differences: true }, Lyra::DualView.new(HabtmItem, item_id).calculate_differences)
-    assert_equal({ no_differences: true }, Lyra::DualView.new(HabtmTag, tag_id).calculate_differences)
+    assert_equal({}, Lyra::DualView.new(HabtmItem, item_id).calculate_differences)
+    assert_equal({}, Lyra::DualView.new(HabtmTag, tag_id).calculate_differences)
   end
 
   def test_disabled_mode_records_nothing
@@ -260,7 +260,7 @@ class HabtmLinksTest < Minitest::Test
   def assert_clean(*records)
     HabtmItem.count if @mode == :es_lazy # bring the tables up to date first
     records.each do |record|
-      assert_equal({ no_differences: true }, Lyra::DualView.new(record.class, record.id).calculate_differences,
+      assert_equal({}, Lyra::DualView.new(record.class, record.id).calculate_differences,
                    "#{record.class.name} #{record.id}")
     end
   end

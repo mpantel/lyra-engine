@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- **`created_at` and `updated_at` are ordinary columns, and event logs written before 1.0.0 are
+  not supported.** Every event Lyra writes now carries the two timestamps like any other column
+  (a create's `attributes`, an update's `changes` when they moved), DualView compares them, and
+  nothing treats them specially any more. The compatibility code for older logs is gone:
+  `Lyra::Event.created_attributes` no longer recovers a create's timestamps from its `changes`
+  (Monitor creates written by 0.9.x left them out of `attributes`), and `ModelProjection` no longer
+  stamps `created_at`/`updated_at` with the projection time when an event lacks them. An update
+  that left `updated_at` alone (`update_columns`, an `update_all` that does not set it) now leaves
+  it alone in the projected row too, where before a rebuild stamped the rebuild time and the row
+  differed from its events. An application with a log from Lyra 0.9.x should start a new event
+  store at 1.0.0 (Genesis imports the existing rows) rather than replay the old one; the per-mode
+  event shapes of 0.9.x are not supported.
+
+- **`DualView#compare` and `#calculate_differences` return `{}` when the row and its replayed
+  state agree,** where they returned `{ no_differences: true }`. An agreement is now an empty hash,
+  and every entry of a non-empty one has the same shape, `{ crud:, event_sourced: }`: an attribute
+  that differs, or `exists: { crud:, event_sourced: }` (`true`/`false` each) when only one view has
+  the record, where it was `{ exists_mismatch: true }`. That entry keeps the result non-empty, so a
+  check for `{}` cannot take a missing record for agreement. Code that tested
+  `differences[:no_differences]` or compared with `{ no_differences: true }` must test
+  `differences.empty?`; code that tested `differences[:exists_mismatch]` must test
+  `differences.key?(:exists)`. Attribute differences are keyed by column name as a **string**
+  (`differences["email"]`, as Active Record keys `attributes`, and as HABTM link differences already
+  were), where they were symbols; the existence entry is the symbol `:exists`, so no column, a
+  column named `exists` included, can collide with it. Lyra's own callers
+  (`ModeTransition`, `Repair`, `DualView.find_discrepancies`, the recommendations) and the replay
+  verifiers of the BPI and Olist examples are updated.
+
+### Fixed
+- **`belongs_to ... touch: true` cascades published nothing.** Rails touches the parent through
+  `touch_later`, which sets the timestamps and clears their change before `touch` runs at commit,
+  so Lyra saw no change. The parent's row moved and its stream did not; with timestamps compared,
+  DualView flagged every touched parent and the mode gate refused. Lyra now keeps the row's value
+  before the first deferred touch and records the change.
+- **An application's `metadata_proc` `source` was overwritten** by Lyra's (`lyra_interceptor`,
+  `lyra_command_handler`). Lyra's value is now the default the application's keys override.
+- **ES-NoProj: `where(...).touch_all` touched every record** (an unscoped `touch_all` through the
+  scope branch, with an event each) and then raised `UnsupportedQuery`. It now touches only the
+  selected records, with one time for all, as Rails's `touch_all` does.
+- **The GDPR helpers lost a related record's updates and destroy** (Art. 15/17/20 reports):
+  they matched the subject's foreign key in each event alone, and an update carries only its
+  changes. Each record is now followed through the log, and an event is the subject's when the
+  record pointed at them before or after it.
+- **A record created in Monitor lost `created_at` and `updated_at` when the log became
+  authoritative.** Monitor's event left the two columns out of its `attributes` snapshot (its
+  `changes` carried them), and replay and projection read a create's `attributes`. After a switch
+  to event sourcing an ES-NoProj read raised `MissingAttributeError` on them, and a rebuild reset
+  them to the rebuild time; DualView ignored the two columns, so it reported neither. `attributes`
+  now holds every column, timestamps included, in Monitor events and in the events of bypass writes
+  that create or delete records (`insert_all`, `delete_all` and the like), as Hijack and the
+  event-sourcing modes already did. Logs written before this change are not supported (see
+  Breaking).
+- **`ModelProjection.project_create` overwrote a string-keyed `created_at` or `updated_at` with
+  the projection time.** It defaulted the two with symbol keys, and stringifying the keys let the
+  default replace the value the event carried. A rebuild therefore reset the timestamps of every
+  record whose event attributes had string keys, as Monitor's do.
+
+### Changed
+- **One event shape in every mode**. Monitor, the command handler of Hijack and event
+  sourcing, bypass writes, Genesis and repair now build the payload with `Lyra::EventData`: a
+  create or an import carries the record's `attributes` and no `changes`; an update carries its
+  `changes` as `[old, new]` pairs and no `attributes`; a destroy carries neither. Before, Monitor's
+  events carried the record on an update and a destroy and listed every column in a create's
+  `changes`, and a Hijack or event-sourcing update stored its delta twice (`attributes: { changes: … }`
+  beside `changes`). Every mode now sets `metadata[:source]` (`lyra_interceptor` for Monitor,
+  `lyra_command_handler` for the others). Replay reads a create's `attributes` and an update's
+  `changes`; events in the old per-mode shapes are not supported (see Breaking).
+  The smaller events cost less to serialise and store, and copy less personal data into the log.
+- **Personal data is detected in an event's fields.** `Lyra::Event.fields_of(event)` gives a create's
+  attributes or an update's new values; the privacy and flow controllers, `EventFlow`, `EventGraph`,
+  `Timeline`, Lyra's GDPR helpers and the PAM DSL's compliance reports use it. They read an event's
+  `attributes` alone, so an update, which now carries none, would have reported no personal data
+  (a Hijack or event-sourcing update already did, because its `attributes` held only `changes`).
+- **A destroy no longer keeps the record's final state** in Monitor. It is in the events before it;
+  the audit trail view shows no final state for a destroy.
+- **DualView compares `created_at` and `updated_at`.** They were left out of the comparison; a row
+  whose timestamp differs from its events is now a difference, and `lyra:repair` records it like
+  any other.
+- **A bare `touch_all` publishes an update per row** whose only change is `updated_at`, as an
+  instance `touch` already did. Bulk bypass events (`update_all`, `upsert_all` and the like) now
+  list `created_at` and `updated_at` among their changes when those moved, so an upsert's event
+  carries `updated_at` beside the columns it set.
+
 ## [0.9.3] - 2026-11-04
 
 **Security update.** A thorough review of Lyra's code against the claims made for it found the

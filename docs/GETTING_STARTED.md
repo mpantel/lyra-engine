@@ -98,8 +98,8 @@ order.update!(total: 12)
 events = Lyra.config.event_store.read.stream("Order$#{order.id}").to_a
 events.map(&:event_type)  # => ["Lyra::Events::OrderCreated", "Lyra::Events::OrderUpdated"]
 events.last.operation     # => :updated
-events.last.changes       # the update's previous_changes
-events.last.attributes    # the row after the write, without created_at/updated_at
+events.last.changes       # the update's changes, as [old, new] pairs
+events.last.attributes    # {}: an update carries its changes only; a create carries the record
 ```
 
 `destroy` appends `OrderDestroyed`. Writes that skip callbacks (`update_all`,
@@ -116,21 +116,21 @@ fails the write instead.
 ```ruby
 Lyra::DualView.new(Order, order.id).compare
 # => { crud_view: {...}, event_sourced_view: {...},
-#      differences: { no_differences: true }, metadata: {...} }
+#      differences: {}, metadata: {...} }
 ```
 
-`differences` is `{ no_differences: true }` when the row and the state replayed
+`differences` is `{}` when the row and the state replayed
 from the stream agree (a destroyed record whose row is gone agrees too),
-`{ exists_mismatch: true }` when only one of them has the record, and
+`{ exists: { crud:, event_sourced: } }` when only one of them has the record, and
 otherwise one entry per differing column,
-`{ total: { crud: ..., event_sourced: ... } }`. `created_at` and `updated_at`
-are not compared. `Lyra::DualView.find_discrepancies(Order)` runs the
+`{ "total" => { crud: ..., event_sourced: ... } }`. `created_at` and `updated_at`
+are compared like any other column. `Lyra::DualView.find_discrepancies(Order)` runs the
 comparison for every row.
 
 ## 6. Rows that existed before Lyra
 
 A row written before Lyra was enabled has no stream, so DualView reports
-`exists_mismatch` for it. Genesis gives each such row one `Imported` event
+an `exists` difference for it. Genesis gives each such row one `Imported` event
 (`OrderImported`) holding the row as it is. With the default
 `config.genesis = :auto` it runs by itself only in event-sourcing mode, so in
 Monitor run it yourself:

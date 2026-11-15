@@ -280,7 +280,7 @@ module Lyra
           next Discrepancy.new(model: model.name, id: id, problem: "row of a destroyed record") if gone
 
           differences = Lyra::DualView.new(model, id).compare[:differences]
-          next nil if differences[:no_differences]
+          next nil if differences.empty?
 
           Discrepancy.new(model: model.name, id: id, problem: "row differs from its events",
                           details: differences.keys.first(5).join(", "))
@@ -320,16 +320,22 @@ module Lyra
       def record_applied(to)
         return nil unless table_ready?
 
+        who = Lyra::Attribution.of
         sql(:select_value,
-          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at, actor) VALUES " \
-          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}, #{q(actor)}) RETURNING id"
-        ).to_i.tap { |id| Rails.logger&.warn("[Lyra] Mode switched to #{to} by #{actor} (lyra_mode_transitions #{id})") }
+          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at, actor, os_user, host, pid) VALUES " \
+          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}, #{q(who[:actor])}, " \
+          "#{q(who[:os_user])}, #{q(who[:host])}, #{Integer(who[:pid])}) RETURNING id"
+        ).to_i.tap do |id|
+          Rails.logger&.warn("[Lyra] Mode switched to #{to} by #{who[:actor]} (os user #{who[:os_user]} on #{who[:host]}, pid #{who[:pid]}; " \
+                             "lyra_mode_transitions #{id})")
+        end
       end
 
       # Who is making a change: the given operator, else the signed-in user
       # (Current.user), else LYRA_OPERATOR, else the operating-system user and
-      # process of a task or console. Recorded with every mode switch and, from
-      # lyra:erase, every erasure (0.9.3; before, neither named anyone).
+      # process of a task or console. A label nobody checks: Lyra::Attribution
+      # records the operating system's user and the host beside it. Recorded with
+      # every mode switch, every erasure (0.9.3) and every repair (1.0.0).
       public def actor(operator = nil)
         return operator.to_s if operator.present?
 
@@ -372,10 +378,17 @@ module Lyra
               t.integer :checked, null: false, default: 0
               t.datetime :created_at, null: false
               t.string :actor
+              t.string :os_user
+              t.string :host
+              t.integer :pid
             end
           end
           # Tables created before 0.9.3 have no actor column.
           connection.add_column(TABLE, :actor, :string) unless connection.column_exists?(TABLE, :actor)
+          # Tables created before 1.0.0 have no record of what the operating system says.
+          connection.add_column(TABLE, :os_user, :string) unless connection.column_exists?(TABLE, :os_user)
+          connection.add_column(TABLE, :host, :string) unless connection.column_exists?(TABLE, :host)
+          connection.add_column(TABLE, :pid, :integer) unless connection.column_exists?(TABLE, :pid)
         end
         @table_ready = true
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished

@@ -305,7 +305,7 @@ module Lyra
     def detect_pii(event)
       return {} unless Lyra.privacy_features_available?
 
-      Lyra::Privacy::PIIDetector.detect(event_attributes(event))
+      Lyra::Privacy::PIIDetector.detect(Lyra::Event.fields_of(event))
     end
 
     def has_pii?(event)

@@ -26,7 +26,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_calculate_differences_with_attribute_differences
@@ -40,9 +40,9 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:age)
-      assert_equal 30, differences[:age][:crud]
-      assert_equal 31, differences[:age][:event_sourced]
+      assert differences.key?("age")
+      assert_equal 30, differences["age"][:crud]
+      assert_equal 31, differences["age"][:event_sourced]
     end
 
     def test_calculate_differences_with_extra_crud_attributes
@@ -56,9 +56,9 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:email)
-      assert_equal "bob@example.com", differences[:email][:crud]
-      assert_nil differences[:email][:event_sourced]
+      assert differences.key?("email")
+      assert_equal "bob@example.com", differences["email"][:crud]
+      assert_nil differences["email"][:event_sourced]
     end
 
     def test_calculate_differences_with_extra_event_sourced_attributes
@@ -72,9 +72,9 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:metadata)
-      assert_nil differences[:metadata][:crud]
-      assert_equal "extra_data", differences[:metadata][:event_sourced]
+      assert differences.key?("metadata")
+      assert_nil differences["metadata"][:crud]
+      assert_equal "extra_data", differences["metadata"][:event_sourced]
     end
 
     def test_calculate_differences_with_existence_mismatch_crud_exists
@@ -88,7 +88,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ exists_mismatch: true }, differences)
+      assert_equal({ exists: { crud: true, event_sourced: false } }, differences)
     end
 
     def test_calculate_differences_with_existence_mismatch_es_exists
@@ -102,7 +102,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ exists_mismatch: true }, differences)
+      assert_equal({ exists: { crud: false, event_sourced: true } }, differences)
     end
 
     def test_calculate_differences_with_both_not_existing
@@ -116,7 +116,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
   end
 
@@ -127,7 +127,7 @@ module Lyra
         {
           crud_view: { exists: true },
           event_sourced_view: { exists: true, events_count: 5 },
-          differences: { no_differences: true }
+          differences: {}
         }
       end
 
@@ -142,7 +142,7 @@ module Lyra
         {
           crud_view: { exists: true },
           event_sourced_view: { exists: false },
-          differences: { exists_mismatch: true }
+          differences: { exists: { crud: true, event_sourced: false } }
         }
       end
 
@@ -173,7 +173,7 @@ module Lyra
         {
           crud_view: { exists: true },
           event_sourced_view: { events_count: 0 },
-          differences: { exists_mismatch: true }
+          differences: { exists: { crud: true, event_sourced: false } }
         }
       end
 
@@ -206,7 +206,7 @@ module Lyra
 
       differences = dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
 def test_sub_second_time_difference_is_a_difference
@@ -224,7 +224,7 @@ def test_sub_second_time_difference_is_a_difference
 
   differences = dual_view.calculate_differences
 
-  assert differences.key?(:status_changed_at), "a lost .420 s must not compare equal"
+  assert differences.key?("status_changed_at"), "a lost .420 s must not compare equal"
 end
 
 def test_same_instant_in_different_encodings_is_equal
@@ -238,7 +238,7 @@ def test_same_instant_in_different_encodings_is_equal
     { exists: true, state: { status_changed_at: "2016-01-14T15:49:11.420000Z" } }
   end
 
-  assert_equal({ no_differences: true }, dual_view.calculate_differences)
+  assert_equal({}, dual_view.calculate_differences)
 end
 
     def test_normalize_value_with_big_decimal
@@ -252,7 +252,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_normalize_value_with_numeric_string
@@ -266,7 +266,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_normalize_value_with_float_precision
@@ -282,22 +282,33 @@ end
       differences = @dual_view.calculate_differences
 
       # After rounding to 6 decimals, both round to 10.123456 and should be equal
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
-    def test_ignores_timestamp_fields
+    def test_compares_timestamp_fields
       def @dual_view.crud_state
-        { exists: true, attributes: { name: "Test", created_at: Time.now, updated_at: Time.now } }
+        { exists: true, attributes: { name: "Test", created_at: Time.utc(2026, 1, 1), updated_at: Time.utc(2026, 1, 2) } }
+      end
+
+      def @dual_view.event_sourced_state
+        { exists: true, state: { name: "Test", created_at: Time.utc(2026, 1, 1), updated_at: Time.utc(2026, 1, 3) } }
+      end
+
+      differences = @dual_view.calculate_differences
+
+      assert_equal ["updated_at"], differences.keys, "created_at agrees; updated_at does not"
+    end
+
+    def test_a_missing_timestamp_is_a_difference
+      def @dual_view.crud_state
+        { exists: true, attributes: { name: "Test", created_at: Time.utc(2026, 1, 1) } }
       end
 
       def @dual_view.event_sourced_state
         { exists: true, state: { name: "Test" } }
       end
 
-      differences = @dual_view.calculate_differences
-
-      # Should ignore created_at and updated_at
-      assert_equal({ no_differences: true }, differences)
+      assert_equal ["created_at"], @dual_view.calculate_differences.keys
     end
 
     def test_handles_string_and_symbol_keys
@@ -311,7 +322,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_handles_boolean_values
@@ -325,7 +336,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_handles_nil_values
@@ -339,7 +350,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_detects_nil_vs_non_nil_difference
@@ -353,9 +364,9 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:nickname)
-      assert_equal "Nick", differences[:nickname][:crud]
-      assert_nil differences[:nickname][:event_sourced]
+      assert differences.key?("nickname")
+      assert_equal "Nick", differences["nickname"][:crud]
+      assert_nil differences["nickname"][:event_sourced]
     end
 
     def test_normalize_timestamp_string
@@ -369,7 +380,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_handles_non_standard_types
@@ -391,7 +402,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:custom)
+      assert differences.key?("custom")
     end
 
     def test_handles_empty_attributes
@@ -405,7 +416,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     def test_handles_nil_attributes
@@ -419,7 +430,7 @@ end
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
   end
 
@@ -636,7 +647,7 @@ end
 
       # Stub to simulate discrepancy
       DualView.stubs(:compare_all).returns([
-        { differences: { no_differences: true } },
+        { differences: {} },
         { differences: { name: { crud: "A", event_sourced: "B" } } }
       ])
 
@@ -650,8 +661,8 @@ end
 
     def test_find_discrepancies_returns_empty_when_no_discrepancies
       DualView.stubs(:compare_all).returns([
-        { differences: { no_differences: true } },
-        { differences: { no_differences: true } }
+        { differences: {} },
+        { differences: {} }
       ])
 
       results = DualView.find_discrepancies(::User)
@@ -680,7 +691,7 @@ end
       DualView.any_instance.stubs(:compare).returns({
         crud_view: { exists: true },
         event_sourced_view: { exists: true, events_count: 1 },
-        differences: { no_differences: true }
+        differences: {}
       })
       DualView.any_instance.stubs(:audit_trail).returns([])
 
@@ -699,7 +710,7 @@ end
         {
           crud_view: { exists: true },
           event_sourced_view: { exists: true, events_count: 5 },
-          differences: { no_differences: true }
+          differences: {}
         }
       end
 
@@ -714,7 +725,7 @@ end
         {
           crud_view: { exists: true },
           event_sourced_view: { exists: false, events_count: 0 },
-          differences: { exists_mismatch: true }
+          differences: { exists: { crud: true, event_sourced: false } }
         }
       end
 
@@ -745,7 +756,7 @@ end
         {
           crud_view: { exists: true },
           event_sourced_view: { exists: false, events_count: 0 },
-          differences: { exists_mismatch: true }
+          differences: { exists: { crud: true, event_sourced: false } }
         }
       end
 

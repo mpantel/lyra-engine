@@ -206,7 +206,8 @@ Lyra::Erasure.erase!(Registration, 5, reason: "Art. 17 request #12")
 # => #<Result fields: ["email", "firstname", ...], events_rewritten: 4, row_erased: true>
 ```
 ```bash
-bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" OPERATOR=jdoe [FIELDS=email,phone] [EVERYWHERE=1]
+bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" OPERATOR=jdoe [FIELDS=email,phone] [EVERYWHERE=1] [ACCESS_LOG=1|0] [ACCESS_LOG_SUBJECTS=user-7]
+bin/rails lyra:erase_access_log SUBJECT=user-7 REASON="Art. 17 request #12" OPERATOR=jdoe
 ```
 
 - Erases the personal attributes (declared by the policy, or listed by the events' privacy
@@ -225,11 +226,37 @@ bin/rails lyra:erase MODEL=Registration ID=5 REASON="Art. 17 request #12" OPERAT
   token, IP address, credential) are searched for in other records: a name, city or postal code
   can belong to another customer by coincidence, so those are erased in the person's own record
   only.
+- The record's access log (`Lyra::DataAccess$<Model>$<id>`, see below) records who read it, never
+  a value. It is kept by default: it may be evidence the controller must keep (Art. 5(2), a
+  security investigation). Since 1.0.0, `config.erase_access_log = true` or `access_log: true`
+  (`ACCESS_LOG=1`) deletes its events instead, from the events table and every stream they are
+  in. The configuration acts only once the record is fully erased (every personal field, by this
+  erasure or earlier ones): a field's own retention period erases that field from a record still in
+  use, and its log stays. Retention's `:hard_delete` of a record erased earlier deletes the log with
+  the record when the configuration is on; `access_log: false` (`ACCESS_LOG=0`) keeps it whatever the configuration says. Either way
+  `ErasureApplied` records `access_log` (`"erased"` or `"kept"`) and `access_log_entries`.
+  Where the application passes its own id as the subject (`validate_access!(…, subject: "user-7")`),
+  that id has a log of its own: name it in `access_log_subjects:` (`ACCESS_LOG_SUBJECTS=`) and it is
+  erased, or kept and counted, with the record's; `ErasureApplied` records how many (never which).
+  `Lyra::AccessLog.erase!(subject, reason:)` (`lyra:erase_access_log`) deletes one subject's log on
+  its own, and records an `AccessLogErased` event (subject, entries, reason, who) in
+  `Lyra::AccessLogErasures`.
+  A model-wide entry (`Lyra::DataAccess$<Model>$*`, written by a `pluck`) names no subject: it is
+  the record of a read of everyone's data, and both calls refuse it. Access logs of other records
+  reached by `everywhere` are not touched. The access log has no retention period of its own.
 - Rows are written with one `UPDATE` by id, so records the application marks read-only (Solidus
   freezes an address once an order uses it) are erased too.
+- Locks first, reads second: the record's row, then its aggregate's advisory lock, are taken before the
+  stream is read, so a write in flight (a Monitor update appends its event in the transaction that writes
+  the row) finishes before the erasure sees the stream. Before 1.0.0 the stream was read first, and an event
+  committed in between kept the value. A write that starts after the erasure waits for it, and is new data.
 - Appends `Lyra::Events::ErasureApplied` (fields, reason, `erased_by`, never a value). The task
   records `OPERATOR=` as `erased_by`, else `LYRA_OPERATOR`, else the operating-system user and
-  process (since 0.9.3; before, it recorded no one). It is not
+  process (since 0.9.3; before, it recorded no one). That label is whatever the caller says, so
+  since 1.0.0 the event also records what the operating system says, `os_user`, `host` and `pid` in its
+  metadata, and in its data whether `ANY_FIELDS` was used (`any_fields`), the columns the request
+  named (`requested_fields`) and those erased only because of it (`beyond_policy`). Match `host` and
+  the time against your OS and SSH audit logs: attribution to a person is theirs, not Lyra's. It is not
   replayed; the stream still replays to the anonymized row.
 - Replacement: `nil` where the column allows it, `"erased:<id>"` for a NOT NULL string column,
   the column default otherwise.
@@ -643,8 +670,21 @@ Lyra::AccessLog.for(user)   # its recorded accesses, oldest first
 - Every access is recorded (no sampling). If the event store cannot record
   it, the store's error propagates and the access does not go ahead. Nothing
   is recorded in Disabled mode.
+- Since 1.0.0 an access is recorded on a connection of its own, so the entry
+  stays when the reader's transaction rolls back. Inside a transaction that
+  takes a thread and a second database connection per access. **Size the
+  connection pool for it** (`pool:` in `database.yml`): about twice the
+  application's threads (Puma's, Sidekiq's). If every connection is in use, a
+  read waits the pool's `checkout_timeout` (5 s by default) and is then
+  recorded in the reader's own transaction, so a rollback takes the entry
+  with it. Outside a transaction nothing changes. Rails' transactional tests
+  pin one connection, so there the entry is always recorded inline.
 - The log is personal data about the users who read records: cover it in
   your retention rules.
+- Erasing a record keeps its access log unless `config.erase_access_log` or
+  the call (`access_log: true`, `ACCESS_LOG=1`) says to delete it (1.0.0; see
+  Right to Erasure above). `Lyra::AccessLog.erase!` deletes one subject's log on its own, a bare id
+  included; model-wide (`pluck`) logs name no subject and are not erasable per person.
 - Off by default because reads can outnumber writes by orders of magnitude;
   the Aegean testbed measures it separately with `LYRA_RECORD_ACCESS=1`
   ([PERFORMANCE.md](PERFORMANCE.md)).

@@ -216,7 +216,7 @@ module Lyra
         },
         {
           crud_view: { exists: true }, event_sourced_view: { exists: false, events_count: 0 },
-          differences: { exists_mismatch: true },
+          differences: { exists: { crud: true, event_sourced: false } },
           metadata: { model_class: "TestModel", model_id: 9 }
         }
       ]

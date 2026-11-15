@@ -48,8 +48,8 @@
   <%
     # DualView.find_discrepancies returns only the records that differ, each
     # a DualView#compare result: differences maps a field to
-    # { crud:, event_sourced: }, or is { exists_mismatch: true } when the row
-    # and the log disagree on whether the record exists.
+    # { crud:, event_sourced: }; exists: { crud:, event_sourced: } is the one
+    # entry when the row and the log disagree on whether the record exists.
     mismatches = @discrepancies.size
     total_records = [@records_checked.to_i, mismatches].max
     matches = total_records - mismatches
@@ -95,7 +95,7 @@
           <span class="status mismatch">Mismatch</span>
         </div>
         <div class="discrepancy-body">
-          <% if differences[:exists_mismatch] %>
+          <% if differences.key?(:exists) %>
             <p class="existence-note">
               <% if crud_view[:exists] %>
                 The row exists, but the event log does not describe this record
@@ -112,7 +112,7 @@
               <p class="source-label">Database State</p>
               <h4>Current Values</h4>
               <ul class="field-list">
-                <% if differences[:exists_mismatch] %>
+                <% if differences.key?(:exists) %>
                   <li>
                     <span class="field-name">row</span>
                     <span class="field-value field-mismatch"><%= crud_view[:exists] ? "present" : "absent" %></span>
@@ -131,7 +131,7 @@
               <p class="source-label">Event-Sourced State</p>
               <h4>Projected Values</h4>
               <ul class="field-list">
-                <% if differences[:exists_mismatch] %>
+                <% if differences.key?(:exists) %>
                   <li>
                     <span class="field-name">events</span>
                     <span class="field-value field-mismatch"><%= es_view[:events_count].to_i %></span>

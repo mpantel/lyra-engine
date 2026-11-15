@@ -74,6 +74,35 @@ class RetentionTest < Minitest::Test
     refute_match(/ann@example/, raw("SELECT string_agg(convert_from(data, 'UTF8'), ' ') FROM event_store_events"))
   end
 
+  # 0.16 (from 1.0.0): a field's retention period erases that field; the
+  # record is still in use, so its access log stays even with erase_access_log.
+  def test_a_field_level_expiry_keeps_the_access_log
+    Lyra.config.erase_access_log = true
+    read_twice
+
+    assert_equal [:erased], apply(after: 60.days).actions.map(&:outcome)
+    assert_equal 2, Lyra::AccessLog.for(@user).size
+  ensure
+    Lyra.config.erase_access_log = false
+  end
+
+  # A record erased earlier with its log kept, then deleted under
+  # erase_access_log: the log goes with the record, and that is recorded.
+  def test_hard_delete_of_an_already_erased_record_deletes_its_access_log
+    read_twice
+    Lyra::Erasure.erase!(RetUser, @user.id, reason: "Art. 17", access_log: false)
+    Lyra.config.erase_access_log = true
+    PamDsl.reset!
+    define_policy { keep_for 1.year; on_expiry :hard_delete }
+
+    assert_equal [:deleted], apply(after: 2.years).actions.map(&:outcome)
+    assert_empty Lyra::AccessLog.for("RetUser$#{@user.id}")
+    applied = stream.select { _1.is_a?(Lyra::Events::ErasureApplied) }.last
+    assert_equal [[], "erased", 2], applied.data.values_at(:fields, :access_log, :access_log_entries)
+  ensure
+    Lyra.config.erase_access_log = false
+  end
+
   def test_soft_delete_without_a_column_and_archive_are_skipped
     PamDsl.reset!
     define_policy { keep_for 1.year; on_expiry :soft_delete }
@@ -129,6 +158,14 @@ class RetentionTest < Minitest::Test
   def stream = Lyra.config.event_store.read.stream("RetUser$#{@user.id}").to_a
 
   def raw(sql) = ActiveRecord::Base.connection.select_value(sql)
+
+  # Two entries in the record's access log, as Lyra::AccessLog writes them.
+  def read_twice
+    2.times do
+      Lyra.append_events(Lyra::Events::DataAccessed.new(data: { purpose: "contact", fields: ["email"], outcome: "granted" }),
+                         stream_name: Lyra::AccessLog.stream_for("RetUser$#{@user.id}"))
+    end
+  end
 
   def rows(sql) = ActiveRecord::Base.connection.select_rows(sql)
 

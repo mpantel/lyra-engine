@@ -22,7 +22,7 @@ class PostTest < ActiveSupport::TestCase
     post.update!(title: "Hello again")
 
     comparison = Lyra::DualView.new(Post, post.id).compare
-    assert_equal({ no_differences: true }, comparison[:differences])
+    assert_equal({}, comparison[:differences])
     assert_equal "Hello again", comparison[:event_sourced_view][:state]["title"]
   end
 
@@ -43,7 +43,7 @@ class PostTest < ActiveSupport::TestCase
 
     assert_equal "Hijacked", Post.find(post.id).title
     assert_equal [:created], stream(post).map(&:operation)
-    assert_equal({ no_differences: true }, Lyra::DualView.new(Post, post.id).compare[:differences])
+    assert_equal({}, Lyra::DualView.new(Post, post.id).compare[:differences])
   ensure
     Lyra.config.mode = previous_mode
   end

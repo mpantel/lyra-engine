@@ -188,7 +188,7 @@ module Lyra
       def has_pii?(event)
         return false unless Lyra.privacy_features_available?
 
-        Lyra::Privacy::PIIDetector.detect(event_attributes(event)).any?
+        Lyra::Privacy::PIIDetector.detect(Lyra::Event.fields_of(event)).any?
       end
 
       def build_links(events)
@@ -287,7 +287,7 @@ module Lyra
 
       def has_pii?(event)
         return false unless Lyra.privacy_features_available?
-        Lyra::Privacy::PIIDetector.detect(event_attributes(event)).any?
+        Lyra::Privacy::PIIDetector.detect(Lyra::Event.fields_of(event)).any?
       end
 
       def h(text)

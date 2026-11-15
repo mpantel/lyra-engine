@@ -34,6 +34,8 @@ class ErasureTest < Minitest::Test
 
     Lyra.config.projection_mode = :sync
     Lyra.config.strict_data_access = false
+    Lyra.config.record_access_events = false
+    Lyra.config.erase_access_log = false
     Lyra.config.enable_monitor!
     clean
     PamDsl.reset!
@@ -113,6 +115,32 @@ class ErasureTest < Minitest::Test
     end
     assert_match(/created_at not declared personal/, error.message)
     assert_equal "ann@example.com", user.reload.email, "nothing erased"
+  end
+
+  def test_an_erasure_records_whether_any_fields_was_used_and_what_was_asked
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", erased_by: "dpo")
+
+    data = stream(user).last.data
+    assert_equal false, data[:any_fields]
+    assert_nil data[:requested_fields], "nothing was named: the declared columns"
+    assert_empty data[:beyond_policy]
+  end
+
+  def test_any_fields_is_recorded_with_the_columns_it_added_beyond_the_policy
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    with_policy_without_name do
+      Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[name], any_fields: true, erased_by: "anyone")
+    end
+
+    event = stream(user).last
+    assert_equal true, event.data[:any_fields]
+    assert_equal %w[name], event.data[:requested_fields]
+    assert_equal %w[name], event.data[:beyond_policy], "name is not declared personal by this policy"
+    assert_equal "anyone", event.metadata[:erased_by], "the label is what was claimed"
+    assert_equal Etc.getpwuid(Process.uid).name, event.metadata[:os_user]
+    assert_equal Socket.gethostname, event.metadata[:host]
+    assert_equal Process.pid, event.metadata[:pid]
   end
 
   def test_any_fields_erases_an_undeclared_column
@@ -230,7 +258,124 @@ class ErasureTest < Minitest::Test
     assert_raises(Lyra::Erasure::Unsupported) { Lyra::Erasure.erase!(EraseUser, user.id, reason: "r") }
   end
 
+  # 0.16 (from 1.0.0): the subject's access stream survived erasure intact,
+  # unreported. It is kept by default, and ErasureApplied says so.
+  def test_the_access_log_is_kept_by_default_and_the_erasure_says_so
+    user, other = two_users_read_twice
+    entries = access_event_ids(user)
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+
+    assert_equal ["kept", 2], [result.access_log, result.access_log_entries]
+    assert_equal({ access_log: "kept", access_log_entries: 2 },
+                 stream(user).last.data.slice(:access_log, :access_log_entries))
+    assert_equal entries, access_event_ids(user)
+    assert_equal 2, Lyra::AccessLog.for(other).size
+  end
+
+  def test_erase_access_log_deletes_the_subject_s_access_events_everywhere
+    Lyra.config.erase_access_log = true
+    user, other = two_users_read_twice
+    entries = access_event_ids(user)
+    Lyra.config.event_store.link(entries, stream_name: "AccessAudit$1")
+    in_list = entries.map { |event_id| "'#{event_id}'" }.join(", ")
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r")
+
+    assert_equal ["erased", 2], [result.access_log, result.access_log_entries]
+    assert_equal({ access_log: "erased", access_log_entries: 2 },
+                 stream(user).last.data.slice(:access_log, :access_log_entries))
+    assert_empty Lyra::AccessLog.for(user)
+    assert_equal 0, raw("SELECT count(*) FROM event_store_events_in_streams WHERE event_id IN (#{in_list})").to_i,
+                 "unlinked from every stream"
+    assert_equal 0, raw("SELECT count(*) FROM event_store_events WHERE event_id IN (#{in_list})").to_i,
+                 "deleted, not only unlinked"
+    assert_equal 2, Lyra::AccessLog.for(other).size, "another subject's log is not touched"
+    assert_nil MT.discrepancy(EraseUser, user.id.to_s), "the record's stream still replays to the row"
+    assert_nil MT.discrepancy(EraseUser, other.id.to_s)
+  end
+
+  def test_the_call_overrides_the_configuration
+    Lyra.config.erase_access_log = true
+    user, = two_users_read_twice
+    assert_equal "kept", Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", access_log: false).access_log
+    assert_equal 2, Lyra::AccessLog.for(user).size
+
+    Lyra.config.erase_access_log = false
+    assert_equal "erased", Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", access_log: true).access_log
+    assert_empty Lyra::AccessLog.for(user)
+  end
+
+  def test_a_record_never_read_reports_an_empty_log
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", access_log: true)
+    assert_equal ["erased", 0], [result.access_log, result.access_log_entries]
+  end
+
+  # The configuration deletes the log only once the record is fully erased:
+  # after one field, the rest of the record is still processed, and read.
+  def test_the_configuration_keeps_the_log_until_every_personal_field_is_erased
+    Lyra.config.erase_access_log = true
+    user, = two_users_read_twice
+
+    assert_equal "kept", Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email]).access_log
+    assert_equal 2, Lyra::AccessLog.for(user).size
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[name])
+    assert_equal ["erased", 2], [result.access_log, result.access_log_entries], "email before, name now: complete"
+    assert_empty Lyra::AccessLog.for(user)
+  end
+
+  # The ids an application passes as this person's subject
+  # (validate_access!(…, subject: "user-7")) have logs of their own; they go
+  # with the record's when the log is erased, and only then.
+  def test_access_log_subjects_are_erased_with_the_record_s_log
+    user, = two_users_read_twice
+    policy = PamDsl.policy(:erase_policy)
+    2.times { policy.validate_access!([:email], :contact, subject: "user-7") }
+    policy.validate_access!([:email], :contact, subject: "user-8")
+
+    kept = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email], access_log_subjects: ["user-7"])
+    assert_equal ["kept", 4], [kept.access_log, kept.access_log_entries], "kept, and counted with the record's"
+    assert_equal 2, Lyra::AccessLog.for("user-7").size
+
+    result = Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", access_log: true, access_log_subjects: ["user-7"])
+    assert_equal ["erased", 4], [result.access_log, result.access_log_entries]
+    assert_equal 1, stream(user).last.data[:access_log_subjects], "how many, never which ids"
+    assert_empty Lyra::AccessLog.for("user-7")
+    assert_empty Lyra::AccessLog.for(user)
+    assert_equal 1, Lyra::AccessLog.for("user-8").size, "another id is not touched"
+  end
+
+  def test_a_model_wide_key_is_refused_as_a_subject
+    user = EraseUser.create!(name: "Ann", email: "ann@example.com")
+    error = assert_raises(Lyra::AccessLog::ModelWideSubject) do
+      Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", access_log: true, access_log_subjects: ["EraseUser$*"])
+    end
+    assert_match(/names no subject/, error.message)
+    assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{user.id}"), "refused before anything was erased"
+  end
+
+  def test_an_explicit_request_deletes_the_log_after_a_partial_erasure_too
+    user, = two_users_read_twice
+
+    assert_equal "erased", Lyra::Erasure.erase!(EraseUser, user.id, reason: "r", fields: %w[email], access_log: true).access_log
+    assert_empty Lyra::AccessLog.for(user)
+  end
+
   private
+
+  # Two users, each read twice under the policy with the access log on.
+  def two_users_read_twice
+    Lyra.config.record_access_events = true
+    users = [EraseUser.create!(name: "Ann", email: "ann@example.com"),
+             EraseUser.create!(name: "Bob", email: "bob@example.com")]
+    users.each { |u| 2.times { PamDsl.policy(:erase_policy).validate_access!([:email], :contact, subject: u) } }
+    users
+  end
+
+  def access_event_ids(user) = Lyra::AccessLog.for(user).map(&:event_id)
 
   def note_class
     Object.send(:remove_const, :EraseNote) if defined?(EraseNote)

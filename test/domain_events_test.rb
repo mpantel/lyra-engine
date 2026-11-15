@@ -64,7 +64,7 @@ class DomainEventsTest < Minitest::Test
       assert_equal "anna@example.com", Lyra.state_at(DomUser, user.id, Time.current)["email"]
       assert_equal "Anna", DomUser.find(user.id).name
       unless mode == :es_noproj
-        assert Lyra::DualView.new(DomUser, user.id).compare[:differences][:no_differences]
+        assert Lyra::DualView.new(DomUser, user.id).compare[:differences].empty?
       end
     end
   end

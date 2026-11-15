@@ -132,6 +132,9 @@ module Lyra
         if fields.any?
           Lyra::Erasure.erase!(model, record.id, fields: fields, reason: reason(model, :hard_delete, now),
                                                  erased_by: SOURCE)
+        elsif Lyra.config.erase_access_log
+          # Erased before, with its access log kept then: the record goes now, and its log with it.
+          Lyra::Erasure.erase_access_log!(model, record.id, reason: reason(model, :hard_delete, now), erased_by: SOURCE)
         end
         model.unscoped.find(record.id).destroy!
         action(model, record, :hard_delete, fields, :deleted)

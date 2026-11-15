@@ -94,12 +94,21 @@ module Lyra
     end
 
     # Calculate differences between CRUD and Event-sourced states
+    # Each attribute whose value differs, keyed by its column name as a
+    # string (as Active Record keys attributes), => { crud:, event_sourced: };
+    # {} when the row and its replayed state agree (both absent counts as
+    # agreeing). When only one of them has the record, one entry in the same
+    # shape under the symbol :exists, exists: { crud:, event_sourced: } (true or
+    # false each), which no column name (a string) can collide with: never
+    # empty, so a caller that checks for {} cannot take it for agreement.
+    # Before 1.0.0 agreement was { no_differences: true } and a missing record
+    # { exists_mismatch: true }.
     def calculate_differences
       crud = crud_state
       es = event_sourced_state
 
-      return { exists_mismatch: true } if crud[:exists] != es[:exists]
-      return { no_differences: true } if !crud[:exists] && !es[:exists]
+      return { exists: { crud: crud[:exists], event_sourced: es[:exists] } } if crud[:exists] != es[:exists]
+      return {} if !crud[:exists] && !es[:exists]
 
       crud_attrs = crud[:attributes] || {}
       es_attrs = es[:state] || {}
@@ -110,16 +119,16 @@ module Lyra
       crud_lookup = build_key_lookup(crud_attrs)
       es_lookup = build_key_lookup(es_attrs)
 
-      # Compare union of all keys from both sources, excluding DB-managed timestamps
-      ignored_keys = %i[created_at updated_at]
-      all_keys = (crud_lookup.keys + es_lookup.keys).uniq - ignored_keys
+      # Compare the union of both sources' keys. created_at and updated_at are
+      # compared like any other attribute: every event carries them (1.0.0).
+      all_keys = (crud_lookup.keys + es_lookup.keys).uniq
 
       all_keys.each do |key|
         crud_val = crud_lookup[key]
         es_val = es_lookup[key]
 
         unless values_equal?(crud_val, es_val)
-          differences[key] = {
+          differences[key.to_s] = {
             crud: crud_val,
             event_sourced: es_val
           }
@@ -130,7 +139,7 @@ module Lyra
       # events (Lyra::Associations::HabtmLinks), by association name.
       differences.merge!(Associations::HabtmLinks.differences(model_class, model_id))
 
-      differences.empty? ? { no_differences: true } : differences
+      differences
     end
 
     # Get audit trail from events
@@ -211,7 +220,7 @@ module Lyra
 
       def find_discrepancies(model_class)
         compare_all(model_class).select do |comparison|
-          comparison[:differences] != { no_differences: true }
+          comparison[:differences].any?
         end
       end
     end
@@ -233,11 +242,11 @@ module Lyra
       comparison = view.compare
       recommendations = []
 
-      if comparison[:differences][:exists_mismatch]
+      if comparison[:differences].key?(:exists)
         recommendations << "State existence mismatch - investigate data consistency"
       end
 
-      if comparison[:differences] != { no_differences: true } && !comparison[:differences][:exists_mismatch]
+      if comparison[:differences].any? && !comparison[:differences].key?(:exists)
         recommendations << "Attribute differences detected - consider which source is authoritative"
         recommendations << "Differences: #{comparison[:differences].keys.join(', ')}"
       end

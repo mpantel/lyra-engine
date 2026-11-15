@@ -31,7 +31,7 @@ class DualViewDestroyedTest < Minitest::Test
     assert_equal false, comparison[:event_sourced_view][:exists]
     assert comparison[:event_sourced_view][:destroyed]
     assert_equal 2, comparison[:event_sourced_view][:events_count]
-    assert_equal({ no_differences: true }, comparison[:differences])
+    assert_equal({}, comparison[:differences])
   end
 
   def test_a_destroyed_record_whose_row_survives_is_a_mismatch
@@ -46,7 +46,7 @@ class DualViewDestroyedTest < Minitest::Test
 
     assert_equal true, comparison[:crud_view][:exists]
     assert_equal false, comparison[:event_sourced_view][:exists]
-    assert_equal({ exists_mismatch: true }, comparison[:differences])
+    assert_equal({ exists: { crud: true, event_sourced: false } }, comparison[:differences])
   end
 
   def test_a_live_record_still_exists_in_both_views
@@ -56,7 +56,7 @@ class DualViewDestroyedTest < Minitest::Test
 
     assert_equal true, comparison[:event_sourced_view][:exists]
     assert_equal false, comparison[:event_sourced_view][:destroyed]
-    assert_equal({ no_differences: true }, comparison[:differences])
+    assert_equal({}, comparison[:differences])
   end
 
   # Only replay: false events (domain events emitted alongside a write) say
@@ -72,7 +72,7 @@ class DualViewDestroyedTest < Minitest::Test
 
     assert_equal false, comparison[:event_sourced_view][:exists]
     assert_equal false, comparison[:event_sourced_view][:destroyed]
-    assert_equal({ no_differences: true }, comparison[:differences])
+    assert_equal({}, comparison[:differences])
   ensure
     Lyra.config.event_store.delete_stream("User$#{id}") rescue nil
   end

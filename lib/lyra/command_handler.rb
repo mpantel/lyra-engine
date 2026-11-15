@@ -164,16 +164,15 @@ module Lyra
     end
 
     def create_event(operation, id, data)
-      event_data = {
-        model_class: command.model_class.name,
-        model_id: id,
-        operation: operation,
-        attributes: data[:attributes] || data,
-        changes: data[:changes] || {},
-        timestamp: Time.current
-      }
+      event_data = Lyra::EventData.build(
+        command.model_class, id, operation,
+        # A create's data is the attributes themselves; an update's is { changes: }.
+        attributes: operation.to_sym == :updated ? {} : (data[:attributes] || data),
+        changes: data[:changes] || {}
+      )
 
-      event_metadata = attribution_metadata(operation).merge(source: 'lyra_command_handler')
+      # source is Lyra's default: a metadata_proc that sets its own wins.
+      event_metadata = { source: 'lyra_command_handler' }.merge(attribution_metadata(operation))
 
       config = Lyra.config.model_config(command.model_class)
       event_name = config.event_name_for(operation)

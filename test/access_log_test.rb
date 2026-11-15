@@ -39,8 +39,55 @@ class AccessLogTest < Minitest::Test
     PamDsl.logger = nil
   end
 
+  # From 1.0.0 a subject's log can be erased on its own, a bare id included,
+  # and the erasure is recorded; a model-wide log (a pluck's) cannot.
+  def test_a_subject_s_log_is_erased_and_the_erasure_recorded
+    2.times { @policy.validate_access!([:email], :contact, subject: "user-7") }
+    @policy.validate_access!([:email], :contact, subject: @user)
+    ids = Lyra::AccessLog.for("user-7").map(&:event_id)
+
+    assert_equal 2, Lyra::AccessLog.erase!("user-7", reason: "Art. 17 request", erased_by: "dpo")
+    assert_empty Lyra::AccessLog.for("user-7")
+    assert_equal 0, ActiveRecord::Base.connection.select_value(
+      "SELECT count(*) FROM event_store_events WHERE event_id IN (#{ids.map { "'#{_1}'" }.join(',')})"
+    ).to_i, "deleted, not only unlinked"
+    assert_equal 1, Lyra::AccessLog.for(@user).size, "another subject's log is not touched"
+
+    record = Lyra.config.event_store.read.stream(Lyra::AccessLog::ERASURES).to_a.sole
+    assert_kind_of Lyra::Events::AccessLogErased, record
+    assert_equal ["user-7", 2, "Art. 17 request"], record.data.values_at(:subject, :entries, :reason)
+    assert_equal "dpo", record.metadata[:erased_by]
+
+    assert_equal 1, Lyra::AccessLog.erase!(@user, reason: "r"), "a record as the subject"
+  end
+
+  def test_a_model_wide_log_cannot_be_erased_as_a_subject
+    assert_raises(Lyra::AccessLog::ModelWideSubject) { Lyra::AccessLog.erase!("AccessUser$*", reason: "r") }
+    assert_raises(ArgumentError) { Lyra::AccessLog.erase!(nil, reason: "r") }
+  end
+
   def test_lyra_installs_itself_as_pam_s_access_recorder
     assert_same Lyra::AccessLog, PamDsl.access_recorder
+  end
+
+  # The read has returned its value by the time the transaction rolls back: the
+  # entry must not go with it (it did, before 1.0.0).
+  def test_an_access_stays_recorded_when_the_readers_transaction_rolls_back
+    AccessUser.transaction do
+      assert @policy.validate_access!([:email], :contact, subject: @user)
+      raise ActiveRecord::Rollback
+    end
+
+    assert_equal 1, Lyra::AccessLog.for(@user).size
+  end
+
+  def test_a_refusal_stays_recorded_when_the_readers_transaction_rolls_back
+    AccessUser.transaction do
+      assert_raises(PamDsl::PurposeFieldMismatchError) { @policy.validate_access!([:ssn], :contact, subject: @user) }
+      raise ActiveRecord::Rollback
+    end
+
+    assert_kind_of Lyra::Events::DataAccessDenied, Lyra::AccessLog.for(@user).sole
   end
 
   def test_a_granted_access_is_recorded_in_the_subject_s_access_stream

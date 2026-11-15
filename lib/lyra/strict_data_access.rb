@@ -77,7 +77,8 @@ module Lyra
         self.class.attribute_aliases[name] || name
       end
       columns |= [self.class.locking_column] if Lyra::OptimisticLocking.enabled?(self.class)
-      with_bypass_event(columns, "touch") { super }
+      deferred, @lyra_deferred_touch_before = @lyra_deferred_touch_before, nil
+      with_bypass_event(columns, "touch", before: deferred) { super }
     end
 
     def delete
@@ -85,7 +86,7 @@ module Lyra
       if Lyra::BypassEvents.enabled_for?(self.class)
         safely_publish("delete") do
           Lyra::BypassEvents.publish(self.class, id, :destroyed,
-                                     attributes: attributes.except(*Lyra::BypassEvents::TIMESTAMP_COLUMNS),
+                                     attributes: attributes,
                                      source: "delete")
         end
       end
@@ -93,6 +94,22 @@ module Lyra
     end
 
     private
+
+    # belongs_to ... touch: true runs through Rails' touch_later: it writes
+    # the timestamps into the record at once and clears their change
+    # (surreptitiously_touch), and calls touch when the transaction commits.
+    # By then attribute_in_database holds the new value, so touch saw no change
+    # and the cascade published nothing: the parent's row moved and its stream
+    # did not. The value the row held before the first deferred touch is kept
+    # here, and the next touch takes it as the old value.
+    def surreptitiously_touch(attr_names)
+      @lyra_deferred_touch_before ||= {}
+      attr_names.each do |name|
+        name = name.to_s
+        @lyra_deferred_touch_before[name] = attribute_in_database(name) unless @lyra_deferred_touch_before.key?(name)
+      end
+      super
+    end
 
     def raise_strict_violation!(method_name)
       return unless Lyra.config.strict_data_access
@@ -115,10 +132,13 @@ module Lyra
     # In an events-only store (ES-NoProj) there is no row: the UPDATE matches
     # nothing and returns false, and the event is the write. Publishing only
     # on a matched row lost every update_columns and touch there.
-    def with_bypass_event(columns, source)
+    # +before+: old values known from elsewhere (a deferred touch's), which
+    # attribute_in_database no longer holds.
+    def with_bypass_event(columns, source, before: nil)
       Lyra::BypassEvents.atomically(self.class) do
         events_only = Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
-        before = columns.to_h { |c| [c, attribute_in_database(c)] }
+        known = before || {}
+        before = columns.to_h { |c| [c, known.key?(c) ? known[c] : attribute_in_database(c)] }
         result = yield
         written = result || events_only
         changes = columns.each_with_object({}) do |c, h|

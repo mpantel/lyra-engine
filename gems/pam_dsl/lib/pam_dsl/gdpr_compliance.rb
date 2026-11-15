@@ -316,6 +316,16 @@ module PamDsl
       @attribute_extractor.respond_to?(:call) ? @attribute_extractor.call(event) : @attribute_extractor.send(:call, event)
     end
 
+    # What an event gives or changes: its attributes or, when it holds none (an
+    # update carries its changes only, in every mode), the new values of its
+    # changes. Personal data is detected in these, and subjects are matched on them.
+    def extract_fields(event)
+      attributes = extract_attributes(event)
+      return attributes unless attributes.respond_to?(:empty?) && attributes.empty?
+
+      extract_changes(event).to_h { |field, change| [field, change.is_a?(Array) ? change.last : change] }
+    end
+
     def extract_timestamp(event)
       @timestamp_extractor.respond_to?(:call) ? @timestamp_extractor.call(event) : @timestamp_extractor.send(:call, event)
     end
@@ -337,7 +347,7 @@ module PamDsl
     end
 
     def has_pii?(event)
-      PIIDetector.detect(extract_attributes(event)).any?
+      PIIDetector.detect(extract_fields(event)).any?
     end
 
     def event_summary(event)
@@ -354,7 +364,7 @@ module PamDsl
     def collect_pii_inventory(events)
       PIIDetector.extract_pii_from_records(
         events,
-        attribute_extractor: ->(e) { extract_attributes(e) },
+        attribute_extractor: ->(e) { extract_fields(e) },
         metadata_extractor: ->(e) {
           {
             event_id: e.respond_to?(:event_id) ? e.event_id : nil,
@@ -371,7 +381,7 @@ module PamDsl
       lineage = {}
 
       sorted_events.each do |event|
-        pii_fields = PIIDetector.detect(extract_attributes(event))
+        pii_fields = PIIDetector.detect(extract_fields(event))
 
         pii_fields.each do |field, info|
           lineage[field] ||= []
@@ -396,7 +406,7 @@ module PamDsl
           activity: extract_operation(event),
           model: extract_model_class(event),
           purpose: infer_purpose(metadata[:source], [event]),
-          data_processed: PIIDetector.detect(extract_attributes(event)).keys
+          data_processed: PIIDetector.detect(extract_fields(event)).keys
         }
       end
     end
@@ -415,7 +425,7 @@ module PamDsl
 
     def find_dependencies(events)
       events.flat_map do |event|
-        attrs = extract_attributes(event)
+        attrs = extract_fields(event)
         attrs.select { |k, v| k.to_s.end_with?('_id') && v == subject_id }
       end.uniq
     end
@@ -479,7 +489,7 @@ module PamDsl
 
     def categorize_data(events)
       pii_types = events.flat_map do |event|
-        PIIDetector.detect(extract_attributes(event)).values.map { |v| v[:type] }
+        PIIDetector.detect(extract_fields(event)).values.map { |v| v[:type] }
       end.uniq
 
       pii_types.map { |t| t.to_s.split('_').map(&:capitalize).join(' ') }

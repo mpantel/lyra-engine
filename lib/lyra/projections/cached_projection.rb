@@ -342,7 +342,7 @@ module Lyra
           events.each do |event|
             case Lyra::Event.operation_of(event)
             when :created, :imported
-              event_attrs = event.data[:attributes] || event.data["attributes"] || {}
+              event_attrs = Lyra::Event.created_attributes(event.data)
               attributes.merge!(stringify_keys(event_attrs))
             when :updated
               changes = event.data[:changes] || event.data["changes"] || {}

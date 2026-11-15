@@ -80,7 +80,7 @@ class AsyncOutOfLineTest < Minitest::Test
     assert_equal expected, rows.map { |id, name| [id.to_i, name] }
     users[0..3].each do |u|
       differences = Lyra::DualView.new(AsyncUser, u.id).compare[:differences]
-      assert differences[:no_differences], "row #{u.id} matches its events: #{differences.inspect}"
+      assert differences.empty?, "row #{u.id} matches its events: #{differences.inspect}"
     end
   ensure
     ProjectionThreads.record_into(nil)

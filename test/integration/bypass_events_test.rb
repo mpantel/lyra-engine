@@ -68,8 +68,9 @@ class BypassEventsTest < Minitest::Test
 
     event = bypass_events.last
     refute_nil event, "touch(:published_at) must reach the event log"
-    attrs = event.data[:attributes] || event.data["attributes"]
-    assert attrs.key?("published_at")
+    changes = event.data[:changes] || event.data["changes"]
+    assert changes.key?("published_at")
+    assert_empty(event.data[:attributes] || event.data["attributes"], "an update carries its changes only")
     assert_consistent
   end
 
@@ -100,7 +101,7 @@ class BypassEventsTest < Minitest::Test
   end
 
   def assert_consistent
-    assert_equal({ no_differences: true }, Lyra::DualView.new(BypassArticle, @article.id).calculate_differences)
+    assert_equal({}, Lyra::DualView.new(BypassArticle, @article.id).calculate_differences)
   end
 
   def clean

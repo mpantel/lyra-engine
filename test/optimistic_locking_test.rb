@@ -268,7 +268,7 @@ class OptimisticLockingTest < Minitest::Test
     LockedItem.count if @mode == :es_lazy # bring the table up to date first
     differences = Lyra::DualView.new(LockedItem, id).calculate_differences
 
-    assert_equal({ no_differences: true }, differences)
+    assert_equal({}, differences)
     return if @mode == :es_noproj
 
     row = connection.select_value("SELECT lock_version FROM #{TABLE} WHERE id = #{Integer(id)}")

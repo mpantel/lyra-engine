@@ -114,7 +114,7 @@ class CallbackOrderTest < Minitest::Test
   end
 
   def assert_consistent(article)
-    assert_equal({ no_differences: true }, Lyra::DualView.new(CallbackArticle, article.id).calculate_differences)
+    assert_equal({}, Lyra::DualView.new(CallbackArticle, article.id).calculate_differences)
   end
 
   def clean

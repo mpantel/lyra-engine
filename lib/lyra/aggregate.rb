@@ -121,7 +121,7 @@ module Lyra
 
     def apply_created(event)
       @id = event.data[:model_id] rescue event.model_id
-      attrs = event.data[:attributes] rescue event.attributes
+      attrs = Lyra::Event.created_attributes(event.data) rescue event.attributes
       attrs&.each { |k, v| set_state(k, v) }
     end
 

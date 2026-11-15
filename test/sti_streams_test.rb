@@ -63,7 +63,7 @@ class StiStreamsTest < Minitest::Test
       next if mode == :es_noproj
 
       [StiItem, StiSpecial].each do |reader|
-        assert_equal({ no_differences: true }, Lyra::DualView.new(reader, record.id).calculate_differences,
+        assert_equal({}, Lyra::DualView.new(reader, record.id).calculate_differences,
                      "#{mode}: DualView given #{reader.name}")
       end
     end

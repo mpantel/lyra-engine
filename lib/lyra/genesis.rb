@@ -145,14 +145,7 @@ module Lyra
         record = Lyra::PurposeBoundReads.internal { model_class.instantiate(row) }
         return nil if record.id.nil?
 
-        data = {
-          model_class: model_class.name,
-          model_id: record.id,
-          operation: OPERATION,
-          attributes: record.attributes,
-          changes: {},
-          timestamp: Time.current
-        }
+        data = Lyra::EventData.build(model_class, record.id, OPERATION, attributes: record.attributes)
         event = event_class(model_class).new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, { genesis: true }))
         # The lock and the NOT EXISTS above make the stream empty here.
         stream_name = Lyra.stream_name(model_class, record.id)

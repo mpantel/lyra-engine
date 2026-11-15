@@ -186,7 +186,12 @@ module Lyra
           return false unless model_class && operation
 
           ModelProjection.project(model_class, operation, Struct.new(:events, :attributes, :success?, keyword_init: true).new(
-            events: [event], attributes: event.data[:attributes] || event.data["attributes"] || {}, success?: true
+            events: [event], success?: true,
+            attributes: if %i[created imported].include?(operation)
+                          Lyra::Event.created_attributes(event.data)
+                        else
+                          event.data[:attributes] || event.data["attributes"] || {}
+                        end
           ))
           true
         end

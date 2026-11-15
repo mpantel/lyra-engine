@@ -86,9 +86,28 @@ module Lyra
       private
 
       # Read all events related to the subject from Lyra's event store
+      # Every event of the subject's own record and of the records that refer
+      # to them, in log order. A related record is followed through its stream:
+      # its foreign key is tracked from event to event, and an event belongs to
+      # the subject when the record pointed at them before or after it. An event
+      # carries only what it changed (Lyra::EventData, 1.0.0), so matching the
+      # foreign key in each event alone kept a related record's create and lost
+      # its later updates and its destroy.
       def read_subject_events(subject_id, subject_type)
+        fk = subject_foreign_key(subject_type)
+        id = subject_id.to_s
+        pointed_at = {} # [model class, model id] => the foreign key's last known value
         Lyra.config.event_store.read.to_a.select do |event|
-          event_relates_to_subject?(event, subject_id, subject_type)
+          relates = event_relates_to_subject?(event, subject_id, subject_type)
+          model_id = extract_model_id(event)
+          next relates if model_id.nil?
+
+          key = [extract_model_class(event).to_s, model_id.to_s]
+          fields = extract_attributes(event)
+          before = pointed_at[key]
+          after = fields.key?(fk) ? fields[fk] : fields.fetch(fk.to_sym, before)
+          pointed_at[key] = after
+          relates || [before, after].any? { |value| !value.nil? && value.to_s == id }
         end
       end
 
@@ -124,9 +143,11 @@ module Lyra
 
       # Lyra-specific extractors
 
+      # The fields the event gives or changes (Lyra::Event.fields_of): an
+      # update holds its changes only, in every mode.
       def extract_attributes(event)
+        return Lyra::Event.fields_of(event) if event.respond_to?(:data)
         return event.attributes if event.respond_to?(:attributes) && !event.attributes.is_a?(Method)
-        return event.data[:attributes] || event.data["attributes"] || {} if event.respond_to?(:data)
         {}
       end
 

@@ -54,7 +54,7 @@ class EncryptedAttributesTest < Minitest::Test
       next if mode == :es_noproj
 
       refute_includes raw_secret(item.id), NEWER, "#{mode}: the row holds ciphertext"
-      assert_equal({ no_differences: true }, Lyra::DualView.new(SecretItem, item.id).calculate_differences, "#{mode}: DualView")
+      assert_equal({}, Lyra::DualView.new(SecretItem, item.id).calculate_differences, "#{mode}: DualView")
     end
   end
 
@@ -103,7 +103,7 @@ class EncryptedAttributesTest < Minitest::Test
 
     assert_equal SECRET, SecretItem.find(item.id).secret
     refute_includes raw_secret(item.id), SECRET, "the row is encrypted"
-    assert_equal({ no_differences: true }, Lyra::DualView.new(SecretItem, item.id).calculate_differences)
+    assert_equal({}, Lyra::DualView.new(SecretItem, item.id).calculate_differences)
   end
 
   def test_a_point_in_time_read_decrypts

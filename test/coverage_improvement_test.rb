@@ -125,7 +125,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test BigDecimal normalization (line 155) - already tested but ensure coverage
@@ -140,7 +140,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test time parsing rescue branch (line 166)
@@ -155,7 +155,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test non-timestamp/non-numeric string else branch (line 172)
@@ -170,7 +170,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test TrueClass/FalseClass branch (line 175)
@@ -185,7 +185,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test NilClass branch (line 177)
@@ -200,7 +200,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test else branch with custom object (line 179)
@@ -223,7 +223,7 @@ module Lyra
       differences = @dual_view.calculate_differences
 
       # Symbol :pending.to_s == "pending", so should match
-      assert_equal({ no_differences: true }, differences)
+      assert_equal({}, differences)
     end
 
     # Test with actual Date object difference detection
@@ -238,7 +238,7 @@ module Lyra
 
       differences = @dual_view.calculate_differences
 
-      assert differences.key?(:birthday)
+      assert differences.key?("birthday")
     end
   end
 

@@ -6,7 +6,7 @@ require "rake"
 # lyra:erase passes MAX_COPIES through to Lyra::Erasure.erase! and refuses
 # anything but a positive integer.
 class EraseTaskTest < Minitest::Test
-  ENV_KEYS = %w[MODEL ID REASON FIELDS EVERYWHERE MAX_COPIES OPERATOR ANY_FIELDS LYRA_OPERATOR].freeze
+  ENV_KEYS = %w[MODEL ID REASON FIELDS EVERYWHERE MAX_COPIES OPERATOR ANY_FIELDS LYRA_OPERATOR ACCESS_LOG ACCESS_LOG_SUBJECTS].freeze
 
   def setup
     @saved_env = ENV_KEYS.to_h { |k| [k, ENV[k]] }
@@ -17,7 +17,7 @@ class EraseTaskTest < Minitest::Test
     ENV.update("MODEL" => "String", "ID" => "5", "REASON" => "Art. 17", "EVERYWHERE" => "1")
     ENV.delete("FIELDS")
     ENV.delete("MAX_COPIES")
-    %w[OPERATOR ANY_FIELDS LYRA_OPERATOR].each { ENV.delete(_1) }
+    %w[OPERATOR ANY_FIELDS LYRA_OPERATOR ACCESS_LOG ACCESS_LOG_SUBJECTS].each { ENV.delete(_1) }
   end
 
   def teardown
@@ -30,10 +30,46 @@ class EraseTaskTest < Minitest::Test
     fake = lambda do |model, id, **kwargs|
       calls << kwargs.merge(model: model, id: id)
       Lyra::Erasure::Result.new(model: model.name, id: id, fields: ["email"], events_rewritten: 1,
-                                row_erased: true, copies: [], shared_values: shared)
+                                row_erased: true, copies: [], shared_values: shared,
+                                access_log: kwargs[:access_log] ? "erased" : "kept", access_log_entries: 3)
     end
     out, = capture_io { Lyra::Erasure.stub(:erase!, fake) { @rake["lyra:erase"].invoke } }
     [calls.first, out]
+  end
+
+  # 0.16 (from 1.0.0): ACCESS_LOG decides for this erasure; unset, the
+  # configuration does.
+  def test_access_log_is_passed_through_and_reported
+    call, out = run_erase
+    assert_nil call[:access_log]
+    assert_match(/Access log kept: 3 entries/, out)
+
+    { "1" => true, "erase" => true, "0" => false, "keep" => false }.each do |value, expected|
+      @rake["lyra:erase"].reenable
+      ENV["ACCESS_LOG"] = value
+      call, out = run_erase
+      assert_equal expected, call[:access_log], value
+      assert_match(/Access log #{expected ? 'erased' : 'kept'}: 3 entries/, out)
+    end
+  end
+
+  def test_access_log_subjects_are_passed_through
+    call, = run_erase
+    assert_equal [], call[:access_log_subjects]
+
+    @rake["lyra:erase"].reenable
+    ENV["ACCESS_LOG_SUBJECTS"] = "user-7, 42,"
+    call, = run_erase
+    assert_equal %w[user-7 42], call[:access_log_subjects]
+  end
+
+  def test_rejects_an_access_log_that_is_not_one_or_zero
+    ENV["ACCESS_LOG"] = "maybe"
+    never = ->(*, **) { flunk "erase! must not run" }
+    _, err = capture_io do
+      assert_raises(SystemExit) { Lyra::Erasure.stub(:erase!, never) { @rake["lyra:erase"].invoke } }
+    end
+    assert_match(/ACCESS_LOG must be 1/, err)
   end
 
   # From 0.9.3 the task names who erased (before: nobody) and keeps FIELDS

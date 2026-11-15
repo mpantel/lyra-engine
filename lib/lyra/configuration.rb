@@ -50,6 +50,10 @@ module Lyra
     # Extra metadata for each recorded access, from a proc given the
     # PamDsl::Enforcement::Access: who accessed, where Current does not say.
     attr_accessor :access_metadata_proc
+    # Whether Lyra::Erasure.erase! also deletes the subject's access log
+    # (Lyra::DataAccess$<Model>$<id>), unless the call says (access_log:).
+    # Off by default: the log may be evidence the application must keep.
+    attr_accessor :erase_access_log
     # What a read of a model with a privacy policy does when no purpose is
     # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
     attr_reader :reads_without_purpose
@@ -120,6 +124,7 @@ module Lyra
       @annotate_privacy = false
       @record_access_events = false
       @access_metadata_proc = nil
+      @erase_access_log = false
       @reads_without_purpose = :allow
       @monitor_append_failure = :log
       @lock_aggregate_before_append = true

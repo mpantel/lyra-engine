@@ -101,6 +101,7 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `annotate_privacy` | `false` | Stamp each event's metadata with its privacy annotation (opt-in). |
 | `record_access_events` | `false` | Record each policy-validated access as an event (opt-in; needs pam_dsl). |
 | `access_metadata_proc` | `nil` | `->(access) { Hash }`, extra metadata for each recorded access. |
+| `erase_access_log` | `false` | `Lyra::Erasure.erase!` also deletes the subject's access log once the record is fully erased (every personal field, now or earlier), unless the call says otherwise (`access_log:`). |
 | `reads_without_purpose` | `:allow` | Reads of a policy-covered model with no declared purpose: `:allow`, `:audit` or `:deny`. Validated on assignment. |
 | `retention_executor` | `false` | Allow `Lyra::Retention.apply!` to change data (opt-in). |
 | `retention_anchors` | `{}` | Column each model's retention period runs from, keyed by model name (a String); `created_at` when absent. |
@@ -416,8 +417,8 @@ not loaded yet resolves only through the schema store.
 | Monitor (interceptor) | `user_id`, `request_id`, `correlation_id`, `causation_id`, `action_id`, `user_action`, plus `metadata_proc`'s hash |
 | Hijack and event sourcing (command handler) | the same keys as Monitor, plus `source: "lyra_command_handler"`; a command without a record (direct `CommandHandler` use) carries `correlation_id`, `causation_id`, `action_id` and `user_action` |
 | Genesis | `genesis: true` |
-| Repair | `source: "lyra_repair"`, `repaired`, `correlation_id` |
-| Erasure | `source: "lyra_erasure"`, `erased_by`, `correlation_id` (on `ErasureApplied`) |
+| Repair | `source: "lyra_repair"`, `repaired`, `repaired_by` (a label), `os_user`, `host`, `pid`, `correlation_id` |
+| Erasure | `source: "lyra_erasure"`, `erased_by` (a label), `os_user`, `host`, `pid`, `correlation_id` (on `ErasureApplied`, whose data adds `any_fields`, `requested_fields`, `beyond_policy`) |
 | any, with `annotate_privacy` | `privacy` (see [Privacy stamps](#privacy-stamps-opt-in)) |
 
 `metadata_proc` applies to every mode's events.
@@ -657,12 +658,12 @@ Compares a record's row with the state replayed from its stream.
 ```ruby
 view = Lyra::DualView.new(Order, 42)
 view.compare
-# => { crud_view: {...}, event_sourced_view: {...}, differences: { no_differences: true }, metadata: {...} }
+# => { crud_view: {...}, event_sourced_view: {...}, differences: {}, metadata: {...} }
 ```
 
 | Method | Description |
 |---|---|
-| `compare` | Both views and the differences (`{ no_differences: true }`, `{ exists_mismatch: true }`, or `{ attr: { crud:, event_sourced: } }`). A destroyed record whose row is gone compares clean; one whose row remains is an `exists_mismatch`. `created_at`/`updated_at` are ignored; times compare at microseconds. |
+| `compare` | Both views and the differences (`{}` when they agree, `{ exists: { crud:, event_sourced: } }` when only one has the record, or `{ "attr" => { crud:, event_sourced: } }`, keyed by column name as a string). A destroyed record whose row is gone compares clean; one whose row remains is an `exists` difference. `created_at`/`updated_at` are compared like any other column; times compare at microseconds. |
 | `crud_state` | `{ exists:, attributes:, timestamps: }` |
 | `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. A stream of only `replay: false` events has `exists: false`. |
 | `audit_trail` | `AuditProjection.audit_trail` for the record. |
@@ -826,7 +827,11 @@ With `config.record_access_events = true`, `Lyra::AccessLog` records every
 basis, field names, subject, outcome, time and violations; the metadata holds
 `user_id` (`Current.user`), `ip_address`, `request_id`, correlation and
 causation ids, and `config.access_metadata_proc`'s hash. An access that cannot
-be recorded does not go ahead. Nothing is recorded in Disabled mode.
+be recorded does not go ahead. Nothing is recorded in Disabled mode. From 1.0.0
+an access inside a transaction is recorded on a second connection, so it
+survives a rollback; size the pool at about twice the threads, or a read waits
+`checkout_timeout` for a connection and is then recorded inline (see
+[PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md#the-access-log)).
 
 ```ruby
 config.record_access_events = true
@@ -857,10 +862,20 @@ result = Lyra::Erasure.erase!(Registration, 5, reason: "...", fields: %w[email p
 | `erased_by:` | Default `Current.user&.id`. |
 | `everywhere:` | Also search the whole log for the erased values of direct identifiers (email, phone, identifier, ssn, credit_card, financial, payment_token, ip_address, credential, token): other records' events are scrubbed and their rows updated. Uses PostgreSQL-specific SQL. |
 | `max_copies:` | With `everywhere`, a value held by more than this many other records (default 10) is treated as shared and left. |
+| `access_log:` | `true` deletes the record's access log (`Lyra::DataAccess$<Model>$<id>`), its events too; `false` keeps it; default `config.erase_access_log` (false), applied only when the erasure completes the record. From 1.0.0. |
+| `access_log_subjects:` | Ids the application used as this person's subject (`validate_access!(…, subject: "user-7")`): their logs are erased, or kept and counted, with the record's. A model-wide key (`Model$*`) raises `Lyra::AccessLog::ModelWideSubject`. From 1.0.0. |
 
 `Result` fields: `model`, `id`, `fields`, `events_rewritten`, `row_erased`,
 `copies` (records whose copies were erased), `shared_values` (an Integer: the
-count of values left as shared, 0 when none). The replacement is `nil` where the column allows it,
+count of values left as shared, 0 when none), `access_log` (`"erased"` or
+`"kept"`) and `access_log_entries` (how many entries it held), both also
+recorded in `ErasureApplied` (with `access_log_subjects`, the number of extra subjects, when any).
+
+`Lyra::AccessLog.erase!(subject, reason:, erased_by: nil)` deletes one subject's
+access log on its own (a record or a bare id) and returns how many entries it
+deleted; it records `Lyra::Events::AccessLogErased` (subject, entries, reason,
+`erased_by`) in the stream `Lyra::AccessLogErasures`. Rake: `lyra:erase_access_log
+SUBJECT=… REASON=… [OPERATOR=…]`. The replacement is `nil` where the column allows it,
 `"erased:<id>"` for a NOT NULL string column, else the column default; a NOT
 NULL column with neither raises `Lyra::Erasure::Unsupported`, as does a record
 with no personal fields.

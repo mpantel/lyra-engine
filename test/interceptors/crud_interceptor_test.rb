@@ -117,12 +117,12 @@ module Lyra
         user&.destroy
       end
 
-      def test_build_event_data_excludes_timestamps_from_attributes
+      def test_build_event_data_includes_timestamps_in_attributes
         user = ::User.create!(name: "Test", email: next_email)
         data = user.send(:build_event_data, :created)
 
-        refute data[:attributes].key?("created_at")
-        refute data[:attributes].key?("updated_at")
+        assert data[:attributes].key?("created_at"), "replay needs created_at from a create"
+        assert data[:attributes].key?("updated_at")
       ensure
         user&.destroy
       end

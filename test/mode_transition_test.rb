@@ -107,6 +107,21 @@ class ModeTransitionTest < Minitest::Test
   # From 0.9.3 every switch names who made it (before: nobody), so a switch
   # to Disabled, which turns purpose checks and the access log off, is
   # attributable.
+  # The label nobody checks can name anyone; the operating system's user and the
+  # host are recorded beside it so the two can be compared (1.0.0).
+  def test_a_switch_records_the_os_user_and_host_beside_a_label_that_names_someone_else
+    ENV["LYRA_OPERATOR"] = "somebody-else"
+    id = MT.send(:record_applied, "monitor")
+
+    row = ActiveRecord::Base.connection.select_one("SELECT actor, os_user, host, pid FROM lyra_mode_transitions WHERE id = #{id}")
+    assert_equal "somebody-else", row["actor"], "the label is whatever was claimed"
+    assert_equal Etc.getpwuid(Process.uid).name, row["os_user"]
+    assert_equal Socket.gethostname, row["host"]
+    assert_equal Process.pid, row["pid"].to_i
+  ensure
+    ENV.delete("LYRA_OPERATOR")
+  end
+
   def test_a_switch_records_who_made_it
     ENV["LYRA_OPERATOR"] = "ops-jdoe"
     id = MT.send(:record_applied, "monitor")

@@ -129,7 +129,7 @@ module Lyra
         started_at: events.min_by(&:timestamp)&.timestamp,
         completed_at: events.max_by(&:timestamp)&.timestamp,
         events: timeline,
-        privacy_impact: pam_dsl_available? ? events.count { |e| Privacy::PIIDetector.detect(event_attributes(e)).any? } : nil
+        privacy_impact: pam_dsl_available? ? events.count { |e| Privacy::PIIDetector.detect(event_fields(e)).any? } : nil
       }
     end
 
@@ -154,7 +154,7 @@ module Lyra
             timestamp: event_timestamp(action_events.min_by { |e| event_timestamp(e) }),
             events_count: action_events.count,
             models_affected: action_events.map { |e| event_model_class(e) }.uniq,
-            pii_affected: pam_dsl_available? ? action_events.any? { |e| Privacy::PIIDetector.detect(event_attributes(e)).any? } : nil
+            pii_affected: pam_dsl_available? ? action_events.any? { |e| Privacy::PIIDetector.detect(event_fields(e)).any? } : nil
           }
         end
       }
@@ -196,16 +196,10 @@ module Lyra
       data[:timestamp] || data["timestamp"] || event.metadata[:timestamp]
     end
 
-    def event_attributes(event)
-      # First try Lyra::Event accessor method
-      if event.respond_to?(:attributes)
-        attrs = event.attributes
-        return attrs if attrs.is_a?(Hash)
-      end
-      # Fall back to data hash for RubyEventStore events
-      data = event.respond_to?(:data) ? event.data : nil
-      return {} unless data
-      data[:attributes] || data["attributes"] || {}
+    # The fields an event gives or changes, whatever mode wrote it
+    # (Lyra::Event.fields_of): what personal data is detected in.
+    def event_fields(event)
+      Lyra::Event.fields_of(event)
     end
 
     def load_events(subject_id, subject_type)

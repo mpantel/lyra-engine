@@ -102,7 +102,7 @@ module Lyra
       @pii_inventory = extract_pii_from_events(events)
 
       @total_events = events.count
-      @events_with_pii = events.count { |e| Privacy::PIIDetector.detect(event_attributes(e)).any? }
+      @events_with_pii = events.count { |e| Privacy::PIIDetector.detect(event_fields(e)).any? }
       @pii_categories = @pii_inventory.keys
       @sensitive_pii = @pii_inventory.select { |k, _|
         [:ssn, :credit_card, :health, :biometric].include?(k)
@@ -143,16 +143,10 @@ module Lyra
       defined?(PAM_DSL_AVAILABLE) && PAM_DSL_AVAILABLE
     end
 
-    def event_attributes(event)
-      # First try Lyra::Event accessor method
-      if event.respond_to?(:attributes)
-        attrs = event.attributes
-        return attrs if attrs.is_a?(Hash)
-      end
-      # Fall back to data hash for RubyEventStore events
-      data = event.respond_to?(:data) ? event.data : nil
-      return {} unless data
-      data[:attributes] || data["attributes"] || {}
+    # The fields an event gives or changes, whatever mode wrote it
+    # (Lyra::Event.fields_of): what personal data is detected in.
+    def event_fields(event)
+      Lyra::Event.fields_of(event)
     end
 
     def event_model_class(event)
@@ -165,7 +159,7 @@ module Lyra
     def extract_pii_from_events(events)
       inventory = Hash.new { |h, k| h[k] = [] }
       events.each do |event|
-        pii = Privacy::PIIDetector.detect(event_attributes(event))
+        pii = Privacy::PIIDetector.detect(event_fields(event))
         next unless pii.is_a?(Hash)
         pii.each do |field, info|
           next unless info.is_a?(Hash) && info[:type]

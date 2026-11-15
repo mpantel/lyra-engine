@@ -105,6 +105,26 @@ class PurposeBoundReadsTest < Minitest::Test
     assert_raises(ArgumentError) { Lyra.config.reads_without_purpose = :sometimes }
   end
 
+  # 0.18 (fixed in 1.0.0): the rows insert_all and upsert_all wrote were
+  # reloaded as the application's read, so under a purpose that does not
+  # allow every declared field the reload was refused and the rows were
+  # written with no events (Monitor) or the write failed (Hijack).
+  def test_bulk_inserts_under_a_purpose_are_recorded
+    %i[enable_monitor! enable_hijack!].each do |mode|
+      clean
+      Lyra.config.public_send(mode)
+      now = Time.current
+      Lyra.with_purpose(:contact) do
+        ReadUser.insert_all([{ name: "Bo", email: "bo@example.com", created_at: now, updated_at: now }])
+        ReadUser.upsert_all([{ name: "Bo B", email: "bo@example.com", created_at: now, updated_at: now }], unique_by: :email)
+      end
+
+      id = ActiveRecord::Base.connection.select_value("SELECT id FROM users WHERE email = 'bo@example.com'")
+      operations = Lyra.config.event_store.read.stream("ReadUser$#{id}").to_a.map { Lyra::Event.operation_of(_1) }
+      assert_equal %i[created updated], operations, mode
+    end
+  end
+
   # Lyra's own reads are not processing for a purpose.
   def test_lyra_s_own_reads_are_not_checked
     Lyra.with_purpose(:contact) do

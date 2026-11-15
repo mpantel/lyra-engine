@@ -160,7 +160,7 @@ module Lyra
         Lyra::Projections::Rebuild.rebuild(@user_class)
 
         comparison = Lyra::DualView.new(@user_class, user.id).compare
-        assert_equal({ no_differences: true }, comparison[:differences],
+        assert_equal({}, comparison[:differences],
                      "rebuilt ORM row matches event-sourced view: #{comparison[:differences].inspect}")
       end
 

@@ -54,15 +54,19 @@ module Lyra
         def project_create(model_class, result)
           # Encrypted attributes arrive from the log as ciphertext; Active
           # Record encrypts what it inserts, so they are decrypted first.
-          attributes = Lyra::EncryptedAttributes.open(model_class, result.attributes.dup)
+          # String keys throughout: an event's attributes come from the store, or
+          # from a record, with string keys, and a symbol-keyed default added
+          # beside a string-keyed value overwrote it when the keys were
+          # stringified (every created_at and updated_at became the projection
+          # time).
+          attributes = Lyra::EncryptedAttributes.open(model_class, result.attributes.dup).stringify_keys
 
           # Ensure we have an ID
-          raise "Cannot project create without ID" unless attributes[:id] || attributes["id"]
+          raise "Cannot project create without ID" unless attributes["id"]
 
-          # Add timestamps if not present
-          now = Time.current
-          attributes[:created_at] ||= now
-          attributes[:updated_at] ||= now
+          # No default timestamps: a create's event carries created_at and
+          # updated_at like any other column (from 1.0.0), and a value made up
+          # here would differ from the row's.
 
           # Convert to database-safe format
           insert_attrs = sanitize_attributes(model_class, attributes)
@@ -92,8 +96,10 @@ module Lyra
             updates[field.to_sym] = new_value
           end
 
-          # Ensure updated_at timestamp (may already be in changes)
-          updates[:updated_at] ||= Time.current
+          # updated_at is set only when the event changed it: an update that
+          # left it alone (update_columns, an update_all that did not set it)
+          # left it alone in the row too, so stamping the projection time here
+          # made a rebuilt row differ from its events.
           updates = Lyra::EncryptedAttributes.open(model_class, updates)
 
           # Use update_all to bypass callbacks

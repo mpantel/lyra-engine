@@ -11,8 +11,6 @@ module Lyra
   # read model. Those run inside Lyra.projection_write and must never
   # publish: the event they project already exists.
   module BypassEvents
-    TIMESTAMP_COLUMNS = %w[created_at updated_at].freeze
-
     class << self
       # Whether a bypass write's events must be stored for the write to
       # stand. In Hijack and the event-sourcing modes the log is the record of
@@ -69,14 +67,7 @@ module Lyra
         event_class = event_class_for(model_class, operation)
         metadata = current_metadata.merge(source_key(source) => source)
 
-        data = {
-          model_class: model_class.name,
-          model_id: id,
-          operation: operation,
-          attributes: attributes,
-          changes: changes,
-          timestamp: Time.current
-        }
+        data = Lyra::EventData.build(model_class, id, operation, attributes: attributes, changes: changes)
         event = event_class.new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, metadata))
         Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, id))
 
@@ -138,7 +129,7 @@ module Lyra
       def publish_destroys(model_class, before, source:)
         before.each do |id, attrs|
           publish(model_class, id, :destroyed,
-                  attributes: attrs.except(*TIMESTAMP_COLUMNS), source: source)
+                  attributes: attrs, source: source)
         end
       end
 
@@ -168,22 +159,27 @@ module Lyra
 
       # After insert_all / upsert_all: a "created" event for each written row
       # that wasn't in the snapshot, an "updated" event (with its changes)
-      # for each that was and changed.
+      # for each that was and changed. The rows are reloaded as Lyra's own
+      # read, like the snapshots: before 1.0.0 the reload ran as the
+      # application's, so under a purpose that does not allow a declared
+      # field it was refused, and Monitor wrote the rows with no events.
       def publish_upserts(model_class, before, ids, source:)
         return if ids.blank?
 
         pk = model_class.primary_key
-        model_class.unscoped.where(pk => ids).find_each do |record|
-          id = record.public_send(pk)
-          if (old_attrs = before[id])
-            changes = diff(old_attrs, record.attributes)
-            next if changes.empty?
+        Lyra::PurposeBoundReads.internal do
+          model_class.unscoped.where(pk => ids).find_each do |record|
+            id = record.public_send(pk)
+            if (old_attrs = before[id])
+              changes = diff(old_attrs, record.attributes)
+              next if changes.empty?
 
-            publish(model_class, id, :updated,
-                    attributes: changes.transform_values(&:last), changes: changes, source: source)
-          else
-            publish(model_class, id, :created,
-                    attributes: record.attributes.except(*TIMESTAMP_COLUMNS), source: source)
+              publish(model_class, id, :updated,
+                      attributes: changes.transform_values(&:last), changes: changes, source: source)
+            else
+              publish(model_class, id, :created,
+                      attributes: record.attributes, source: source)
+            end
           end
         end
       end
@@ -194,11 +190,11 @@ module Lyra
         defined?(::Current) && ::Current.respond_to?(attribute) ? ::Current.public_send(attribute) : nil
       end
 
-      # Column => [old, new] for every non-timestamp column that changed.
+      # Column => [old, new] for every column that changed, created_at and
+      # updated_at included: a bare touch_all changes updated_at, and that is a
+      # change of the record's state.
       def diff(old_attrs, new_attrs)
         new_attrs.each_with_object({}) do |(column, new_value), acc|
-          next if TIMESTAMP_COLUMNS.include?(column)
-
           old_value = old_attrs[column]
           acc[column] = [old_value, new_value] unless old_value == new_value
         end

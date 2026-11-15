@@ -22,17 +22,39 @@ module Lyra
   # an API token: anything Current does not know). Without either, an
   # access carries no user: set one.
   #
-  # Every access is recorded, with no sampling. An access that cannot be
-  # recorded does not go ahead: the store's error propagates from
-  # validate_access!. Off by default, and nothing is recorded in disabled
+  # Every access is recorded, with no sampling, on a connection of its own
+  # (Lyra::OwnConnection), so that it stays recorded when the reader's
+  # transaction rolls back: the read has already returned its value by then.
+  # Inside a transaction that costs a thread and a second connection per
+  # access, so size the pool for it: with every thread of the application
+  # (Puma's, Sidekiq's) inside a transaction, a read that finds no free
+  # connection waits the pool's checkout_timeout (5 s by default) and is
+  # then recorded inline, in the reader's transaction, and lost if that rolls
+  # back. A pool of twice the threads avoids the wait.
+  # An access that cannot be recorded does not go ahead: the store's error
+  # propagates from validate_access!. Off by default, and nothing is recorded in disabled
   # mode: reads can outnumber writes by orders of magnitude, so its cost is
   # measured separately (LYRA_RECORD_ACCESS=1 in the Aegean testbed).
   #
   # The Article 30 record of processing does not depend on it: PAM's
   # reporter generates that from the declared policy. The access log is
   # the evidence of what was actually accessed.
+  #
+  # Erasure (from 1.0.0). A subject's log can be deleted: with the record
+  # (Lyra::Erasure.erase!, config.erase_access_log or access_log: true), or
+  # on its own with AccessLog.erase!, which also takes the bare ids an
+  # application passes as subjects. Its events are deleted from every stream
+  # they are in and from the events table, and an AccessLogErased event in
+  # Lyra::AccessLogErasures records which subject, how many entries, why and
+  # who. A model-wide entry (Lyra::DataAccess$<Model>$*, written by a pluck)
+  # names no subject: it is the record of a read of everyone's data, and no
+  # one person's erasure removes it.
   module AccessLog
     STREAM = "Lyra::DataAccess"
+    ERASURES = "Lyra::AccessLogErasures"
+    DELETE_BATCH = 1000
+
+    class ModelWideSubject < ArgumentError; end
 
     class << self
       # PamDsl.access_recorder protocol.
@@ -44,7 +66,9 @@ module Lyra
         event_class = access.outcome == :denied ? Lyra::Events::DataAccessDenied : Lyra::Events::DataAccessed
         subject = subject_key(access.subject)
         event = event_class.new(data: data_for(access, subject), metadata: metadata(access))
-        Lyra.append_events(event, stream_name: stream_for(subject))
+        # Outside a transaction this just runs; inside one it runs on a second
+        # connection, so a rollback of the reader's transaction keeps the entry.
+        Lyra::OwnConnection.run { Lyra.append_events(event, stream_name: stream_for(subject)) }
       end
 
       def stream_for(subject)
@@ -63,6 +87,59 @@ module Lyra
       # The accesses recorded for +subject+ (a record or an id), oldest first.
       def for(subject)
         Lyra.config.event_store.read.stream(stream_for(subject_key(subject))).to_a
+      end
+
+      # Deletes +subject+'s access log (a record, or an id the application
+      # passed as the subject) and records that it did, with the reason and
+      # who. Returns how many entries it deleted. Refuses a model-wide key.
+      def erase!(subject, reason:, erased_by: nil)
+        key = erasable_key(subject)
+        Lyra::PurposeBoundReads.internal do
+          ActiveRecord::Base.transaction do
+            entries = delete_stream!(stream_for(key))
+            erasure = Lyra::Events::AccessLogErased.new(
+              data: { subject: key, entries: entries, reason: reason.to_s, erased_at: Time.current },
+              metadata: { source: "lyra_access_log", erased_by: erased_by&.to_s, correlation_id: Lyra::Correlation.current_id }.compact
+            )
+            Lyra.append_events(erasure, stream_name: ERASURES)
+            entries
+          end
+        end
+      end
+
+      # The subject key for +subject+, refusing nil and model-wide keys.
+      def erasable_key(subject)
+        key = subject_key(subject)
+        raise ArgumentError, "no subject" if key.nil? || key.empty?
+        if key.end_with?("$*")
+          raise ModelWideSubject, "#{key} is a model-wide entry (a pluck): it names no subject, and erasing it " \
+                                  "would erase the record of reads of everyone's data"
+        end
+
+        key
+      end
+
+      # How many entries +stream+ holds.
+      def count_stream(stream)
+        ActiveRecord::Base.with_connection do |conn|
+          conn.select_value("SELECT count(*) FROM event_store_events_in_streams WHERE stream = #{conn.quote(stream)}").to_i
+        end
+      end
+
+      # Deletes +stream+'s events from every stream they are in and from the
+      # events table (RES's delete_stream only unlinks). Returns how many.
+      def delete_stream!(stream)
+        ActiveRecord::Base.with_connection do |conn|
+          ids = conn.select_values(
+            "SELECT event_id FROM event_store_events_in_streams WHERE stream = #{conn.quote(stream)}"
+          ).uniq
+          ids.each_slice(DELETE_BATCH) do |slice|
+            list = slice.map { |event_id| conn.quote(event_id) }.join(", ")
+            conn.execute("DELETE FROM event_store_events_in_streams WHERE event_id IN (#{list})")
+            conn.execute("DELETE FROM event_store_events WHERE event_id IN (#{list})")
+          end
+          ids.size
+        end
       end
 
       private
@@ -115,6 +192,8 @@ module Lyra
   module Events
     class DataAccessed < Lyra::Event; end
     class DataAccessDenied < Lyra::Event; end
+    # A subject's access log was deleted (AccessLog.erase!).
+    class AccessLogErased < Lyra::Event; end
   end
 end
 

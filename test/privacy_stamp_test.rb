@@ -58,11 +58,13 @@ class PrivacyStampTest < Minitest::Test
     assert_includes privacy_of(event)["fields"].keys, "name"
   end
 
-  def test_a_destroy_is_stamped_with_what_it_carries
+  # A destroy carries no attributes (Lyra::EventData), so there is nothing to
+  # annotate: the personal data is in the events before it.
+  def test_a_destroy_carries_no_personal_data_and_is_not_stamped
     user = StampUser.create!(name: "Ann", email: "ann@example.com")
     user.destroy!
 
-    assert_includes privacy_of(stream(user).last)["fields"].keys, "email"
+    assert_nil privacy_of(stream(user).last)
   end
 
   def test_bypass_writes_and_imports_are_stamped_too

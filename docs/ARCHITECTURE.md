@@ -154,7 +154,7 @@ student = Student.create!(name: "Alice", email: "alice@uni.edu")
 
 ```ruby
 Lyra::DualView.new(Student, student.id).compare[:differences]
-# => { no_differences: true }
+# => {}
 
 Lyra::DualView.find_discrepancies(Student)   # every row whose events disagree with it
 
@@ -213,7 +213,7 @@ Details are in [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md) and
 |---|---|
 | Does every CRUD operation produce an event? | `Lyra.verify_mapping!` runs PetriFlow nets for the CRUD lifecycle and for create, update and destroy across the modes, and checks that their terminal places are reachable, that they are safe (1-bounded), and that they are deadlock-free except at terminal places. See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
 | Can a write change the store without an event? | `Lyra::Verification::BypassWorkflow` models `update_column(s)`, `delete`, `touch`, `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify`; `BypassWorkflow.coverage` checks that every reachable end state is a rejection or a store change with an event logged. |
-| Does replaying the events produce the row? | `Lyra::DualView.new(Student, id).compare[:differences] == { no_differences: true }`; `config.dual_view_sample_rate` checks a share of committed writes as they happen (opt-in). |
+| Does replaying the events produce the row? | `Lyra::DualView.new(Student, id).compare[:differences].empty?`; `config.dual_view_sample_rate` checks a share of committed writes as they happen (opt-in). |
 | Can every change to a field be traced, and a record's state at any time be recovered? | `Lyra::EventFlow#data_lineage`, `Lyra.state_at` and `Model.as_of` (see [Analysis Projections](#analysis-projections)). |
 
 The formal model orders a write as P_crud → T_map → P_event → T_apply →
@@ -411,8 +411,8 @@ configuration, not a mode. The modes are also described in
     model_class: String,    # ActiveRecord model class name
     model_id: Integer,      # Record ID
     operation: Symbol,      # :created, :updated, :destroyed (:imported for Genesis and repair)
-    attributes: Hash,       # Record attributes (without created_at, updated_at in Monitor)
-    changes: Hash,          # Before/after changes
+    attributes: Hash,       # A create's or import's record attributes ({} on an update or a destroy)
+    changes: Hash,          # An update's changes as [old, new] pairs ({} otherwise)
     timestamp: Time         # When event occurred
   },
   metadata: {
@@ -840,9 +840,9 @@ those in the time range (default: the last 30 days).
 **`Lyra::DualView`** (`lib/lyra/dual_view.rb`). Compares a record's row with
 the state replayed from its stream. `DualView.new(model, id).compare` returns
 `crud_view`, `event_sourced_view`, `differences` and `metadata`;
-`differences` is `{ no_differences: true }`, `{ exists_mismatch: true }`, or
-one entry per differing column (`{ "name" => { crud: ..., event_sourced: ... } }`).
-`created_at` and `updated_at` are not compared.
+`differences` is `{}`, `{ exists: { crud:, event_sourced: } }` (only one view has the record), or
+one entry per differing column (`{ "name" => { crud: ..., event_sourced: ... } }`),
+`created_at` and `updated_at` included.
 `DualView.find_discrepancies(model)` runs the comparison for every row;
 `config.dual_view_sample_rate` compares a share of committed writes after
 commit. Details: [API_REFERENCE.md](API_REFERENCE.md#dualview-and-verification).
@@ -887,7 +887,7 @@ Row versus events:
 
 ```ruby
 Lyra::DualView.new(Student, student.id).compare[:differences]
-# => { no_differences: true }
+# => {}
 ```
 
 Point-in-time state:
@@ -905,9 +905,10 @@ Every write to a monitored model is recorded as an event with who made it and
 in which causal chain. What a write does depends on the configuration:
 
 - **Monitor**: the row is written, then `build_event_data` assembles the
-  envelope (attributes without `created_at` and `updated_at`, the write's
-  `previous_changes`, a timestamp) and the event is appended to the record's
-  stream in the same transaction.
+  envelope with `Lyra::EventData` (the record's attributes on a create, the
+  write's `previous_changes` on an update, neither on a destroy, and a
+  timestamp) and the event is appended to the record's stream in the same
+  transaction.
 - **Hijack and event sourcing**: the write becomes a command
   (`Lyra::Commands::CreateCommand`, `UpdateCommand`, `DestroyCommand`) run by
   `Lyra::CommandHandler`; the event is applied to the aggregate and stored

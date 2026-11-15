@@ -132,7 +132,11 @@ module Lyra
         def build_result_from_event(event)
           Struct.new(:events, :attributes, :success?, keyword_init: true).new(
             events: [event],
-            attributes: event.data[:attributes] || event.data["attributes"] || {},
+            attributes: if %i[created imported].include?(Lyra::Event.operation_of(event))
+                          Lyra::Event.created_attributes(event.data)
+                        else
+                          event.data[:attributes] || event.data["attributes"] || {}
+                        end,
             success?: true
           )
         end

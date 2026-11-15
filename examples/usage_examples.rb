@@ -37,7 +37,7 @@ puts comparison[:event_sourced_view]
 # => { exists: true, state: {...}, events_count: 3, events_summary: [...] }
 
 puts comparison[:differences]
-# => { no_differences: true } or { field_name: { crud: val1, event_sourced: val2 } }
+# => {} or { "field_name" => { crud: val1, event_sourced: val2 } }
 
 # Get audit trail from events
 audit_trail = Lyra::DualView.new(Customer, customer.id).audit_trail

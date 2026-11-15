@@ -310,7 +310,8 @@ module Lyra
       updated = only_event(existing)
       assert_equal "upsert_all", updated.metadata[:bypass_source]
       assert_equal "updated", value(updated.data, :operation).to_s
-      assert_equal({ "name" => ["Old Name", "New Name"] }, value(updated.data, :changes))
+      assert_equal({ "name" => ["Old Name", "New Name"] }, value(updated.data, :changes).except("updated_at"))
+      assert_includes value(updated.data, :changes).keys, "updated_at", "the upsert moved updated_at, which is a change"
 
       created = only_event(BypassTestUser.find_by!(email: "bypass-new@example.com"))
       assert_equal "created", value(created.data, :operation).to_s
@@ -331,7 +332,7 @@ module Lyra
 
       BypassTestUser.upsert_all([{ email: "bypass-idx@example.com", name: "After" }], unique_by: :index_users_on_email)
 
-      assert_equal({ "name" => %w[Before After] }, value(only_event(existing).data, :changes))
+      assert_equal({ "name" => %w[Before After] }, value(only_event(existing).data, :changes).except("updated_at"))
     end
 
     # Lyra needs the primary keys back to find the rows; the caller still
@@ -420,22 +421,27 @@ module Lyra
       assert_equal 2, a.reload.author_id
     end
 
-    # Events never carry created_at/updated_at, so a bare touch_all changes
-    # nothing an event records; a named column is recorded like any other.
+    # updated_at is state: a bare touch_all publishes an update per row whose
+    # only change is updated_at, and a named column is recorded like any other.
     def test_touch_all_publishes_an_update_per_row_for_a_named_column
       a = create_article("One")
       b = create_article("Two")
       clear_event_store
 
       BypassTestArticle.where(id: [a.id, b.id]).touch_all(time: 1.day.from_now)
-      assert_empty events_for(a) + events_for(b)
+      [a, b].each do |article|
+        event = only_event(article)
+        assert_equal "update_all", event.metadata[:bypass_source]
+        assert_equal ["updated_at"], value(event.data, :changes).keys
+      end
+      clear_event_store
 
       BypassTestArticle.where(id: [a.id, b.id]).touch_all(:published_at)
 
       [a, b].each do |article|
         event = only_event(article)
         assert_equal "update_all", event.metadata[:bypass_source]
-        assert_equal ["published_at"], value(event.data, :changes).keys
+        assert_equal %w[published_at updated_at], value(event.data, :changes).keys.sort
         assert_nil value(event.data, :changes)["published_at"].first
       end
     end

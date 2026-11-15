@@ -41,6 +41,26 @@ class RepairTest < Minitest::Test
     assert_in_line user
   end
 
+  def test_a_repair_records_who_ran_it_and_what_the_operating_system_says
+    user = store_fails { RepairUser.create!(name: "Ann", email: "ann@example.com") }
+
+    Lyra::Repair.run(models: [RepairUser], operator: "ops-jdoe")
+
+    metadata = stream(user).sole.metadata
+    assert_equal "ops-jdoe", metadata[:repaired_by]
+    assert_equal Etc.getpwuid(Process.uid).name, metadata[:os_user]
+    assert_equal Socket.gethostname, metadata[:host]
+    assert_equal Process.pid, metadata[:pid]
+  end
+
+  def test_a_repair_with_no_operator_still_names_an_actor
+    user = store_fails { RepairUser.create!(name: "Ann", email: "ann@example.com") }
+
+    repair
+
+    refute_nil stream(user).sole.metadata[:repaired_by], "before 1.0.0 a repair recorded no actor at all"
+  end
+
   def test_a_lost_update_is_repaired_with_the_changed_columns_only
     user = RepairUser.create!(name: "Ann", email: "ann@example.com")
     store_fails { user.update!(name: "Bea") }
@@ -48,7 +68,9 @@ class RepairTest < Minitest::Test
     assert_equal ["row differs from its events"], repair.repaired.map(&:problem)
     event = stream(user).last
     assert_equal "updated", event.data[:operation].to_s
-    assert_equal({ "name" => %w[Ann Bea] }, event.data[:changes].transform_keys(&:to_s))
+    # The row's updated_at moved with the update, so it is among the changed columns.
+    assert_equal({ "name" => %w[Ann Bea] }, event.data[:changes].transform_keys(&:to_s).except("updated_at"))
+    assert_includes event.data[:changes].keys.map(&:to_s), "updated_at"
     assert_equal "row differs from its events", event.metadata[:repaired]
     assert_in_line user
   end

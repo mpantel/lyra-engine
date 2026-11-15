@@ -33,6 +33,22 @@ module Lyra
   # string column that does not, and the column's default otherwise; a value
   # with no column of its own (a payload key) gets the origin field's.
   #
+  # The subject's access log (Lyra::AccessLog, the stream
+  # Lyra::DataAccess$<Model>$<id>) holds who read the record, when and under
+  # which purpose, never a value. It may be evidence the application must
+  # keep (Art. 5(2), a security investigation) or the subject's data to
+  # erase with the rest; Lyra cannot know which. From 1.0.0 erasure keeps it
+  # unless config.erase_access_log or +access_log: true+ says otherwise; then
+  # its events are deleted, from every stream they are in and from the
+  # events table (unlinking the stream alone would leave them). The
+  # configuration applies only once the record is fully erased: when this
+  # erasure, with any earlier ones, has covered every personal field. A
+  # field-level erasure (a retention period for one field) leaves a record
+  # whose other data is still processed, and its log with it. An explicit
+  # +access_log: true+ deletes the log whatever was erased. Either way
+  # ErasureApplied records access_log ("erased" or "kept") and
+  # access_log_entries (how many it held), so the decision is visible.
+  #
   # Crypto-shredding, which would leave the log untouched, remains future
   # work.
   module Erasure
@@ -53,36 +69,54 @@ module Lyra
                            credential token].freeze
 
     Result = Struct.new(:model, :id, :fields, :events_rewritten, :row_erased, :copies, :shared_values,
-                        keyword_init: true)
+                        :access_log, :access_log_entries, keyword_init: true)
 
     class << self
       def erase!(model, id, reason:, fields: nil, erased_by: nil, everywhere: false, max_copies: MAX_COPIES,
-                 any_fields: false)
+                 any_fields: false, access_log: nil, access_log_subjects: [])
         stream = Lyra.stream_name(model, id)
-        events = Lyra.config.event_store.read.stream(stream).to_a
-        declared = personal_fields(model, events)
-        personal = (fields || declared).map(&:to_s).uniq
-        undeclared = any_fields || fields.nil? ? [] : personal - declared
-        if undeclared.any?
-          raise Unsupported, "#{model.name} #{id}: #{undeclared.join(', ')} not declared personal by its policy " \
-                             "or the events' privacy stamps; pass any_fields: true to erase them anyway"
-        end
-        raise Unsupported, "#{model.name} #{id}: no personal fields to erase" if personal.empty?
-
-        replacements = personal.to_h { |field| [field, replacement(model, id, field)] }
+        # The record's access stream, and those of the ids the application used
+        # as this person's subject (validate_access!(…, subject: user_id)).
+        access_streams = [stream, *Array(access_log_subjects).map { |s| Lyra::AccessLog.erasable_key(s) }]
+                         .uniq.map { |key| Lyra::AccessLog.stream_for(key) }
+        personal = []
         rewritten = []
         row_erased = false
         copies = []
         shared = 0
+        log_outcome = nil
+        log_entries = 0
 
         PurposeBoundReads.internal do
           model.transaction do
+            # The locks first, the stream second: a write that is half-way between
+            # its row and its event (a Monitor update appends its event in the
+            # transaction that writes the row) must finish before the stream is
+            # read, or its event, committed in the window, keeps the value the
+            # erasure was asked to remove (0.9.3 and earlier read the stream first).
+            lock_record(model, id, stream)
+            events = Lyra.config.event_store.read.stream(stream).to_a
+            declared = personal_fields(model, events)
+            personal = (fields || declared).map(&:to_s).uniq
+            undeclared = any_fields || fields.nil? ? [] : personal - declared
+            if undeclared.any?
+              raise Unsupported, "#{model.name} #{id}: #{undeclared.join(', ')} not declared personal by its policy " \
+                                 "or the events' privacy stamps; pass any_fields: true to erase them anyway"
+            end
+            raise Unsupported, "#{model.name} #{id}: no personal fields to erase" if personal.empty?
+
+            replacements = personal.to_h { |field| [field, replacement(model, id, field)] }
+            erase_log = access_log.nil? ? Lyra.config.erase_access_log && complete?(declared, personal, events) : access_log
             originals = original_values(model, id, events, personal)
             resolve = ->(key, value) { resolve_in(model, id, replacements, originals, key, value) }
             rewritten = events.filter_map { |event| rewrite(event, resolve) }
             Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
             row_erased, row_copies = erase_row(model, id, replacements, originals)
-            record_erasure(model, id, stream, personal | row_copies, reason, erased_by)
+            log_outcome, log_entries = access_log!(access_streams, erase_log)
+            record_erasure(model, id, stream, personal | row_copies, reason, erased_by,
+                           any_fields: any_fields, requested: fields, beyond_policy: any_fields ? personal - declared : [],
+                           access_log: log_outcome, access_log_entries: log_entries,
+                           access_log_subjects: access_streams.size - 1)
             if everywhere
               copies, shared = erase_copies(model, id, stream, originals, replacements, reason, erased_by, max_copies)
             end
@@ -91,10 +125,34 @@ module Lyra
         forget_cached(model, id)
 
         Result.new(model: model.name, id: id, fields: personal, events_rewritten: rewritten.size,
-                   row_erased: row_erased, copies: copies, shared_values: shared)
+                   row_erased: row_erased, copies: copies, shared_values: shared,
+                   access_log: log_outcome, access_log_entries: log_entries)
+      end
+
+      # The subject's access log alone: for a record whose personal fields
+      # were all erased before (Retention's hard delete, when an earlier
+      # erasure kept the log). Records an ErasureApplied with no fields when
+      # the log held entries. Returns how many it deleted.
+      def erase_access_log!(model, id, reason:, erased_by: nil)
+        stream = Lyra.stream_name(model, id)
+        model.transaction do
+          _, entries = access_log!([Lyra::AccessLog.stream_for(stream)], true)
+          if entries.positive?
+            record_erasure(model, id, stream, [], reason, erased_by, access_log: "erased", access_log_entries: entries)
+          end
+          entries
+        end
       end
 
       private
+
+      # Whether this erasure, with the ones before it (their ErasureApplied
+      # events), covers every personal field of the record.
+      def complete?(declared, personal, events)
+        earlier = events.select { |event| event.is_a?(Lyra::Events::ErasureApplied) }
+                        .flat_map { |event| Array(event.data[:fields]).map(&:to_s) }
+        (declared - personal - earlier).empty?
+      end
 
       def personal_fields(model, events)
         declared = Lyra::Privacy.policy_for(model).declared_fields.map(&:to_s)
@@ -182,6 +240,18 @@ module Lyra
         else
           replaced = resolve.call(key, value)
           replaced == :keep || replaced == value ? [value, false] : [replaced, true]
+        end
+      end
+
+      # The record's row, then its aggregate's advisory lock: the locks a writer
+      # holds (a Monitor or Hijack write keeps the row until it commits, with its
+      # event appended in the same transaction; the other modes take the advisory
+      # lock), taken in the order writers take them. Waiting here is what lets an
+      # in-flight write finish before the stream is read.
+      def lock_record(model, id, stream)
+        model.unscoped.lock.find_by(model.primary_key => id) unless events_only?
+        model.with_connection do |connection|
+          Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{stream}", purpose: "erasure")
         end
       end
 
@@ -310,11 +380,35 @@ module Lyra
         Lyra.config.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
       end
 
-      def record_erasure(model, id, stream, fields, reason, erased_by)
-        data = { model_class: model.name, model_id: id, fields: fields, reason: reason.to_s, erased_at: Time.current }
+      # The subject's access streams: their events deleted when +erase+, else
+      # kept. Returns ["erased" or "kept", how many entries they held].
+      def access_log!(access_streams, erase)
+        if erase
+          ["erased", access_streams.sum { |s| Lyra::AccessLog.delete_stream!(s) }]
+        else
+          ["kept", access_streams.sum { |s| Lyra::AccessLog.count_stream(s) }]
+        end
+      end
+
+      # +access_log+ and +access_log_entries+: what happened to the subject's
+      # access log ("erased" or "kept", and how many entries it held).
+      # +any_fields+: the request named columns the policy does not declare personal
+      # (ANY_FIELDS=1); +requested+ is what it named (nil: the declared ones);
+      # +beyond_policy+ the columns erased only because of it. The operating
+      # system's user and the host are recorded beside the label in erased_by.
+      def record_erasure(model, id, stream, fields, reason, erased_by, any_fields: false, requested: nil, beyond_policy: [],
+                         access_log: nil, access_log_entries: nil, access_log_subjects: 0)
+        data = { model_class: model.name, model_id: id, fields: fields, reason: reason.to_s, erased_at: Time.current,
+                 any_fields: any_fields, requested_fields: requested&.map(&:to_s), beyond_policy: beyond_policy }
+        data.merge!(access_log: access_log, access_log_entries: access_log_entries) if access_log
+        data[:access_log_subjects] = access_log_subjects if access_log_subjects.positive?
+        who = Lyra::Attribution.of
         metadata = {
           source: SOURCE,
           erased_by: erased_by&.to_s || (defined?(::Current) && ::Current.respond_to?(:user) ? ::Current.user&.id : nil),
+          os_user: who[:os_user],
+          host: who[:host],
+          pid: who[:pid],
           correlation_id: Lyra::Correlation.current_id
         }.compact
         Lyra.append_events(Lyra::Events::ErasureApplied.new(data: data, metadata: metadata), stream_name: stream)

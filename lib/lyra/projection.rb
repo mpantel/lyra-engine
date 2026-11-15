@@ -50,7 +50,7 @@ module Lyra
       events.each do |event|
         case event_operation(event)
         when :created, :imported
-          state = event_attributes(event)
+          state = event_created_attributes(event)
         when :updated
           state.merge!(event_changes(event).transform_values { |v| v.last })
         when :destroyed
@@ -70,6 +70,12 @@ module Lyra
 
       op = event.data[:operation] || event.data["operation"]
       op.is_a?(String) ? op.to_sym : op
+    end
+
+    # What a create or import gives its record (Lyra::Event.created_attributes).
+    def event_created_attributes(event)
+      return event.attributes if event.respond_to?(:attributes) && !event.attributes.is_a?(Hash)
+      Lyra::Event.created_attributes(event.data)
     end
 
     def event_attributes(event)

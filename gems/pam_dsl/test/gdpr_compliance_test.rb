@@ -225,6 +225,19 @@ module PamDsl
     # Processing Activities (Article 30) Tests
     # ===========================================================================
 
+    # Lyra writes one shape in every mode: an update carries its changes only.
+    def test_an_update_that_carries_only_its_changes_is_searched_for_personal_data
+      update = MockEvent.new(
+        event_id: "evt-u",
+        data: { operation: :updated, model_class: "User", model_id: 123, timestamp: Time.now,
+                attributes: {}, changes: { email: ["alice@example.com", "alice.new@example.com"] } },
+        metadata: { source: "profile_update" }
+      )
+
+      assert @compliance.send(:has_pii?, update)
+      assert_includes @compliance.send(:extract_fields, update).keys, :email
+    end
+
     def test_processing_activities_returns_array
       result = @compliance.processing_activities
       assert_instance_of Array, result

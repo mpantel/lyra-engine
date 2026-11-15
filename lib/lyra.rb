@@ -1,4 +1,5 @@
 require "lyra/version"
+require "lyra/attribution"
 require "rails_event_store"
 # Lyra builds on these at load time (jobs, ActiveRecord errors); require them
 # rather than rely on the host application having loaded rails/all first.
@@ -34,6 +35,7 @@ require "lyra/model_selection"
 require "lyra/configuration"
 require "lyra/correlation"
 require "lyra/event"
+require "lyra/event_data"
 require "lyra/encrypted_attributes"
 require "lyra/optimistic_locking"
 require "lyra/event_store_adapter"

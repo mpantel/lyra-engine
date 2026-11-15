@@ -203,23 +203,23 @@ Events already stored keep the times they were stored with.
 ### A row disagrees with its events
 
 **Symptom**: `Lyra::DualView.new(User, id).compare[:differences]` is not
-`{ no_differences: true }`, or `lyra:repair DRY_RUN=1` lists the record.
+`{}`, or `lyra:repair DRY_RUN=1` lists the record.
 
 **Diagnosis**:
 
 ```ruby
 comparison = Lyra::DualView.new(User, user.id).compare
-comparison[:differences]   # { exists_mismatch: true } or { "name" => { crud: ..., event_sourced: ... } }
+comparison[:differences]   # {} when they agree; { exists: { crud: true, event_sourced: false } } or { "name" => { crud: ..., event_sourced: ... } }
 ```
 
-`created_at` and `updated_at` are not compared, and times compare at
+`created_at` and `updated_at` are compared like any other column, and times compare at
 microseconds. `bin/rails lyra:repair DRY_RUN=1` classifies each finding as
 "row but no events", "events but no row", "row of a destroyed record" or "row
 differs from its events".
 
 **Causes and fixes**:
 
-1. **Rows that predate Lyra** ("row but no events", or `exists_mismatch`).
+1. **Rows that predate Lyra** ("row but no events", or an `exists` difference).
    They have no stream until Genesis gives each one an `Imported` event. With
    the default `config.genesis = :auto` that happens on its own only in
    event-sourcing mode; otherwise run it:

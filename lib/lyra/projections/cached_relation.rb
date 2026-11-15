@@ -961,7 +961,12 @@ module Lyra
       # in the table, silently, regardless of any #where this relation was
       # built from. Getting this wrong doesn't raise; it destroys data the
       # caller never selected.
-      BULK_MUTATION_METHODS = %i[delete_all destroy_all update_all].freeze
+      # touch_all is update_all of the timestamp columns (as Rails defines
+      # it). Left out, it went through the scope branch, which touched every
+      # row of the table (an unscoped touch_all, publishing an event for each)
+      # and then raised UnsupportedQuery: records the caller never selected
+      # changed in the log, which ES-NoProj reads as the truth.
+      BULK_MUTATION_METHODS = %i[delete_all destroy_all update_all touch_all].freeze
 
       # Inserts and upserts aren't scopes either: they run at once and return
       # an ActiveRecord::Result. Through the scope branch below, the write ran
@@ -1150,6 +1155,13 @@ module Lyra
       # method exists to avoid.
       def bulk_mutate(method_name, *args, **kwargs)
         return 0 if @records.empty?
+        if method_name == :touch_all && events_only?
+          # One time for every row, as Rails's touch_all gives: update_all of
+          # the touched columns. With a table, touch_all itself runs below, on
+          # the selected rows only, and publishes through the relation.
+          updates = model_class.touch_attributes_with_time(*args, time: kwargs[:time])
+          return bulk_mutate_as(:update_all, "touch_all", updates)
+        end
         return event_sourced_bulk_mutate(method_name, *args, **kwargs) if events_only?
 
         ids = @records.map { |r| r.public_send(model_class.primary_key) }
@@ -1186,6 +1198,15 @@ module Lyra
         model_class.transaction { publish_bulk_events(method_name, *args, **kwargs) }
       end
 
+      # +method_name+ applied with +updates+, its events naming +source+
+      # (touch_all, which is update_all of the timestamps).
+      def bulk_mutate_as(method_name, source, updates)
+        @bulk_source = source
+        bulk_mutate(method_name, updates)
+      ensure
+        @bulk_source = nil
+      end
+
       def publish_bulk_events(method_name, *args, **kwargs)
         if Lyra.config.strict_data_access && !Thread.current[:lyra_bypass_strict_access]
           raise Lyra::StrictDataAccessViolation.new(method_name, model_class)
@@ -1196,7 +1217,7 @@ module Lyra
         when :delete_all
           @records.each do |record|
             Lyra::BypassEvents.publish(model_class, record.public_send(pk), :destroyed,
-                                       attributes: record.attributes.except(*Lyra::BypassEvents::TIMESTAMP_COLUMNS),
+                                       attributes: record.attributes,
                                        source: "delete_all")
           end
         when :update_all
@@ -1216,7 +1237,7 @@ module Lyra
 
             Lyra::BypassEvents.publish(model_class, record.public_send(pk), :updated,
                                        attributes: changes.transform_values(&:last), changes: changes,
-                                       source: "update_all")
+                                       source: @bulk_source || "update_all")
           end
         end
 
