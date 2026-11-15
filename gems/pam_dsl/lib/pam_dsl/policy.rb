@@ -69,6 +69,7 @@ module PamDsl
       purpose = Purpose.new(name)
       purpose.instance_eval(&block) if block_given?
       @purposes[purpose.name] = purpose
+      validate_consent_grammar!
       purpose
     end
 
@@ -81,7 +82,30 @@ module PamDsl
     # Configure consent policy
     def consent(&block)
       @consent_policy.instance_eval(&block) if block_given?
+      validate_consent_grammar!
       @consent_policy
+    end
+
+    # A purpose whose basis is consent (Art. 6(1)(a)) cannot make consent optional
+    # (required! false) or not withdrawable (withdrawable! false): the Regulation
+    # allows neither (Arts. 4(11), 7(3)). Checked after each purpose and each consent
+    # block, whichever comes first, and again when define_policy completes a policy.
+    def validate_consent_grammar!
+      @consent_policy.requirements.each do |requirement|
+        purpose = @purposes[requirement.purpose]
+        next unless purpose && purpose.legal_basis == :consent
+
+        unless requirement.required?
+          raise ConsentGrammarError,
+                "Purpose :#{purpose.name} has the legal basis :consent, so consent cannot be optional " \
+                "(required! false): without it there is no basis (Art. 6(1)(a))."
+        end
+        next if requirement.withdrawable?
+
+        raise ConsentGrammarError,
+              "Purpose :#{purpose.name} has the legal basis :consent, so consent must be withdrawable " \
+              "(withdrawable! false): withdrawing it must be as easy as giving it (Art. 7(3))."
+      end
     end
 
     # Add metadata
@@ -160,8 +184,10 @@ module PamDsl
       if purpose.basis_undetermined?
         violations << UndeterminedBasisError.new("Purpose #{purpose_name} has no legal basis yet: the controller decides one")
       elsif purpose.requires_consent?
+        # The basis is consent: an active consent is needed whether or not the
+        # policy declares a consent block for the purpose (Art. 6(1)(a)).
         begin
-          @consent_policy.validate!(purpose_name, subject: subject)
+          @consent_policy.validate!(purpose_name, subject: subject, required: true)
         rescue ConsentRequiredError => e
           violations << e
         end
@@ -281,7 +307,6 @@ module PamDsl
           {
             purpose: req.purpose,
             required: req.required?,
-            granular: req.granular?,
             withdrawable: req.withdrawable?,
             description: req.description,
             expires_after: req.expires_after

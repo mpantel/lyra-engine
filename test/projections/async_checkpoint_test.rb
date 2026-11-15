@@ -16,7 +16,7 @@ module Lyra
       module Counter
         attr_accessor :projected
 
-        def project_events(model_class, events)
+        def project_events(model_class, events, *rest)
           self.projected += events.size if projected
           super
         end

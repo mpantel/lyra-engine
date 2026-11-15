@@ -42,7 +42,7 @@
   <div class="summary-cards">
     <div class="summary-card">
       <div class="value"><%= @total_events %></div>
-      <div class="label">Total Events</div>
+      <div class="label">Total Events<%= " (most recent #{@window[:limit]})" if @window && @window[:truncated] %></div>
     </div>
     <% (@operations_summary || {}).each do |op, count| %>
       <div class="summary-card">

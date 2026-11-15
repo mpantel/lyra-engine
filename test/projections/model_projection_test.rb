@@ -12,7 +12,7 @@ class ModelProjectionTest < Minitest::Test
 
     # We can't easily test the actual SQL, but we can verify the method doesn't raise
     # In a real test with a database, we'd verify the record was inserted
-    assert_respond_to Lyra::Projections::ModelProjection, :project_create
+    assert Lyra::Projections::ModelProjection.respond_to?(:project_create, true)
   end
 
   def test_project_update_extracts_new_values_from_changes
@@ -22,21 +22,21 @@ class ModelProjectionTest < Minitest::Test
     result = mock_command_result(:update, {}, [event])
 
     # Verify the method exists and can be called
-    assert_respond_to Lyra::Projections::ModelProjection, :project_update
+    assert Lyra::Projections::ModelProjection.respond_to?(:project_update, true)
   end
 
   def test_project_destroy_calls_delete_all
     event = mock_event(:destroyed, 1)
     result = mock_command_result(:destroy, {}, [event])
 
-    assert_respond_to Lyra::Projections::ModelProjection, :project_destroy
+    assert Lyra::Projections::ModelProjection.respond_to?(:project_destroy, true)
   end
 
   def test_project_raises_on_unknown_operation
     result = mock_command_result(:create, {})
 
     assert_raises ArgumentError do
-      Lyra::Projections::ModelProjection.project(@model_class, :invalid_op, result)
+      Lyra::Projections::ModelProjection.project(@model_class, :invalid_op, result, lyra_internal)
     end
   end
 

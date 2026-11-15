@@ -13,7 +13,12 @@ module Lyra
   # Each process remembers the latest applied row it has seen. At most every
   # config.mode_sync_interval seconds (default 5) it looks for a newer one,
   # and adopts its mode: the process that recorded it already passed the
-  # gate, so the gate is not run again. It looks:
+  # gate, so the gate is not run again; but an escalation is adopted only if the
+  # row names the certificate of the clean check that cleared it (or the operator
+  # overrode the gate, which the row says), so one INSERT cannot move every
+  # process to a mode whose stores were never compared (0.9.3 adopted any row;
+  # ModeTransition.adoption_refusal).
+  # It looks:
   # - at the start of each web request (Middleware);
   # - before each background job (ActiveJob before_perform);
   # - before each write to a monitored model, which covers consoles and
@@ -60,11 +65,24 @@ module Lyra
           return nil unless row
           return nil if @last_seen_id && row[:id] <= @last_seen_id
 
-          @last_seen_id = row[:id]
-          return nil if row[:config] == ModeTransition.current
+          if row[:config] == ModeTransition.current
+            @last_seen_id = row[:id]
+            return nil
+          end
+
+          # The row counts as seen once it is decided: adopted, or refused (logged
+          # once). An error while deciding leaves it unseen, so the next check tries
+          # again rather than leave this process in its mode for good.
+          if (refusal = ModeTransition.adoption_refusal(row))
+            @last_seen_id = row[:id]
+            Rails.logger.error("Lyra: did not adopt the application's mode #{row[:config]}; this process stays in " \
+                               "#{ModeTransition.current}: #{refusal}")
+            return nil
+          end
 
           previous = ModeTransition.current
           ModeTransition.apply_label(row[:config])
+          @last_seen_id = row[:id]
           Rails.logger.warn("Lyra: adopted the application's mode #{row[:config]} (was #{previous}), switched elsewhere")
           row[:config]
         end

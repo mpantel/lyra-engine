@@ -105,7 +105,9 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `reads_without_purpose` | `:allow` | Reads of a policy-covered model with no declared purpose: `:allow`, `:audit` or `:deny`. Validated on assignment. |
 | `retention_executor` | `false` | Allow `Lyra::Retention.apply!` to change data (opt-in). |
 | `retention_anchors` | `{}` | Column each model's retention period runs from, keyed by model name (a String); `created_at` when absent. |
+| `dashboard_max_events` | `10_000` | The most events a dashboard page or JSON route reads from the log in one request; `?limit=` may only lower it. The routes that look across the log (the CRUD summary, a correlation, a user's actions, PII detection) read the most recent events up to it, leaving out the access log's own entries, and report `window: { limit:, returned:, truncated:, skipped: }` (`truncated`: older events were not read; `skipped`: access-log entries passed over; at most ten times the limit is scanned). A subject's timeline (`flow/timeline`, `privacy/pii_inventory`) reads the newest events of that record's stream, at most the limit. Before 1.0.0 they read the whole log. |
 | `dashboard_authorization` | `nil` | Who may use the engine's dashboard: a proc run on the controller before each action; truthy allows, falsy answers 403. `nil` allows development and test only. See [Dashboard](#dashboard). |
+| `dashboard_purpose` | `nil` | The purpose the dashboard reads under when a request names none (`?purpose=`), one the policy declares for oversight. With neither, it reads without a purpose, as `reads_without_purpose` decides; a read the policy refuses answers 403 and says how to name one. |
 
 Configuration methods:
 
@@ -664,7 +666,7 @@ view.compare
 | Method | Description |
 |---|---|
 | `compare` | Both views and the differences (`{}` when they agree, `{ exists: { crud:, event_sourced: } }` when only one has the record, or `{ "attr" => { crud:, event_sourced: } }`, keyed by column name as a string). A destroyed record whose row is gone compares clean; one whose row remains is an `exists` difference. `created_at`/`updated_at` are compared like any other column; times compare at microseconds. |
-| `crud_state` | `{ exists:, attributes:, timestamps: }` |
+| `crud_state` | `{ exists:, attributes:, timestamps: }`. The row is read as the caller reads it: under `reads_without_purpose :deny` it needs a purpose that allows the declared fields (from 1.0.0; before, it read as Lyra). `compare` and `compare_all` read it the same way; Lyra's mode gate, sampler and repair read as Lyra; the dashboard reads under its request's purpose (`dashboard_purpose`). |
 | `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. A stream of only `replay: false` events has `exists: false`. |
 | `audit_trail` | `AuditProjection.audit_trail` for the record. |
 | `DualView.compare_all(model)` | `compare` for every existing row. |
@@ -974,8 +976,9 @@ end
   `custom` (the detector reports login-name columns as `identifier`; declare
   `online_identifier` yourself where it fits). Sensitivity:
   `public`, `internal` (default), `confidential`, `restricted`.
-- `basis`: `consent` (default), `contract`, `legal_obligation`,
-  `vital_interests`, `public_task`, `legitimate_interests`. Special-category
+- `basis`: `contract`, `legal_obligation`, `consent`, `vital_interests`,
+  `public_task`, `legitimate_interests`; with none declared (or `undetermined`)
+  access is refused and the register lists the purpose as a gap. Special-category
   fields (`health`, `biometric`) also need `art9_basis`.
 - `on_expiry`: `hard_delete`, `soft_delete` (default), `anonymize`, `archive`.
 

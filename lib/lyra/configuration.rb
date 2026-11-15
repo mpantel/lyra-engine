@@ -56,7 +56,7 @@ module Lyra
     attr_accessor :erase_access_log
     # What a read of a model with a privacy policy does when no purpose is
     # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
-    attr_reader :reads_without_purpose
+    attr_reader :reads_without_purpose, :unrecorded_writes
     # What Monitor does when a write's event cannot be stored: :log (default)
     # lets the write stand and logs the failure, the stream falling behind its
     # row until lyra:repair; :fail_write fails the write and rolls it back, as
@@ -85,6 +85,18 @@ module Lyra
     # refused everywhere else, since the routes expose personal data.
     #   config.dashboard_authorization = ->(controller) { controller.current_user&.admin? }
     attr_accessor :dashboard_authorization
+
+    # The purpose the dashboard reads under when a request names none
+    # (?purpose=): one the policy declares for oversight. nil (default): such a
+    # request reads without a purpose, as reads_without_purpose decides.
+    #   config.dashboard_purpose = :oversight
+    attr_accessor :dashboard_purpose
+    # The most events a dashboard page or JSON route reads from the log in one
+    # request (default 10,000); a request's ?limit= may only lower it. The routes
+    # that look across the log (the CRUD summary, a correlation, a user's
+    # actions, PII detection) read the most recent events up to it and say so
+    # (window: { limit:, returned:, truncated: }); before 1.0.0 they read the whole log.
+    attr_reader :dashboard_max_events
 
     def initialize
       @mode = :monitor
@@ -126,11 +138,14 @@ module Lyra
       @access_metadata_proc = nil
       @erase_access_log = false
       @reads_without_purpose = :allow
+      @unrecorded_writes = :allow
       @monitor_append_failure = :log
       @lock_aggregate_before_append = true
       @retention_executor = false
       @retention_anchors = {}
       @dashboard_authorization = nil
+      @dashboard_purpose = nil
+      @dashboard_max_events = 10_000
     end
 
     # One of MODES; a string (from ENV, say) is taken as its symbol.
@@ -143,8 +158,25 @@ module Lyra
       @projection_mode = validate_choice!(:projection_mode, mode, PROJECTION_MODES)
     end
 
+    def dashboard_max_events=(value)
+      value = Integer(value)
+      raise ArgumentError, "dashboard_max_events must be positive" unless value.positive?
+
+      @dashboard_max_events = value
+    end
+
     def reads_without_purpose=(mode)
       @reads_without_purpose = Lyra::PurposeBoundReads.validate_mode!(mode)
+    end
+
+    # Whether application code may write without events through
+    # Lyra.unrecorded_write: :allow (default; each use is recorded with its
+    # reason) or :deny (it raises: production hardening).
+    def unrecorded_writes=(mode)
+      mode = mode.to_sym
+      raise ArgumentError, "unrecorded_writes must be :allow or :deny, not #{mode.inspect}" unless %i[allow deny].include?(mode)
+
+      @unrecorded_writes = mode
     end
 
     # One of MONITOR_APPEND_FAILURES; a string (from ENV, say) is taken as its symbol.

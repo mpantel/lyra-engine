@@ -66,7 +66,7 @@ module Lyra
           # In sync mode, projection runs immediately
           if Lyra.config.projection_mode == :sync
             result = mock_command_result(:create, { id: 1, name: "Test" })
-            Lyra::Projections::ModelProjection.project_create(model_class, result)
+            Lyra::Projections::ModelProjection.send(:project_create, model_class, result)
           end
         end
 
@@ -141,7 +141,7 @@ module Lyra
           true
         end
 
-        Lyra::Projections::ModelProjection.project_create(model_class, result)
+        Lyra::Projections::ModelProjection.send(:project_create, model_class, result)
 
         assert insert_called, "project_create should call model.insert"
         # Note: sanitize_attributes converts to string keys
@@ -171,7 +171,7 @@ module Lyra
           where_result
         end
 
-        Lyra::Projections::ModelProjection.project_update(model_class, result)
+        Lyra::Projections::ModelProjection.send(:project_update, model_class, result)
 
         assert update_called, "project_update should call update_all"
         assert_equal 1, where_id
@@ -198,7 +198,7 @@ module Lyra
           where_result
         end
 
-        Lyra::Projections::ModelProjection.project_destroy(model_class, result)
+        Lyra::Projections::ModelProjection.send(:project_destroy, model_class, result)
 
         assert delete_called, "project_destroy should call delete_all"
         assert_equal 42, where_id
@@ -220,7 +220,7 @@ module Lyra
           true
         end
 
-        Lyra::Projections::ModelProjection.project_create(model_class, result)
+        Lyra::Projections::ModelProjection.send(:project_create, model_class, result)
 
         # Note: sanitize_attributes converts to string keys
         assert inserted_attrs.key?("name")
@@ -254,7 +254,7 @@ module Lyra
         result = mock_command_result(:create, { id: 1, name: "Test" })
 
         begin
-          Lyra::Projections::ModelProjection.project_create(model_class, result)
+          Lyra::Projections::ModelProjection.send(:project_create, model_class, result)
         rescue StandardError
           # Expected in non-strict mode
         end
@@ -276,7 +276,7 @@ module Lyra
         result = mock_command_result(:create, { id: 1, name: "Test" })
 
         assert_raises StandardError do
-          Lyra::Projections::ModelProjection.project_create(model_class, result)
+          Lyra::Projections::ModelProjection.send(:project_create, model_class, result)
         end
       end
 

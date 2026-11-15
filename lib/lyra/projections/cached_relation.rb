@@ -87,7 +87,7 @@ module Lyra
 
         if selected_columns
           values = record.attributes_before_type_cast.slice(*selected_columns)
-          record = Lyra::PurposeBoundReads.internal { model_class.instantiate(values) }
+          record = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.instantiate(values) }
         end
         Lyra::PurposeBoundReads.check(record)
         record
@@ -1244,7 +1244,7 @@ module Lyra
         # Rows left in the table from an earlier mode must not disagree with
         # the stream, so apply the same write to them without re-publishing.
         ids = @records.map { |r| r.public_send(pk) }
-        Lyra.projection_write do
+        Lyra.projection_write(INTERNAL) do
           Thread.current[:lyra_bypass_read_override] = true
           model_class.unscoped.where(pk => ids).public_send(method_name, *args, **kwargs)
         ensure

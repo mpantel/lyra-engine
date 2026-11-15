@@ -107,11 +107,189 @@ class ModeSyncTest < Minitest::Test
     assert_equal :hijack, seen
   end
 
+  # A row nobody gated (one INSERT) must not move this process into a mode whose
+  # stores were never compared (0.9.3 adopted any row).
+  def test_an_inserted_row_nobody_gated_is_not_adopted
+    MT.send(:record_applied, "event_sourcing/disabled")
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  def test_the_refusal_is_logged_with_its_reason
+    io = StringIO.new
+    previous = Rails.logger
+    Rails.logger = Logger.new(io)
+    MT.send(:record_applied, "event_sourcing/disabled")
+
+    Sync.maybe_sync!
+
+    assert_match(/did not adopt the application's mode event_sourcing\/disabled.*stays in monitor.*no clean check certifies/m, io.string)
+  ensure
+    Rails.logger = previous
+  end
+
+  def test_a_certificate_for_another_target_does_not_authorise_the_switch
+    id = certify("monitor", "hijack")
+    MT.send(:record_applied, "event_sourcing/disabled", from: "monitor", certificate_id: id)
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  # The switch names the certificate that cleared it; a fresh certificate the
+  # row does not name proves nothing about the row.
+  def test_a_certificate_the_row_does_not_name_does_not_authorise_it
+    certify("monitor", "hijack")
+    MT.send(:record_applied, "hijack", from: "monitor")
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  def test_a_certificate_already_used_by_an_earlier_switch_does_not_authorise_another
+    id = certify("monitor", "hijack")
+    MT.send(:record_applied, "hijack", from: "monitor", certificate_id: id)
+    MT.send(:record_applied, "monitor", from: "hijack")
+    Sync.seen!(MT.latest_applied[:id])
+    MT.send(:record_applied, "hijack", from: "monitor", certificate_id: id)
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  # The switcher checked the certificate's age when it switched. Its clock, the
+  # certifying process's and this one's need not agree, and the switch may be
+  # recorded near the end of the certificate's life: neither refuses it here.
+  def test_a_named_certificate_authorises_the_switch_whatever_the_clocks_say
+    id = certify("monitor", "hijack", at: Time.current + 60)
+    MT.send(:record_applied, "hijack", from: "monitor", certificate_id: id)
+
+    assert_equal "hijack", Sync.maybe_sync!
+  end
+
+  def test_a_named_certificate_near_the_end_of_its_life_authorises_the_switch
+    id = certify("monitor", "hijack", at: Time.current - Lyra.config.mode_transition_certificate_ttl - 60)
+    MT.send(:record_applied, "hijack", from: "monitor", certificate_id: id)
+
+    assert_equal "hijack", Sync.maybe_sync!
+  end
+
+  # A forged row cannot pick a from that makes its switch ungated: the
+  # application was last switched to monitor, so reaching ES-NoProj is gated
+  # whatever the row says it came from.
+  def test_a_row_whose_from_skips_the_gate_is_judged_from_the_previous_switch_too
+    MT.send(:record_applied, "event_sourcing/disabled", from: "event_sourcing/sync")
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  # With the gate off there are no certificates; a switch still reaches every
+  # process.
+  def test_with_the_gate_off_a_switch_is_adopted_without_a_certificate
+    Lyra.config.mode_transition_gate = false
+    MT.send(:record_applied, "event_sourcing/disabled", from: "monitor")
+
+    assert_equal "event_sourcing/disabled", Sync.maybe_sync!
+  ensure
+    Lyra.config.mode_transition_gate = true
+  end
+
+  # An error while deciding leaves the row unseen, so the next check tries it again.
+  def test_an_error_while_deciding_leaves_the_switch_to_be_adopted_later
+    other_process_switches_to("hijack")
+    MT.stubs(:adoption_refusal).raises(ActiveRecord::StatementInvalid, "connection lost")
+
+    assert_raises(ActiveRecord::StatementInvalid) { Sync.maybe_sync! }
+    assert_equal :monitor, Lyra.config.mode
+
+    MT.unstub(:adoption_refusal)
+    assert_equal "hijack", Sync.maybe_sync!
+  end
+
+  # Columns added to a table an earlier version created stay when the caller's
+  # transaction rolls back: they are added outside it.
+  def test_columns_added_inside_a_rolled_back_transaction_stay
+    conn = ActiveRecord::Base.connection
+    conn.remove_column(MT::TABLE, :forced)
+    MT.instance_variable_set(:@table_ready, false)
+
+    ActiveRecord::Base.transaction do
+      MT.send(:table_ready?)
+      raise ActiveRecord::Rollback
+    end
+
+    conn.schema_cache.clear!
+    assert conn.column_exists?(MT::TABLE, :forced), "forced was added outside the rolled-back transaction"
+  ensure
+    MT.instance_variable_set(:@table_ready, false)
+    MT.send(:table_ready?)
+  end
+
+  def test_a_switch_the_operator_forced_is_adopted_and_says_so
+    MT.send(:record_applied, "hijack", from: "monitor", forced: true)
+
+    assert MT.latest_applied[:forced]
+    assert_equal "hijack", Sync.maybe_sync!
+  end
+
+  def test_leaving_a_mode_needs_no_certificate
+    Lyra.config.mode = :hijack
+    Lyra.config.hijack_enabled = true
+    MT.send(:record_applied, "monitor", from: "hijack")
+
+    assert_equal "monitor", Sync.maybe_sync!
+  end
+
+  # A row an earlier version wrote has no from and names no certificate: it is
+  # judged from this process's mode, and an escalation is not adopted.
+  def test_a_row_an_earlier_version_wrote_is_judged_from_this_process_s_mode
+    certify("monitor", "hijack")
+    MT.send(:record_applied, "hijack") # no from, as 0.9.3 wrote it
+
+    assert_nil Sync.maybe_sync!
+    assert_equal :monitor, Lyra.config.mode
+  end
+
+  def test_the_applied_row_names_the_certificate_that_cleared_it
+    MT.check(to: "hijack", models: [])
+    MT.to!(:hijack)
+
+    row = MT.latest_applied
+    refute_nil row[:certificate_id]
+    refute row[:forced]
+  end
+
+  def test_the_applied_row_records_where_the_switch_came_from_and_whether_it_was_forced
+    MT.to!(:hijack, force: true)
+
+    row = MT.latest_applied
+    assert_equal "monitor", row[:from]
+    assert row[:forced], "the gate was required and overridden"
+    assert_equal "hijack", row[:config]
+  end
+
+  def test_a_switch_that_needed_no_gate_is_not_marked_forced
+    Lyra.config.mode = :hijack
+    Lyra.config.hijack_enabled = true
+    MT.to!(:monitor, force: true)
+
+    refute MT.latest_applied[:forced], "leaving Hijack for Monitor is not gated, so nothing was overridden"
+  end
+
   private
 
-  # Another process's ModeTransition.to!: the record, without applying it here.
+  # Another process's gated ModeTransition.to!: a clean check's certificate, then
+  # the record, without applying it here.
   def other_process_switches_to(label)
-    MT.send(:record_applied, label)
+    id = certify("monitor", label)
+    MT.send(:record_applied, label, from: "monitor", certificate_id: id)
+  end
+
+  # The certificate's id.
+  def certify(from, to, at: Time.current)
+    MT.send(:certify, MT::Report.new(from: from, to: to, checked: 0, position: 0, finished_at: at))
   end
 
   def clean

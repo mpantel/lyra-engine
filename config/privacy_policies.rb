@@ -181,7 +181,6 @@ PamDsl.define_policy :university_system do
   consent do
     for_purpose :marketing do
       required!
-      granular!
       withdrawable!
       expires_in 2.years
       describe "We'll send you information about upcoming events, programs, and opportunities"
@@ -189,7 +188,6 @@ PamDsl.define_policy :university_system do
 
     for_purpose :analytics do
       required! false
-      granular!
       withdrawable!
       describe "Help us improve our services by sharing anonymous usage data"
     end
@@ -266,7 +264,6 @@ PamDsl.define_policy :ecommerce do
   consent do
     for_purpose :marketing do
       required!
-      granular!
       withdrawable!
       expires_in 1.year
     end

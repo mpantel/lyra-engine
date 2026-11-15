@@ -375,6 +375,33 @@ module PamDsl
 
     # A generated draft cannot run as if its basis were settled: access under
     # an undetermined purpose is refused, and the register lists it as a gap.
+    # A purpose that declares no basis has not decided one: it used to default to
+    # :consent, which the register printed as Art. 6(1)(a) and nothing checked.
+    def test_a_purpose_with_no_basis_is_undetermined_not_consent
+      PamDsl.define_policy(:no_basis) do
+        field :email, type: :email, sensitivity: :confidential
+        purpose(:billing) { requires :email }
+      end
+      policy = PamDsl.policy(:no_basis)
+
+      assert policy.get_purpose(:billing).basis_undetermined?
+      assert_equal :undetermined, policy.get_purpose(:billing).legal_basis
+      assert_raises(UndeterminedBasisError) { policy.validate_access!([:email], :billing, subject: 1) }
+    end
+
+    def test_a_purpose_with_no_basis_is_a_gap_the_register_prints_as_not_declared
+      PamDsl.define_policy(:no_basis_report) do
+        field :email, type: :email, sensitivity: :confidential
+        purpose(:billing) { requires :email }
+      end
+      out = StringIO.new
+
+      PamDsl::Reporter.new(:no_basis_report, output: out).article_30_report
+
+      refute_includes out.string, "Art. 6(1)(a)", "no basis is not consent"
+      assert_match(/NOT DECLARED|undetermined/i, out.string)
+    end
+
     def test_an_undetermined_basis_refuses_access_and_is_a_register_gap
       PamDsl.define_policy(:undetermined_draft) do
         field :email, type: :email, sensitivity: :confidential

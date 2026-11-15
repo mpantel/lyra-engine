@@ -65,7 +65,7 @@ module Lyra
       # record was (or had come) back in line.
       def repair(model, id, operator: nil)
         model.transaction do
-          row = Lyra::PurposeBoundReads.internal { model.unscoped.lock.find_by(model.primary_key => id) }
+          row = Lyra::PurposeBoundReads.internal(INTERNAL) { model.unscoped.lock.find_by(model.primary_key => id) }
           problem = ModeTransition.discrepancy(model, id)
           next nil unless problem
 
@@ -88,7 +88,7 @@ module Lyra
 
       # Column => [replayed, row] for the columns DualView finds different.
       def changed_columns(model, row, replayed)
-        differences = Lyra::DualView.new(model, row.id).compare[:differences]
+        differences = Lyra::PurposeBoundReads.internal(INTERNAL) { Lyra::DualView.new(model, row.id).compare[:differences] }
         differences.keys.to_h do |column|
           [column.to_s, [replayed.fetch(column.to_s) { replayed[column.to_sym] }, row.attributes[column.to_s]]]
         end

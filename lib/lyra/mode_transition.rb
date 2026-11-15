@@ -56,7 +56,7 @@ module Lyra
     end
 
     Report = Struct.new(:from, :to, :checked, :rechecked, :imported, :rebuilt, :discrepancies,
-                        :position, :started_at, :finished_at, keyword_init: true) do
+                        :position, :started_at, :finished_at, :certificate_id, keyword_init: true) do
       def clean? = discrepancies.empty?
 
       def summary
@@ -110,7 +110,9 @@ module Lyra
 
         link_references if to == "event_sourcing/disabled" && from != to
         apply(mode, projection_mode)
-        id = record_applied(to)
+        # forced: the gate was required and the operator overrode it.
+        id = record_applied(to, from: from, forced: force && gate_enabled? && gate_required?(from, to),
+                                certificate_id: report&.certificate_id)
         ModeSync.seen!(id)
         announce(from, to)
         report
@@ -124,12 +126,70 @@ module Lyra
         apply(mode, projection_mode)
       end
 
-      # The application-wide mode: { id:, config: } of the latest applied row.
+      # The application-wide mode: the latest applied row, as { id:, config:, from:,
+      # forced:, certificate_id:, at: }. from and certificate_id are nil and forced
+      # false in a row an earlier version wrote.
       def latest_applied
         return nil unless table_ready?
 
-        row = sql(:select_one, "SELECT id, to_config FROM #{TABLE} WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
-        row && { id: row["id"].to_i, config: row["to_config"] }
+        row = sql(:select_one,
+                  "SELECT id, to_config, from_config, forced, certificate_id, created_at FROM #{TABLE} " \
+                  "WHERE kind = 'applied' ORDER BY id DESC LIMIT 1")
+        return nil unless row
+
+        at = row["created_at"].is_a?(String) ? Time.zone.parse(row["created_at"]) : row["created_at"]
+        { id: row["id"].to_i, config: row["to_config"], from: row["from_config"].presence,
+          forced: row["forced"] == true || row["forced"] == "t", certificate_id: row["certificate_id"]&.to_i, at: at }
+      end
+
+      # Why ModeSync must not adopt +row+ (latest_applied's hash), or nil when it may.
+      #
+      # With the gate off nothing is certified, and a switch is adopted as recorded.
+      # With it on, an escalation (Monitor to a mode whose tables or events are
+      # authoritative) must have passed the gate: the row names the certificate of
+      # the clean check that cleared it, one for the row's own from -> to, recorded
+      # before the row and named by no earlier switch. The switcher checked the
+      # certificate's age when it switched, so no clock is compared here. A row
+      # recorded with the gate overridden (forced) is adopted: the operator meant
+      # it, and it is on record.
+      #
+      # Whether the switch is gated is judged from the row's from and from where the
+      # switch before it left the application, so a row cannot name a from that
+      # makes it ungated. A row an earlier version wrote has no from and names no
+      # certificate; it is judged from this process's mode.
+      #
+      # This is a check against mistakes and naive writes, not against anyone who
+      # can write the table: such a writer can also write the certificate.
+      def adoption_refusal(row, from: current)
+        return nil unless gate_enabled?
+
+        to = row[:config]
+        from = row[:from] || from
+        previous = previous_applied(row[:id])
+        return nil unless gate_required?(from, to) || (previous && gate_required?(previous, to))
+        return nil if row[:forced]
+        return nil if names_its_certificate?(row, from)
+
+        named = row[:certificate_id] ? "certificate #{row[:certificate_id]}, which does not clear it" : "no certificate"
+        "no clean check certifies #{from} -> #{to} for this switch (row #{row[:id]} names #{named}); " \
+          "only a gated switch records both"
+      end
+
+      # Where the applied row before +id+ left the application, or nil.
+      def previous_applied(id)
+        sql(:select_value,
+            "SELECT to_config FROM #{TABLE} WHERE kind = 'applied' AND id < #{Integer(id)} ORDER BY id DESC LIMIT 1")
+      end
+
+      def names_its_certificate?(row, from)
+        return false unless row[:certificate_id]
+
+        cert = Integer(row[:certificate_id])
+        id = Integer(row[:id])
+        sql(:select_value,
+            "SELECT 1 FROM #{TABLE} c WHERE c.id = #{cert} AND c.kind = 'certificate' AND c.from_config = #{q(from)} " \
+            "AND c.to_config = #{q(row[:config])} AND c.id < #{id} AND NOT EXISTS (SELECT 1 FROM #{TABLE} a " \
+            "WHERE a.kind = 'applied' AND a.certificate_id = #{cert} AND a.id < #{id})").present?
       end
 
       # Compare every monitored record's row with its events. Returns a
@@ -179,13 +239,14 @@ module Lyra
         to = current
         last = last_applied
         if last.nil? || last == to || !gate_required?(last, to)
-          ModeSync.seen!(last == to ? latest_applied&.dig(:id) : record_applied(to))
+          ModeSync.seen!(last == to ? latest_applied&.dig(:id) : record_applied(to, from: last))
           return
         end
 
         report = certified_check(last, to)
         if report&.clean? || ENV["LYRA_FORCE_MODE_TRANSITION"].present?
-          ModeSync.seen!(record_applied(to))
+          ModeSync.seen!(record_applied(to, from: last, forced: !report&.clean?,
+                                        certificate_id: (report.certificate_id if report&.clean?)))
           return
         end
 
@@ -232,7 +293,7 @@ module Lyra
         return nil unless table_ready?
 
         row = sql(:select_one,
-          "SELECT position, created_at FROM #{TABLE} WHERE kind = 'certificate' AND from_config = #{q(from)} " \
+          "SELECT id, position, created_at FROM #{TABLE} WHERE kind = 'certificate' AND from_config = #{q(from)} " \
           "AND to_config = #{q(to)} ORDER BY id DESC LIMIT 1"
         )
         return nil unless row
@@ -245,7 +306,7 @@ module Lyra
         discrepancies = changed.flat_map { |model, ids| ids.filter_map { |id| compare(model, id) } }
         Report.new(from: from, to: to, checked: 0, rechecked: changed.values.sum(&:size), imported: 0, rebuilt: 0,
                    discrepancies: discrepancies, position: event_position, started_at: certified_at,
-                   finished_at: Time.current)
+                   finished_at: Time.current, certificate_id: row["id"].to_i)
       end
 
       # Every id that has a row or a stream.
@@ -306,25 +367,29 @@ module Lyra
         end
       end
 
+      # Store a clean check's certificate; returns its id, which the report keeps
+      # and the switch it clears names.
       def certify(report)
         return unless table_ready?
 
-        sql(:execute,
+        report.certificate_id = sql(:select_value,
           "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at) VALUES " \
           "('certificate', #{q(report.from)}, #{q(report.to)}, #{Integer(report.position)}, #{Integer(report.checked)}, " \
-          "#{q(report.finished_at.utc)})"
-        )
+          "#{q(report.finished_at.utc)}) RETURNING id"
+        ).to_i
       end
 
       # Record +to+ as the application-wide mode; returns the row's id.
-      def record_applied(to)
+      def record_applied(to, from: nil, forced: false, certificate_id: nil)
         return nil unless table_ready?
 
         who = Lyra::Attribution.of
         sql(:select_value,
-          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at, actor, os_user, host, pid) VALUES " \
-          "('applied', NULL, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}, #{q(who[:actor])}, " \
-          "#{q(who[:os_user])}, #{q(who[:host])}, #{Integer(who[:pid])}) RETURNING id"
+          "INSERT INTO #{TABLE} (kind, from_config, to_config, position, checked, created_at, actor, os_user, host, pid, forced, " \
+          "certificate_id) VALUES " \
+          "('applied', #{q(from)}, #{q(to)}, #{Integer(event_position)}, 0, #{q(Time.current.utc)}, #{q(who[:actor])}, " \
+          "#{q(who[:os_user])}, #{q(who[:host])}, #{Integer(who[:pid])}, #{forced ? "TRUE" : "FALSE"}, " \
+          "#{certificate_id ? Integer(certificate_id) : "NULL"}) RETURNING id"
         ).to_i.tap do |id|
           Rails.logger&.warn("[Lyra] Mode switched to #{to} by #{who[:actor]} (os user #{who[:os_user]} on #{who[:host]}, pid #{who[:pid]}; " \
                              "lyra_mode_transitions #{id})")
@@ -381,14 +446,17 @@ module Lyra
               t.string :os_user
               t.string :host
               t.integer :pid
+              t.boolean :forced, null: false, default: false
+              t.bigint :certificate_id
             end
           end
-          # Tables created before 0.9.3 have no actor column.
-          connection.add_column(TABLE, :actor, :string) unless connection.column_exists?(TABLE, :actor)
-          # Tables created before 1.0.0 have no record of what the operating system says.
-          connection.add_column(TABLE, :os_user, :string) unless connection.column_exists?(TABLE, :os_user)
-          connection.add_column(TABLE, :host, :string) unless connection.column_exists?(TABLE, :host)
-          connection.add_column(TABLE, :pid, :integer) unless connection.column_exists?(TABLE, :pid)
+          # Columns later versions added: actor (0.9.3); what the operating system
+          # says, whether the gate was overridden, and the certificate that cleared
+          # a switch (1.0.0). Added outside the caller's transaction, so a rollback
+          # cannot take one back, and safely when two processes add one at once.
+          Lyra.add_own_columns(connection, TABLE,
+                               actor: [:string], os_user: [:string], host: [:string], pid: [:integer],
+                               forced: [:boolean, { null: false, default: false }], certificate_id: [:bigint])
         end
         @table_ready = true
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished
@@ -398,7 +466,7 @@ module Lyra
       def bypass
         previous = Thread.current[:lyra_bypass_read_override]
         Thread.current[:lyra_bypass_read_override] = true
-        Lyra::PurposeBoundReads.internal { yield }
+        Lyra::PurposeBoundReads.internal(INTERNAL) { yield }
       ensure
         Thread.current[:lyra_bypass_read_override] = previous
       end

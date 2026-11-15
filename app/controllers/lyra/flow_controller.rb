@@ -63,8 +63,9 @@ module Lyra
           format.json { render json: mapping }
         end
       else
-        # Show summary of all CRUD operations
-        events = Lyra.config.event_store.read.to_a
+        # Summary of the CRUD operations in the most recent events (bounded: recent_events)
+        events = recent_events
+        log_dashboard_read("flow/crud_mapping", {}, returned: events.size)
         @models_summary = events.group_by { |e| event_model_class(e) }.transform_values do |model_events|
           {
             total: model_events.count,
@@ -80,7 +81,8 @@ module Lyra
             render json: {
               total_events: @total_events,
               operations: @operations_summary,
-              models: @models_summary
+              models: @models_summary,
+              window: @window
             }
           end
         end
@@ -116,9 +118,12 @@ module Lyra
     def correlation
       correlation_id = params[:correlation_id]
 
-      events = Lyra.config.event_store.read.to_a.select do |event|
+      # Among the most recent events (bounded: recent_events); a correlation older
+      # than the window is not found, and window says how far back it looked.
+      events = recent_events.select do |event|
         event.metadata[:correlation_id] == correlation_id
       end
+      log_dashboard_read("flow/correlation", { correlation_id: correlation_id }, returned: events.size)
 
       flow = EventFlow.new
       timeline = flow.build_timeline(events)
@@ -129,6 +134,7 @@ module Lyra
         started_at: events.min_by(&:timestamp)&.timestamp,
         completed_at: events.max_by(&:timestamp)&.timestamp,
         events: timeline,
+        window: @window,
         privacy_impact: pam_dsl_available? ? events.count { |e| Privacy::PIIDetector.detect(event_fields(e)).any? } : nil
       }
     end
@@ -137,17 +143,23 @@ module Lyra
     def user_actions
       user_id = params[:user_id]
 
-      events = Lyra.config.event_store.read.to_a.select do |event|
+      # Among the most recent events, and at most ?actions= of them listed (default 100,
+      # at most 500): one staff member's whole activity is not one request's answer.
+      events = recent_events.select do |event|
         event.metadata[:user_id] == user_id.to_i
       end
+      log_dashboard_read("flow/user_actions", { user_id: user_id }, returned: events.size)
 
       actions = events.group_by { |e| e.metadata[:action_id] }
+      listed = bounded_param(:actions, default: 100, max: 500)
 
       render json: {
         user_id: user_id,
         total_actions: actions.count,
         total_events: events.count,
-        actions: actions.map do |action_id, action_events|
+        actions_listed: [actions.count, listed].min,
+        window: @window,
+        actions: actions.first(listed).map do |action_id, action_events|
           {
             action_id: action_id,
             user_action: action_events.first.metadata[:user_action],
@@ -200,20 +212,6 @@ module Lyra
     # (Lyra::Event.fields_of): what personal data is detected in.
     def event_fields(event)
       Lyra::Event.fields_of(event)
-    end
-
-    def load_events(subject_id, subject_type)
-      events = Lyra.config.event_store.read.to_a
-
-      if subject_id && subject_type
-        # The subject's own record. What a user did is user_actions; their
-        # edits of other records are not part of their timeline.
-        events = events.select do |event|
-          event_model_class(event).to_s == subject_type.to_s && event_model_id(event).to_s == subject_id.to_s
-        end
-      end
-
-      events
     end
   end
 end

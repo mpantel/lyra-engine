@@ -97,8 +97,9 @@ module Lyra
 
     # GET /lyra/privacy/pii_detection
     def pii_detection
-      # Detect PII across all events
-      events = Lyra.config.event_store.read.to_a
+      # Detect PII across the most recent events (bounded: recent_events)
+      events = recent_events
+      log_dashboard_read("privacy/pii_detection", {}, returned: events.size)
       @pii_inventory = extract_pii_from_events(events)
 
       @total_events = events.count

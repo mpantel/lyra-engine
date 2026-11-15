@@ -65,4 +65,32 @@ module Lyra
   end
   private_class_method :create_own_table_on
 
+  # Add to Lyra's own table +name+ the +columns+ (name => [type, options]) it
+  # lacks, as when an earlier version created it. Like create_own_table, outside
+  # the caller's transaction (on a connection of its own when one is open), so a
+  # rollback of the caller's work cannot take a column back while Lyra goes on
+  # as if it were there; and safely when two processes add the same column.
+  def self.add_own_columns(connection, name, columns)
+    missing = columns.reject { |column, _| connection.column_exists?(name, column) }
+    return if missing.empty?
+    return add_own_columns_on(connection, name, missing) unless connection.transaction_open?
+
+    own = connection.pool.db_config.new_connection
+    begin
+      add_own_columns_on(own, name, missing)
+    ensure
+      own.disconnect!
+    end
+    connection.schema_cache.clear_data_source_cache!(name.to_s)
+  end
+
+  def self.add_own_columns_on(connection, name, columns)
+    columns.each do |column, (type, options)|
+      connection.add_column(name, column, type, **(options || {}), if_not_exists: true)
+    rescue ActiveRecord::StatementInvalid
+      raise unless connection.column_exists?(name, column)
+    end
+  end
+  private_class_method :add_own_columns_on
+
 end

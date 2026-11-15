@@ -56,7 +56,7 @@ class CommandHandlerAttributionTest < Minitest::Test
 
       user = with_current(user_id: 42, request_id: "req-9") do
         u = AttrUser.create!(name: "Ann", email: "ann@example.com")
-        u.update!(name: "Ann")
+        u.update!(email: "ann1@example.com")
         u.update!(email: "ann2@example.com")
         u
       end

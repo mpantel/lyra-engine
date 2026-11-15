@@ -248,7 +248,6 @@ module PamDsl
             # Uncomment if you have marketing purpose
             # for_purpose :marketing do
             #   required!
-            #   granular!
             #   withdrawable!
             #   expires_in 2.years
             #   describe "We'll send you product updates and promotional offers"

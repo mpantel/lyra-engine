@@ -273,7 +273,7 @@ module Lyra
         create_mock_event({ ssn: "123-45-6789" })
       ]
 
-      @event_store.stubs(:read).returns(stub(to_a: mock_events))
+      stub_recent_events(mock_events)
 
       pii_inventory = {
         email: ["test@test.com"],
@@ -298,7 +298,7 @@ module Lyra
         ssn: "123-45-6789",
         credit_card: "4111-1111-1111-1111"
       })
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event]))
+      stub_recent_events([mock_event])
 
       # Stub detect to return hash with :type keys (as the controller expects)
       pii_result = {
@@ -320,7 +320,7 @@ module Lyra
       mock_event_with_pii = create_mock_event({ email: "test@test.com" })
       mock_event_without_pii = create_mock_event({ status: "active" })
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event_with_pii, mock_event_without_pii]))
+      stub_recent_events([mock_event_with_pii, mock_event_without_pii])
 
       Privacy::PIIDetector.stubs(:extract_from_event_stream).returns({})
       Privacy::PIIDetector.stubs(:detect).with(mock_event_with_pii.attributes).returns([:email])
@@ -335,7 +335,7 @@ module Lyra
 
     def test_pii_detection_with_no_pii
       mock_events = [create_mock_event({ status: "active" })]
-      @event_store.stubs(:read).returns(stub(to_a: mock_events))
+      stub_recent_events(mock_events)
 
       Privacy::PIIDetector.stubs(:extract_from_event_stream).returns({})
       Privacy::PIIDetector.stubs(:detect).returns([])
@@ -365,7 +365,7 @@ module Lyra
         model_class: "User"
       })
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event]))
+      stub_recent_events([mock_event])
 
       # Let the real PIIDetector run
       get :pii_detection, format: :json
@@ -392,7 +392,7 @@ module Lyra
         model_class: "Contact"
       })
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event]))
+      stub_recent_events([mock_event])
 
       get :pii_detection, format: :json
 
@@ -418,7 +418,7 @@ module Lyra
         model_class: "Invoice"
       })
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event]))
+      stub_recent_events([mock_event])
 
       get :pii_detection, format: :json
 

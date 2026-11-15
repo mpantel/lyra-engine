@@ -217,15 +217,13 @@ Manage consent requirements:
 consent do
   for_purpose :marketing do
     required!        # Consent is mandatory
-    granular!        # Allow fine-grained control
     withdrawable!    # Can be withdrawn anytime
     expires_in 2.years
     describe "We'll send you product updates and special offers"
   end
 
   for_purpose :analytics do
-    required! false  # Consent is optional
-    granular!
+    required! false  # Consent is optional (not allowed where the purpose's basis is :consent)
     describe "Help us improve by sharing anonymous usage data"
   end
 end

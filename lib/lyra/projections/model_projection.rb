@@ -21,7 +21,12 @@ module Lyra
         # @param model_class [Class] The ActiveRecord model class
         # @param operation [Symbol] :create, :update, or :destroy
         # @param result [CommandResult] The result from CommandHandler
-        def project(model_class, operation, result)
+        # Writes the table with no event, so only Lyra calls it (Lyra::INTERNAL),
+        # as for Lyra.projection_write; project_create, project_update and
+        # project_destroy are private.
+        def project(model_class, operation, result, token = nil)
+          raise InternalApiError, "ModelProjection.project is for Lyra's own projections" unless token.equal?(INTERNAL)
+
           # Projection writes the table, so it must address the table. With
           # projection_mode :disabled (ES-NoProj), the model's where/all answer
           # from the event store instead; update and destroy below go through
@@ -31,7 +36,7 @@ module Lyra
           # both project through here, whatever the projection mode.
           previous = Thread.current[:lyra_bypass_read_override]
           Thread.current[:lyra_bypass_read_override] = true
-          Lyra::PurposeBoundReads.internal do
+          Lyra::PurposeBoundReads.internal(INTERNAL) do
             case operation
             when :create
               project_create(model_class, result)
@@ -73,7 +78,7 @@ module Lyra
 
           # Use insert to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write { model_class.insert(insert_attrs) }
+          Lyra.projection_write(INTERNAL) { model_class.insert(insert_attrs) }
         end
 
         # Update an existing record in the model table
@@ -104,7 +109,7 @@ module Lyra
 
           # Use update_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write { model_class.where(id: model_id).update_all(updates) }
+          Lyra.projection_write(INTERNAL) { model_class.where(id: model_id).update_all(updates) }
         end
 
         # Delete a record from the model table
@@ -118,8 +123,10 @@ module Lyra
 
           # Use delete_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write { model_class.where(id: model_id).delete_all }
+          Lyra.projection_write(INTERNAL) { model_class.where(id: model_id).delete_all }
         end
+
+        private :project_create, :project_update, :project_destroy
 
         private
 

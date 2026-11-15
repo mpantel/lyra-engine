@@ -36,7 +36,7 @@ module Lyra
           }
           rebuilt_ids = []
 
-          Lyra::PurposeBoundReads.internal { rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids) }
+          Lyra::PurposeBoundReads.internal(INTERNAL) { rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids) }
         end
 
         def rebuild_in_transaction(model_class, truncate, stats, rebuilt_ids)
@@ -92,12 +92,16 @@ module Lyra
         # event the row already reflects is harmless: a create of an existing
         # row inserts nothing and an update sets the same values, so callers
         # may start from an earlier event than strictly needed.
-        def project_events(model_class, events)
+        # Projects the events it is given, whether or not they are in the log,
+        # so only Lyra calls it (Lyra::INTERNAL).
+        def project_events(model_class, events, token = nil)
+          raise InternalApiError, "Rebuild.project_events is for Lyra's own projections" unless token.equal?(INTERNAL)
+
           events.count do |event|
             operation = operation_for(event)
             next false unless operation
 
-            ModelProjection.project(model_class, operation, build_result_from_event(event))
+            ModelProjection.project(model_class, operation, build_result_from_event(event), INTERNAL)
             true
           end
         end
@@ -109,7 +113,7 @@ module Lyra
         def replay_stream(model_class, id)
           stream_name = Lyra.stream_name(model_class, id)
           events = Lyra.config.event_store.read.stream(stream_name).to_a
-          replayed = project_events(model_class, events)
+          replayed = project_events(model_class, events, INTERNAL)
 
           last = events.reverse_each.find { Lyra::Event.operation_of(_1) }
           present = !(last && Lyra::Event.operation_of(last) == :destroyed)
@@ -153,7 +157,7 @@ module Lyra
         # Clear the read-model table, bypassing callbacks/strict-access guards
         # (this is a legitimate bulk projection operation, like ModelProjection).
         def clear_read_model(model_class)
-          Lyra.projection_write { model_class.unscoped.delete_all }
+          Lyra.projection_write(INTERNAL) { model_class.unscoped.delete_all }
         end
 
         # Drop any cached (ES-NoProj) reconstructions so reads reflect the rebuild.

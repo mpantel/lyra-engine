@@ -41,6 +41,8 @@ module PamDsl
   class UndeclaredPurposeError < Error; end
   class PurposeFieldMismatchError < Error; end
   class ConsentRequiredError < Error; end
+  # A consent construct the Regulation does not allow, or one PAM does not enforce (granular!).
+  class ConsentGrammarError < Error; end
   # Access under a purpose whose legal basis the controller has not yet decided.
   class UndeterminedBasisError < Error; end
   class SensitivityViolationError < Error; end
@@ -63,6 +65,7 @@ module PamDsl
     def define_policy(name, &block)
       policy = Policy.new(name)
       policy.instance_eval(&block)
+      policy.validate_consent_grammar!
       registry.register(name, policy)
       policy
     end

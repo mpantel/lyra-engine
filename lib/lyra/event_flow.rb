@@ -1,7 +1,7 @@
 module Lyra
   # Visualizes event flows and chains
   class EventFlow
-    attr_reader :subject_id, :subject_type, :time_range
+    attr_reader :subject_id, :subject_type, :time_range, :window
 
     def initialize(subject_id: nil, subject_type: nil, time_range: nil)
       @subject_id = subject_id
@@ -18,7 +18,8 @@ module Lyra
         timeline: build_timeline(events),
         flows: build_flows(grouped),
         statistics: calculate_statistics(events),
-        privacy_impact: analyze_privacy_impact(events)
+        privacy_impact: analyze_privacy_impact(events),
+        window: window
       }
     end
 
@@ -226,13 +227,14 @@ module Lyra
       event.data[:changes] || event.data["changes"] || {}
     end
 
+    # A bounded read, never the whole log: with a subject, the newest
+    # config.dashboard_max_events events of that record's stream (what a user
+    # did to other records is the user_actions route, not their timeline);
+    # without one, the newest that many events of the log (Lyra::EventWindow).
+    # Oldest first. @window says what was read.
     def load_events
-      events = Lyra.config.event_store.read.to_a
-
-      # Filter by subject if specified
-      if subject_id && subject_type
-        events = events.select { |e| event_relates_to_subject?(e) }
-      end
+      max = Lyra.config.dashboard_max_events
+      events = subject_id && subject_type ? subject_stream_events(max) : recent_events(max)
 
       # Filter by time range
       events = events.select { |e| time_range.cover?(parse_timestamp(event_timestamp(e))) }
@@ -240,10 +242,21 @@ module Lyra
       events
     end
 
-    def event_relates_to_subject?(event)
-      event.metadata[:user_id] == subject_id ||
-      event.data[:user_id] == subject_id ||
-      (event_model_class(event) == subject_type && event_model_id(event) == subject_id)
+    def subject_stream_events(max)
+      model = Lyra.config.monitored_model_named(subject_type)
+      unless model
+        @window = { limit: max, returned: 0, truncated: false }
+        return []
+      end
+
+      newest = Lyra.config.event_store.read.stream(Lyra.stream_name(model, subject_id)).backward.limit(max + 1).to_a
+      @window = { limit: max, returned: [newest.size, max].min, truncated: newest.size > max }
+      newest.first(max).reverse
+    end
+
+    def recent_events(max)
+      newest, @window = Lyra::EventWindow.recent(max)
+      newest.reverse
     end
 
     def group_by_correlation(events)

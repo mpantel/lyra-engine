@@ -85,7 +85,7 @@ module Lyra
         # Remove the rows of +model_class+'s join tables (before the model's
         # table is cleared, which their foreign keys may reference).
         def clear(model_class)
-          join_models(model_class).each_value { |join_model| Lyra.projection_write { join_model.unscoped.delete_all } }
+          join_models(model_class).each_value { |join_model| Lyra.projection_write(INTERNAL) { join_model.unscoped.delete_all } }
         end
 
         # Bring +model_class+'s join tables to what the link events say, in
@@ -229,7 +229,7 @@ module Lyra
         def apply(join_model, event)
           left, right = columns(join_model)
           rows = Array(value(event.data, :rows)).map { |row| row.to_h.transform_keys(&:to_s).slice(left, right) }
-          Lyra.projection_write do
+          Lyra.projection_write(INTERNAL) do
             rows.each do |row|
               existing = join_model.unscoped.where(row)
               if value(event.data, :operation).to_s == LINKED

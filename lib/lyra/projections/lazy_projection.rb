@@ -192,7 +192,7 @@ module Lyra
                         else
                           event.data[:attributes] || event.data["attributes"] || {}
                         end
-          ))
+          ), INTERNAL)
           true
         end
 

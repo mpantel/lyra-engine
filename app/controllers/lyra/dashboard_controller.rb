@@ -21,6 +21,7 @@ module Lyra
       model_class = monitored_model!(params[:model_class])
       model_id = params[:id]
 
+      # Under the request's purpose (ApplicationController#with_dashboard_purpose).
       @comparison = DualView.new(model_class, model_id).compare
       @audit_trail = DualView.new(model_class, model_id).audit_trail
       @analysis = StateAnalyzer.analyze(model_class, model_id)

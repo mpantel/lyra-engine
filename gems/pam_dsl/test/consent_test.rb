@@ -20,7 +20,6 @@ module PamDsl
       consent = ConsentRequirement.new(:marketing)
 
       assert consent.required?
-      refute consent.granular?
       assert consent.withdrawable?
       assert_equal "", consent.description
       assert_nil consent.expires_after
@@ -48,25 +47,17 @@ module PamDsl
     end
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Granular Consent
+    # Granular consent was removed in 1.0.0: recorded, never enforced
     # ─────────────────────────────────────────────────────────────────────────
 
-    def test_consent_not_granular_by_default
-      consent = ConsentRequirement.new(:marketing)
-      refute consent.granular?
+    def test_granular_is_refused_with_a_message_that_says_what_to_do
+      error = assert_raises(ConsentGrammarError) { ConsentRequirement.new(:marketing).granular! }
+
+      assert_match(/one consent block per purpose/, error.message)
     end
 
-    def test_consent_granularity
-      consent = ConsentRequirement.new(:marketing)
-      consent.granular!
-      assert consent.granular?
-    end
-
-    def test_consent_granularity_can_be_disabled
-      consent = ConsentRequirement.new(:marketing)
-      consent.granular!(true)
-      consent.granular!(false)
-      refute consent.granular?
+    def test_granular_false_is_refused_too
+      assert_raises(ConsentGrammarError) { ConsentRequirement.new(:marketing).granular!(false) }
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -128,13 +119,11 @@ module PamDsl
     def test_method_chaining
       consent = ConsentRequirement.new(:marketing)
         .required!
-        .granular!
         .withdrawable!
         .describe("Marketing consent")
         .expires_in(2.years)
 
       assert consent.required?
-      assert consent.granular?
       assert consent.withdrawable?
       assert_equal "Marketing consent", consent.description
       assert_equal 2.years, consent.expires_after
@@ -163,13 +152,11 @@ module PamDsl
       policy = ConsentPolicy.new
       policy.for_purpose(:marketing) do
         required!
-        granular!
         expires_in 2.years
       end
 
       req = policy.requirements.first
       assert req.required?
-      assert req.granular?
       assert_equal 2.years, req.expires_after
     end
 
@@ -456,7 +443,6 @@ module PamDsl
         consent do
           for_purpose :marketing do
             required!
-            granular!
             withdrawable!
             expires_in 2.years
             describe "We will send you promotional offers"
@@ -475,7 +461,6 @@ module PamDsl
       refute policy.consent.required_for?(:analytics)
 
       marketing_req = policy.consent.requirement_for(:marketing)
-      assert marketing_req.granular?
       assert marketing_req.withdrawable?
       assert_equal 2.years, marketing_req.expires_after
 

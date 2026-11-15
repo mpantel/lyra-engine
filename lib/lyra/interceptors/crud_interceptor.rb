@@ -134,7 +134,10 @@ module Lyra
         elsif lyra_event_sourcing_mode? && Lyra::OptimisticLocking.enabled?(self.class)
           lyra_update_row_checked_by_log(attribute_names, attempted_action)
         else
-          super
+          # How many rows the UPDATE reached: after_update runs even when it
+          # reached none (a concurrent destroy took the row), and Monitor must
+          # not record an update that changed nothing (lyra_intercept_update).
+          @lyra_rows_updated = super
         end
       end
 
@@ -413,6 +416,14 @@ module Lyra
       def lyra_intercept_update
         return if @lyra_hijacked
 
+        # A save that changed no row records nothing, though Active Record
+        # still runs after_update: one whose UPDATE reached no row (a stale copy
+        # saved after a concurrent destroy; an Updated after Destroyed makes the
+        # stream ill-formed), and one that changed nothing, so ran no UPDATE
+        # (rows is nil then). An update carries its changes, and there are none.
+        rows, @lyra_rows_updated = @lyra_rows_updated, nil
+        return if rows == 0 || previous_changes.empty?
+
         event_data = build_event_data(:updated)
         publish_event(:updated, event_data)
       end
@@ -546,7 +557,11 @@ module Lyra
         # Active Record checks and increments lock_version in the row write
         # that follows; the event records the increment it makes.
         recorded = changes
-        recorded = recorded.merge(Lyra::OptimisticLocking.increment(self)) if recorded.any? && Lyra::OptimisticLocking.enabled?(self.class)
+        # A save that changes nothing writes no row and records no update, as
+        # in Monitor (lyra_intercept_update).
+        return true if recorded.empty?
+
+        recorded = recorded.merge(Lyra::OptimisticLocking.increment(self)) if Lyra::OptimisticLocking.enabled?(self.class)
         command = Lyra::Commands::UpdateCommand.new(self.class, id, recorded)
         command.record = self
         result = Lyra::CommandHandler.handle(command)
@@ -607,9 +622,13 @@ module Lyra
         @lyra_hijacked = true
         lyra_disable_paper_trail!
         lyra_lock_aggregate_unless_destroyed!
+        # A save that changes nothing records no update, as in Monitor
+        # (lyra_intercept_update); Active Record then writes no row either.
+        return true unless has_changes_to_save?
+
         # Active Record checks and increments lock_version only when it writes
         # the row, that is when something changed.
-        lock_was = lyra_take_lock_version!("update") if has_changes_to_save?
+        lock_was = lyra_take_lock_version!("update")
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         command.record = self
@@ -733,7 +752,7 @@ module Lyra
           return  # Will be projected at end of block
         end
 
-        Lyra::Projections::ModelProjection.project(self.class, operation, result)
+        Lyra::Projections::ModelProjection.project(self.class, operation, result, INTERNAL)
       rescue => e
         if Lyra.config.strict_projections
           raise

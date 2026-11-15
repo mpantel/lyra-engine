@@ -331,7 +331,7 @@ module Lyra
     def write_snapshotted(before)
       return 0 if before.empty?
     
-      Lyra.projection_write { yield where(klass.primary_key => before.keys) }
+      Lyra.projection_write(INTERNAL) { yield where(klass.primary_key => before.keys) }
     end
     
     def safely_publish_bulk(source)

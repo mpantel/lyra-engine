@@ -57,7 +57,7 @@ module Lyra
           )
         )
       end
-      Lyra.projection_write do
+      Lyra.projection_write(lyra_internal) do
         BypassTestArticle.delete_all
         BypassTestAuthor.where("email LIKE 'bypass-%'").delete_all
       end
@@ -65,7 +65,7 @@ module Lyra
     end
 
     def teardown
-      Lyra.projection_write do
+      Lyra.projection_write(lyra_internal) do
         BypassTestArticle.delete_all
         BypassTestAuthor.where("email LIKE 'bypass-%'").delete_all
       end
@@ -101,7 +101,7 @@ module Lyra
       snapshot = lambda do |model, relation, **kwargs|
         rows = original.call(model, relation, **kwargs)
         now = Time.current
-        late_id ||= Lyra.projection_write do
+        late_id ||= Lyra.projection_write(lyra_internal) do
           BypassTestArticle.insert({ title: "Late", status: "draft", created_at: now, updated_at: now }, returning: :id).rows.first.first
         end
         rows
@@ -125,7 +125,7 @@ module Lyra
       snapshot = lambda do |model, relation, **kwargs|
         rows = original.call(model, relation, **kwargs)
         now = Time.current
-        late_id ||= Lyra.projection_write do
+        late_id ||= Lyra.projection_write(lyra_internal) do
           BypassTestArticle.insert({ title: "Late", status: "draft", created_at: now, updated_at: now }, returning: :id).rows.first.first
         end
         rows
@@ -237,7 +237,7 @@ module Lyra
       a = create_article("One")
       clear_event_store
 
-      Lyra.projection_write do
+      Lyra.projection_write(lyra_internal) do
         BypassTestArticle.where(id: a.id).update_all(status: "published")
         BypassTestArticle.where(id: a.id).delete_all
       end

@@ -87,7 +87,7 @@ module Lyra
         log_outcome = nil
         log_entries = 0
 
-        PurposeBoundReads.internal do
+        PurposeBoundReads.internal(INTERNAL) do
           model.transaction do
             # The locks first, the stream second: a write that is half-way between
             # its row and its event (a Monitor update appends its event in the
@@ -373,7 +373,7 @@ module Lyra
       def write_columns(model, id, columns)
         return if columns.empty?
 
-        Lyra.projection_write { model.unscoped.where(model.primary_key => id).update_all(columns) }
+        Lyra.projection_write(INTERNAL) { model.unscoped.where(model.primary_key => id).update_all(columns) }
       end
 
       def events_only?

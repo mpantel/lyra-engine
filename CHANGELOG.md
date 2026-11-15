@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking
+- **Lyra's escape hatches are Lyra's.** `Lyra.projection_write`, `Lyra::PurposeBoundReads.internal`,
+  `Lyra::Projections::ModelProjection.project` and `Lyra::Projections::Rebuild.project_events`
+  switch off the checks that keep every write in the log and every read under its purpose. They now
+  take a token only Lyra's own code can name, and raise `Lyra::InternalApiError` without it;
+  `ModelProjection.project_create`, `project_update` and `project_destroy` are private. Application
+  code that wrote without events (seeding, fixtures, a wipe whose history is not wanted) uses
+  `Lyra.unrecorded_write(reason:) { ... }`. It runs the block the same way and records that it ran
+  (reason, who, the caller) in the stream `Lyra::UnrecordedWrites`; `config.unrecorded_writes =
+  :deny` refuses it. The token keeps code from calling them by accident; it is no barrier against
+  code out to defeat it. A refused call leaves the flags of the block it ran in as they were.
+- **`DualView#crud_state` reads the row as its caller does,** so under `reads_without_purpose :deny`
+  it needs a purpose that allows the declared fields, as any read does; before, it read as Lyra.
+  `compare`, `compare_all` and `find_discrepancies` follow it. Lyra's mode gate, the sampler,
+  repair still read as Lyra. The dashboard reads under a purpose, as the application does: the
+  request's `?purpose=`, else the new `config.dashboard_purpose`; a read the policy refuses answers
+  403 and says how to name one.
+- **PAM DSL: a purpose that declares no `basis` is `:undetermined`,** where it was `:consent`.
+  The register printed such a purpose as Art. 6(1)(a), and nothing checked it, because no consent
+  block asked for one. Access under it now raises `PamDsl::UndeterminedBasisError`, and the
+  Article 30 register lists it as a gap, as for a purpose the policy generator writes. A policy
+  that relied on the default must declare the basis it means (`basis :consent` included).
+
+- **PAM DSL: the consent grammar refuses what the Regulation does not allow, and a `:consent`
+  purpose always needs consent.** On a purpose whose basis is `:consent`, `required! false` (Art.
+  6(1)(a)) and `withdrawable! false` (Art. 7(3)) raise `PamDsl::ConsentGrammarError` when the
+  purpose or its consent block is declared, in either order, through `define_policy` or the
+  methods of `Policy`. `granular!`, recorded and never enforced, is removed: it raises
+  `ConsentGrammarError`, and the consent report has no `granular` key. Access under a `:consent`
+  purpose now needs an active consent whether or not a consent block is declared for it; with no
+  block it passed the legal-basis check unchecked.
+
 - **`created_at` and `updated_at` are ordinary columns, and event logs written before 1.0.0 are
   not supported.** Every event Lyra writes now carries the two timestamps like any other column
   (a create's `attributes`, an update's `changes` when they moved), DualView compares them, and
@@ -37,6 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifiers of the BPI and Olist examples are updated.
 
 ### Fixed
+- **Monitor appended `Updated` after `Destroyed`** when a stale copy was saved after another
+  process had destroyed the record. Its UPDATE reached no row, or, when nothing had changed, no
+  UPDATE ran; Active Record still ran `after_update`, and the stream became
+  `[Created, Destroyed, Updated]`. Monitor now records no update when the UPDATE reached no row or
+  nothing changed.
 - **`belongs_to ... touch: true` cascades published nothing.** Rails touches the parent through
   `touch_later`, which sets the timestamps and clears their change before `touch` runs at commit,
   so Lyra saw no change. The parent's row moved and its stream did not; with timestamps compared,
@@ -66,6 +102,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record whose event attributes had string keys, as Monitor's do.
 
 ### Changed
+- **ModeSync adopts an escalation only if a gated switch recorded it.** It adopted the newest
+  `applied` row of `lyra_mode_transitions` and checked nothing, so one `INSERT` moved every process
+  from Monitor to ES-NoProj. A switch now records where it came from (`from_config`), whether the
+  gate was overridden (`forced`) and the certificate of the clean check that cleared it
+  (`certificate_id`). Other processes adopt an escalation only if the row names that certificate
+  (for the same `from -> to`, recorded before the row, named by no earlier switch) or is forced;
+  the escalation is judged from the row's `from` and from where the previous switch left the
+  application, so a row cannot claim a `from` that avoids the gate. No clock is compared, so a
+  switch near the end of its certificate's life or under clock skew is adopted. With the gate off,
+  switches are adopted as recorded. A refusal is logged once; an error while deciding leaves the
+  row to be tried again. Columns Lyra adds to its own tables are added outside the caller's
+  transaction and safely when two processes add one at once. This guards against mistakes and
+  naive writes, not against anyone who can write the table.
+
+- **The dashboard and `Lyra::EventFlow` read a window of the log, not all of it.** The flow and
+  privacy routes read the newest `config.dashboard_max_events` events (10,000 by default; `?limit=`
+  may only lower it), leaving out the access log's own entries, which would otherwise fill the
+  window as soon as the access log is on, and report `window: { limit:, returned:, truncated:,
+  skipped: }`. A subject's timeline reads that record's own stream (its newest events, up to the
+  limit), not the log; what a user did to other records is the `flow/user_actions` route, which
+  lists at most `?actions=` actions. With `config.record_access_events` on, a dashboard read is
+  recorded in `Lyra::DataAccess$Dashboard` (route, scope, how much came back, never a value). The
+  GDPR report helpers still read the whole log, a batch of 1,000 at a time.
+- **A save that changes nothing records no event, in every mode.** Monitor, Hijack and event
+  sourcing each appended an `Updated` with no changes for a `save` that changed no attribute.
+  An update carries its changes, and there were none; Hijack and event sourcing still refuse such a
+  save on a destroyed record, as for any write.
 - **One event shape in every mode**. Monitor, the command handler of Hijack and event
   sourcing, bypass writes, Genesis and repair now build the payload with `Lyra::EventData`: a
   create or an import carries the record's `attributes` and no `changes`; an update carries its

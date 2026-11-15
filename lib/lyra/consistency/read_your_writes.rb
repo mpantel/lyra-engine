@@ -100,7 +100,7 @@ module Lyra
           model_class = write[:model_class]
           model_class.transaction do
             lock_stream(model_class, write[:result])
-            Lyra::Projections::ModelProjection.project(model_class, write[:operation], write[:result])
+            Lyra::Projections::ModelProjection.project(model_class, write[:operation], write[:result], INTERNAL)
           end
         rescue => e
           Rails.logger.error("Lyra: Failed to ensure projection - #{e.message}")

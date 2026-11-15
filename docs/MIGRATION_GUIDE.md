@@ -69,7 +69,7 @@ results.
 | **ES-NoProj read cost** | Every answer is rebuilt from streams, from cached entries that are each checked against their stream's last event. Collection reads touch every stream of the model. A delete that nullifies children must find them by attribute: 0.1–0.4 s in the Aegean smoke runs. A filter on a `belongs_to` association compares foreign keys, as ActiveRecord does, but every collection read still assembles the whole model from the cache: about 1.3 s per query over 10,000 rows in the mode-comparison benchmark, against 1–6 ms with real SQL. | Keep ES-NoProj for code that reads through simple finders, or use ES-Lazy. |
 | **Monitor and failed appends** | By default (`config.monitor_append_failure = :log`), if the event append fails in Monitor, the write still succeeds and the failure is only logged. | Alert on the log and run `lyra:repair` ([Phase 3](#phase-3-verify-and-repair-in-monitor)). If losing events is unacceptable, set `config.monitor_append_failure = :fail_write`, or use Hijack or an event-sourcing mode, where the append is the write. |
 | **Global hooks** | Hijack and the event-sourcing modes take over writes through modules prepended to `ActiveRecord::Persistence` and `ActiveRecord::Relation`. They act only on monitored models, and they switch PaperTrail off for those models. | Expect them in stack traces. If you rely on PaperTrail versions for monitored models, rely on Lyra's events instead. |
-| **Bulk writes record events** | `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify` on a monitored model publish one event per affected row. | Wrap seeding, fixtures and table wipes in `Lyra.projection_write { … }`, which publishes nothing. |
+| **Bulk writes record events** | `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify` on a monitored model publish one event per affected row. | Wrap seeding, fixtures and table wipes in `Lyra.unrecorded_write(reason: "…") { … }`, which publishes no event for the rows and records that it ran. |
 | **Rows that predate Lyra** | In event-sourcing modes, a model's first use imports every row that has no stream yet (Genesis), so it can be slow once. | Run `bin/rails lyra:genesis MODEL=…` before switching modes on large tables ([Phase 2](#phase-2-genesis-rows-that-predate-lyra)). |
 | **Writes Lyra cannot see** | Raw SQL (`connection.execute`), database triggers, other applications writing the same tables. | Find them before you rely on the history. DualView reports the rows they changed as discrepancies. |
 | **Unverified codebases** | Each real-data replay found Lyra defects that broke these guarantees until fixed: namespaced models could not use Hijack or event sourcing at all, events were built before the model's own callbacks ran, and `update_columns`/`touch` writes went unrecorded. | Treat "the hook sees every write" as something to verify for your codebase, not to assume. See the checklist. |
@@ -83,7 +83,7 @@ results.
    see, or a defect.
 3. **Search for writes outside ActiveRecord**: `execute`, `exec_update`,
    triggers in the schema, other writers to the database.
-4. **Wrap housekeeping bulk writes** in `Lyra.projection_write`.
+4. **Wrap housekeeping bulk writes** in `Lyra.unrecorded_write(reason: "...")`.
 5. **Import existing rows** with `bin/rails lyra:genesis` before an
    event-sourcing mode.
 6. **Pick the event-sourcing variant by how the code reads.** ES-Sync for
@@ -272,9 +272,13 @@ table therefore writes many events. Two settings govern them:
   (`touch` and `dependent: :nullify` are allowed). Use it to find them.
   `Lyra.without_strict_access { ... }` allows them in a block; they still
   publish events.
-- `Lyra.projection_write { ... }` runs a block that publishes nothing and
-  skips the strict check. Use it for seeding, fixtures and table wipes whose
-  history you do not want.
+- `Lyra.unrecorded_write(reason: "...") { ... }` runs a block that publishes
+  nothing and skips the strict check, and records that it ran (the reason, who
+  ran it and where it was called from) in the stream `Lyra::UnrecordedWrites`.
+  Use it for seeding, fixtures and table wipes whose history you do not want;
+  `config.unrecorded_writes = :deny` refuses it. `Lyra.projection_write` is
+  Lyra's own and raises `Lyra::InternalApiError` when application code calls it
+  (before 1.0.0 the documentation told you to).
 
 Rows that already exist have no stream yet. Read Phase 2 before the first
 deploy: setting `config.genesis = true` now avoids a stream starting without
@@ -523,6 +527,21 @@ rows and the events agree, for every monitored record.
   request, each background job and each `save`, `update` or `destroy` of a
   monitored model (which covers consoles and scripts), and never inside an
   open transaction, so a mode cannot change half-way through a write.
+  Since 1.0.0 it adopts an escalation only if the row says so: it names the
+  certificate of the clean check that cleared it (`certificate_id`: a certificate
+  for the same `from -> to`, recorded before the row and named by no earlier
+  switch), or the operator overrode the gate (`force: true` or
+  `LYRA_FORCE_MODE_TRANSITION`), which the row records in `forced`. Whether a
+  switch is an escalation is judged from the row's `from` and from where the
+  previous switch left the application, so a row cannot claim a `from` that
+  avoids the gate. A row nobody gated, one `INSERT` into `lyra_mode_transitions`,
+  is not adopted: the process stays in its mode and logs why. Leaving a mode
+  needs no certificate, and with the gate off every switch is adopted. A row a
+  0.9.x process wrote names no certificate, so an escalation it records is not
+  adopted. An error while deciding leaves the row to be tried again.
+  This guards against mistakes and naive writes, not against anyone who can
+  write the table: such a writer can write the certificate as well. (0.9.3 and
+  earlier adopted any row.)
 
 ### Which switches are checked
 
@@ -710,7 +729,7 @@ when you accept that the stores may disagree.
   discrepancies; in Hijack and the event-sourcing modes the log does not hold
   their changes, so a rebuild discards them.
 - **Bulk writes record events.** `update_all` over a large table writes one
-  event per row. Wrap housekeeping in `Lyra.projection_write`.
+  event per row. Wrap housekeeping in `Lyra.unrecorded_write(reason: "...")`.
 - **Pre-existing rows without Genesis.** In Monitor with `genesis: :auto`
   (the default), pre-existing records get no `Imported` event; their streams
   start at their first change. Set `config.genesis = true` or run
@@ -737,3 +756,11 @@ when you accept that the stores may disagree.
   review and all; generate to a scratch app or compare by hand instead.
 - **The dashboard answers 403 in production.** That is the default until
   `config.dashboard_authorization` says who may use it.
+- **The dashboard reads a window of the log, not all of it** (since 1.0.0). The routes that
+  look across the log read the most recent `config.dashboard_max_events` events (10,000 by
+  default), leaving out the access log's own entries, and say so in `window`; a subject's
+  timeline reads that record's stream, not other records it acted on; a correlation or a user's actions older than that are not
+  found there, and `flow/user_actions/:user_id` lists at most `?actions=` actions (100 by default,
+  500 at most). With `config.record_access_events` on, each such read is recorded in
+  `Lyra::DataAccess$Dashboard`: the route, what it was scoped to, how much came back, never a value.
+  The GDPR report helpers still read the whole log, a batch at a time.

@@ -13,11 +13,17 @@ module PamDsl
       @policy.field(:email, type: :email)
       @policy.field(:ssn, type: :ssn)
       @policy.field(:diagnosis, type: :health, sensitivity: :restricted) { allow_for :treatment }
-      @policy.purpose(:marketing) { requires :email }
+      @policy.purpose(:marketing) do
+        basis :consent
+        requires :email
+      end
       @policy.purpose(:treatment) do
         basis :contract
         requires :diagnosis
       end
+      # :marketing rests on consent: the subjects these tests use have given it,
+      # so what is checked is the fields.
+      [1, 42].each { |subject| @policy.consent_policy.grant_consent(purpose: :marketing, subject: subject) }
     end
 
     def teardown

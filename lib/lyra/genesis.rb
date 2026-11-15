@@ -142,7 +142,7 @@ module Lyra
       end
 
       def import_row(model_class, row)
-        record = Lyra::PurposeBoundReads.internal { model_class.instantiate(row) }
+        record = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.instantiate(row) }
         return nil if record.id.nil?
 
         data = Lyra::EventData.build(model_class, record.id, OPERATION, attributes: record.attributes)

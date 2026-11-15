@@ -97,18 +97,31 @@ module Lyra
         fk = subject_foreign_key(subject_type)
         id = subject_id.to_s
         pointed_at = {} # [model class, model id] => the foreign key's last known value
-        Lyra.config.event_store.read.to_a.select do |event|
+        matching = []
+        each_event do |event|
           relates = event_relates_to_subject?(event, subject_id, subject_type)
           model_id = extract_model_id(event)
-          next relates if model_id.nil?
+          if model_id.nil?
+            matching << event if relates
+            next
+          end
 
           key = [extract_model_class(event).to_s, model_id.to_s]
           fields = extract_attributes(event)
           before = pointed_at[key]
           after = fields.key?(fk) ? fields[fk] : fields.fetch(fk.to_sym, before)
           pointed_at[key] = after
-          relates || [before, after].any? { |value| !value.nil? && value.to_s == id }
+          matching << event if relates || [before, after].any? { |value| !value.nil? && value.to_s == id }
         end
+        matching
+      end
+
+      EVENT_BATCH = 1_000
+
+      # Every event in the log, read in batches: a report that must see all of it
+      # (a subject's events, retention) holds a batch at a time, not the whole log.
+      def each_event(batch_size = EVENT_BATCH, &block)
+        Lyra.config.event_store.read.in_batches(batch_size).each(&block)
       end
 
       # Whether an event holds the subject's data: an event of the subject's
@@ -233,35 +246,36 @@ module Lyra
       # Returns nil for models without defined retention (infinite/manual)
       def retention_compliance_with_policy(policy_name)
         integration = PolicyIntegration.new(policy_name)
-        events = Lyra.config.event_store.read.to_a
+        now = Time.current
+        totals = Hash.new(0)
+        expired_ids = Hash.new { |hash, key| hash[key] = [] }
+        durations = {}
 
-        events.group_by { |e| extract_model_class(e) }.map do |model_class, model_events|
-          retention_duration = integration.retention_duration(model_class)
+        # One pass over the log, keeping counts and the ids of expired events, not the events.
+        each_event do |event|
+          model_class = extract_model_class(event)
+          totals[model_class] += 1
+          duration = durations.fetch(model_class) { durations[model_class] = integration.retention_duration(model_class) }
+          next if duration.nil?
+
+          timestamp = extract_timestamp(event)
+          next unless timestamp && timestamp < (now - duration)
+
+          expired_ids[model_class] << (event.respond_to?(:event_id) ? event.event_id : event.object_id)
+        end
+
+        totals.map do |model_class, total|
+          retention_duration = durations[model_class]
 
           # nil means infinite/manual retention - always compliant
           if retention_duration.nil?
-            {
-              model_class: model_class,
-              total_events: model_events.count,
-              expired_events: 0,
-              retention_period: nil,
-              compliance_status: :manual,
-              expired_event_ids: []
-            }
+            { model_class: model_class, total_events: total, expired_events: 0, retention_period: nil,
+              compliance_status: :manual, expired_event_ids: [] }
           else
-            expired = model_events.select do |event|
-              timestamp = extract_timestamp(event)
-              timestamp && timestamp < (Time.current - retention_duration)
-            end
-
-            {
-              model_class: model_class,
-              total_events: model_events.count,
-              expired_events: expired.count,
-              retention_period: retention_duration,
-              compliance_status: expired.empty? ? :compliant : :requires_action,
-              expired_event_ids: expired.map { |e| e.respond_to?(:event_id) ? e.event_id : e.object_id }
-            }
+            expired = expired_ids[model_class]
+            { model_class: model_class, total_events: total, expired_events: expired.size,
+              retention_period: retention_duration, compliance_status: expired.empty? ? :compliant : :requires_action,
+              expired_event_ids: expired }
           end
         end
       end

@@ -102,7 +102,7 @@ module Lyra
           keys = relation.reselect(model_class.arel_table[pk])
           scope = model_class.unscoped.where(pk => keys).lock
         end
-        rows = Lyra::PurposeBoundReads.internal { scope.to_a }
+        rows = Lyra::PurposeBoundReads.internal(INTERNAL) { scope.to_a }
         rows.to_h { |record| [record.public_send(pk), record.attributes] }
       end
 
@@ -112,7 +112,7 @@ module Lyra
         return if before.empty?
 
         pk = model_class.primary_key
-        after = Lyra::PurposeBoundReads.internal { model_class.unscoped.where(pk => before.keys).to_a }
+        after = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.unscoped.where(pk => before.keys).to_a }
                 .to_h { |record| [record.public_send(pk), record.attributes] }
 
         before.each do |id, old_attrs|
@@ -149,7 +149,7 @@ module Lyra
 
         wanted = tuples.to_set
         pk = model_class.primary_key
-        found = Lyra::PurposeBoundReads.internal { model_class.unscoped.where(keys.first => tuples.map(&:first).uniq).to_a }
+        found = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.unscoped.where(keys.first => tuples.map(&:first).uniq).to_a }
         found.each_with_object({}) do |record, acc|
           next unless wanted.include?(keys.map { |key| record.read_attribute(key) })
 
@@ -167,7 +167,7 @@ module Lyra
         return if ids.blank?
 
         pk = model_class.primary_key
-        Lyra::PurposeBoundReads.internal do
+        Lyra::PurposeBoundReads.internal(INTERNAL) do
           model_class.unscoped.where(pk => ids).find_each do |record|
             id = record.public_send(pk)
             if (old_attrs = before[id])
@@ -222,15 +222,69 @@ module Lyra
   end
 
   # Run a block of Lyra's own read-model writes. Bypasses strict data
-  # access and publishes no bypass events.
-  def self.projection_write
+  # access and publishes no bypass events. Only Lyra's own call sites may call
+  # it (they pass Lyra::INTERNAL): application code that needs the same uses
+  # Lyra.unrecorded_write.
+  def self.projection_write(token = nil)
+    unless token.equal?(INTERNAL)
+      raise InternalApiError,
+            "Lyra.projection_write is for Lyra's own projections. To write without events " \
+            "(seeding, fixtures, a wipe whose history you do not want) use " \
+            "Lyra.unrecorded_write(reason: \"...\") { ... }, which records that it happened."
+    end
+
+    # Refused above, before the flags are touched: a refused call leaves the
+    # block it was called in as it was.
     previous_write = Thread.current[:lyra_projection_write]
     previous_bypass = Thread.current[:lyra_bypass_strict_access]
-    Thread.current[:lyra_projection_write] = true
-    Thread.current[:lyra_bypass_strict_access] = true
-    yield
-  ensure
-    Thread.current[:lyra_projection_write] = previous_write
-    Thread.current[:lyra_bypass_strict_access] = previous_bypass
+    begin
+      Thread.current[:lyra_projection_write] = true
+      Thread.current[:lyra_bypass_strict_access] = true
+      yield
+    ensure
+      Thread.current[:lyra_projection_write] = previous_write
+      Thread.current[:lyra_bypass_strict_access] = previous_bypass
+    end
+  end
+
+  UNRECORDED_WRITES_STREAM = "Lyra::UnrecordedWrites"
+  LIB_ROOT = File.expand_path("..", __dir__)
+
+  # The way application code writes without events: seeding, fixtures, a table
+  # wipe whose history is not wanted. The block's changes are not in the log, and
+  # in Monitor lyra:repair reports them; but the write itself is recorded, with
+  # its reason, who ran it and where it was called from, in the stream
+  # Lyra::UnrecordedWrites, so an unrecorded change leaves a record that it was
+  # made. config.unrecorded_writes = :deny refuses it (production hardening).
+  # Nothing is recorded in disabled mode, where nothing is.
+  def self.unrecorded_write(reason:, &block)
+    raise ArgumentError, "unrecorded_write needs a reason: why this write should not be in the log" if reason.to_s.strip.empty?
+    raise ArgumentError, "unrecorded_write needs a block" unless block
+
+    if config.unrecorded_writes == :deny
+      raise UnrecordedWriteDenied, "unrecorded writes are refused (config.unrecorded_writes = :deny): #{reason}"
+    end
+
+    record_unrecorded_write(reason) unless config.disabled_mode?
+    projection_write(INTERNAL, &block)
+  end
+
+  def self.record_unrecorded_write(reason)
+    caller_frame = caller_locations.find { |frame| !frame.absolute_path.to_s.start_with?(LIB_ROOT) }
+    event = Lyra::Events::UnrecordedWrite.new(
+      data: { reason: reason.to_s, called_from: caller_frame && "#{caller_frame.path}:#{caller_frame.lineno}", at: Time.current },
+      metadata: Lyra::BypassEvents.current_metadata.merge(source: "lyra_unrecorded_write")
+    )
+    append_events(event, stream_name: UNRECORDED_WRITES_STREAM)
+  rescue => e
+    # As for any event: Hijack and event sourcing fail the write, Monitor logs and goes on.
+    raise if config.events_required?
+
+    Rails.logger.error("Lyra: could not record an unrecorded write (#{reason}) - #{e.message}")
+  end
+  private_class_method :record_unrecorded_write
+
+  module Events
+    class UnrecordedWrite < Lyra::Event; end
   end
 end

@@ -65,13 +65,21 @@ module Lyra
         Thread.current[:lyra_purpose] = previous
       end
 
-      # Lyra's own reads, not checked.
-      def internal
+      # Lyra's own reads, not checked. Only Lyra's own call sites may call it
+      # (they pass Lyra::INTERNAL): application code that could would read a
+      # declared field under :deny.
+      # A refused call raises before it touches the flag, so it leaves the
+      # block it was called in as it was.
+      def internal(token = nil)
+        raise InternalApiError, "PurposeBoundReads.internal is for Lyra's own reads" unless token.equal?(INTERNAL)
+
         previous = Thread.current[:lyra_internal_read]
-        Thread.current[:lyra_internal_read] = true
-        yield
-      ensure
-        Thread.current[:lyra_internal_read] = previous
+        begin
+          Thread.current[:lyra_internal_read] = true
+          yield
+        ensure
+          Thread.current[:lyra_internal_read] = previous
+        end
       end
 
       # after_find on monitored models.

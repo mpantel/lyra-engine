@@ -246,7 +246,7 @@ module Lyra
       mock_event1 = create_mock_event_with_metadata("Event1", {}, { correlation_id: correlation_id })
       mock_event2 = create_mock_event_with_metadata("Event2", {}, { correlation_id: correlation_id })
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event1, mock_event2]))
+      stub_recent_events([mock_event1, mock_event2])
 
       flow = mock("flow")
       flow.stubs(:build_timeline).returns([])
@@ -281,7 +281,7 @@ module Lyra
       mock_event2 = create_mock_event_with_metadata("Event2", {}, { correlation_id: correlation_id })
       mock_event2.stubs(:timestamp).returns(time2)
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event1, mock_event2]))
+      stub_recent_events([mock_event1, mock_event2])
 
       flow = mock("flow")
       flow.stubs(:build_timeline).returns([])
@@ -308,7 +308,7 @@ module Lyra
       )
       mock_event.stubs(:model_class).returns("Post")
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event]))
+      stub_recent_events([mock_event])
       # Only stub PIIDetector if PAM DSL is available
       Privacy::PIIDetector.stubs(:detect).returns([]) if PAM_DSL_AVAILABLE
 
@@ -344,7 +344,7 @@ module Lyra
       mock_event2.stubs(:model_class).returns("Comment")
       mock_event2.stubs(:timestamp).returns(Time.current)
 
-      @event_store.stubs(:read).returns(stub(to_a: [mock_event1, mock_event2]))
+      stub_recent_events([mock_event1, mock_event2])
       # Only stub PIIDetector if PAM DSL is available
       Privacy::PIIDetector.stubs(:detect).returns([]) if PAM_DSL_AVAILABLE
 
@@ -363,7 +363,7 @@ module Lyra
         create_mock_event_with_metadata("E2", {}, { user_id: 2 }),
       ]
 
-      @event_store.stubs(:read).returns(stub(to_a: all_events))
+      stub_recent_events(all_events)
 
       flow = mock("flow")
       flow.stubs(:flow_data).returns({})
@@ -431,14 +431,14 @@ module Lyra
     end
 
     def test_crud_mapping_returns_success
-      @event_store.stubs(:read).returns(stub(to_a: []))
+      stub_recent_events([])
 
       get :crud_mapping
       assert_response :success
     end
 
     def test_crud_mapping_assigns_models_summary
-      @event_store.stubs(:read).returns(stub(to_a: []))
+      stub_recent_events([])
 
       get :crud_mapping
       assert_not_nil assigns(:models_summary)
@@ -446,7 +446,7 @@ module Lyra
     end
 
     def test_crud_mapping_assigns_total_events
-      @event_store.stubs(:read).returns(stub(to_a: []))
+      stub_recent_events([])
 
       get :crud_mapping
       assert_not_nil assigns(:total_events)
@@ -454,7 +454,7 @@ module Lyra
     end
 
     def test_crud_mapping_assigns_operations_summary
-      @event_store.stubs(:read).returns(stub(to_a: []))
+      stub_recent_events([])
 
       get :crud_mapping
       assert_not_nil assigns(:operations_summary)
@@ -462,7 +462,7 @@ module Lyra
     end
 
     def test_crud_mapping_json_format
-      @event_store.stubs(:read).returns(stub(to_a: []))
+      stub_recent_events([])
 
       get :crud_mapping, format: :json
       assert_response :success

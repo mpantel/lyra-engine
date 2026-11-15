@@ -59,7 +59,7 @@
   <div class="summary-cards">
     <div class="summary-card">
       <div class="value"><%= @total_events %></div>
-      <div class="label">Total Events</div>
+      <div class="label">Total Events<%= " (most recent #{@window[:limit]})" if @window && @window[:truncated] %></div>
     </div>
     <div class="summary-card">
       <div class="value"><%= @events_with_pii %></div>

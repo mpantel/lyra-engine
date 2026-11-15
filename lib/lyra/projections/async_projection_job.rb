@@ -76,7 +76,7 @@ module Lyra
       def project_stream(model_class, model_id, stream)
         model_class.with_connection do |connection|
           events = events_to_apply(connection, stream)
-          Rebuild.project_events(model_class, events)
+          Rebuild.project_events(model_class, events, INTERNAL)
           AsyncCheckpoint.write(connection, stream, events.last.event_id) if events.any? && incremental?(connection)
         end
       end

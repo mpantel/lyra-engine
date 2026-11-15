@@ -147,3 +147,15 @@ if defined?(Lyra)
   LyraConfigIsolation.baseline = Lyra.config
   Minitest::Test.prepend(LyraConfigIsolation)
 end
+
+# Lyra::INTERNAL is private: only Lyra's own call sites name it. Tests that stand
+# in for them (a projection, a replay) fetch it here.
+class Minitest::Test
+  def lyra_internal = Lyra.const_get(:INTERNAL)
+
+  # The bounded read the dashboard makes (Lyra::EventWindow.recent, through
+  # recent_events) answering +events+, newest first, as a whole window.
+  def stub_recent_events(events)
+    Lyra::EventWindow.stubs(:recent).returns([events, { limit: Lyra.config.dashboard_max_events, returned: events.size, truncated: false, skipped: 0 }])
+  end
+end

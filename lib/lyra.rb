@@ -1,4 +1,5 @@
 require "lyra/version"
+require "lyra/internal"
 require "lyra/attribution"
 require "rails_event_store"
 # Lyra builds on these at load time (jobs, ActiveRecord errors); require them
@@ -50,6 +51,7 @@ require "lyra/command"
 require "lyra/aggregate"
 require "lyra/command_handler"
 require "lyra/dual_view"
+require "lyra/event_window"
 require "lyra/event_flow"
 require "lyra/event_analyzer"
 require "lyra/id_generator"

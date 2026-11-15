@@ -129,7 +129,6 @@ class PurposeBoundReadsTest < Minitest::Test
   def test_lyra_s_own_reads_are_not_checked
     Lyra.with_purpose(:contact) do
       ReadUser.where(id: @user.id).update_all(name: "Bea") # bypass-event snapshot
-      assert Lyra::DualView.new(ReadUser, @user.id).compare
       assert_nil Lyra::ModeTransition.discrepancy(ReadUser, @user.id.to_s)
     end
   end
@@ -209,6 +208,22 @@ class PurposeBoundReadsTest < Minitest::Test
     end
     job.perform_now
     assert_equal :directory, seen
+  end
+
+  # DualView reads the row as its caller does: it is no way around the purpose
+  # check. Lyra's own comparisons (the mode gate, the sampler) still read as Lyra.
+  def test_dual_view_reads_the_row_under_the_callers_purpose
+    Lyra.config.reads_without_purpose = :deny
+
+    assert_raises(Lyra::PurposeBoundReads::PurposeRequiredError) { Lyra::DualView.new(ReadUser, @user.id).compare }
+    assert_raises(Lyra::PurposeBoundReads::PurposeRequiredError) { Lyra::DualView.new(ReadUser, @user.id).crud_state }
+    assert_equal({}, Lyra.with_purpose(:directory) { Lyra::DualView.new(ReadUser, @user.id).compare[:differences] })
+  end
+
+  def test_lyras_own_comparison_still_reads_the_row_under_deny
+    Lyra.config.reads_without_purpose = :deny
+
+    assert_nil Lyra::ModeTransition.send(:compare, ReadUser, @user.id.to_s), "row and events agree"
   end
 
   private

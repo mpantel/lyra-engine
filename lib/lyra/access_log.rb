@@ -71,6 +71,19 @@ module Lyra
         Lyra::OwnConnection.run { Lyra.append_events(event, stream_name: stream_for(subject)) }
       end
 
+      # A read through the dashboard (a flow or privacy route): who, which route, the
+      # ids it was scoped to and how much came back. Written when
+      # config.record_access_events is on, to Lyra::DataAccess$Dashboard.
+      def dashboard_read(route:, scope: {}, returned: nil, truncated: nil)
+        return unless record?(nil)
+
+        data = { route: route.to_s, scope: scope.transform_values(&:to_s), returned: returned, truncated: truncated,
+                 accessed_at: Time.current }.compact
+        event = Lyra::Events::DashboardRead.new(data: data, metadata: metadata_for_dashboard)
+        # On its own connection, as every access entry (call).
+        Lyra::OwnConnection.run { Lyra.append_events(event, stream_name: stream_for("Dashboard")) }
+      end
+
       def stream_for(subject)
         subject ? "#{STREAM}$#{subject}" : STREAM
       end
@@ -94,7 +107,7 @@ module Lyra
       # who. Returns how many entries it deleted. Refuses a model-wide key.
       def erase!(subject, reason:, erased_by: nil)
         key = erasable_key(subject)
-        Lyra::PurposeBoundReads.internal do
+        Lyra::PurposeBoundReads.internal(INTERNAL) do
           ActiveRecord::Base.transaction do
             entries = delete_stream!(stream_for(key))
             erasure = Lyra::Events::AccessLogErased.new(
@@ -170,6 +183,16 @@ module Lyra
         }.merge(custom_metadata(access)).merge(source: "lyra_access_log").compact
       end
 
+      def metadata_for_dashboard
+        {
+          user_id: current(:user)&.id,
+          ip_address: current(:ip_address),
+          request_id: current(:request_id),
+          correlation_id: Lyra::Correlation.current_id,
+          source: "lyra_dashboard"
+        }.compact
+      end
+
       def current(attribute)
         defined?(::Current) && ::Current.respond_to?(attribute) ? ::Current.public_send(attribute) : nil
       end
@@ -192,6 +215,7 @@ module Lyra
   module Events
     class DataAccessed < Lyra::Event; end
     class DataAccessDenied < Lyra::Event; end
+    class DashboardRead < Lyra::Event; end
     # A subject's access log was deleted (AccessLog.erase!).
     class AccessLogErased < Lyra::Event; end
   end

@@ -122,7 +122,11 @@ module PamDsl
       policy = Policy.new(:user_data)
       policy.field(:email, type: :email)
       policy.field(:ssn, type: :ssn)
-      policy.purpose(:marketing) { requires :email }
+      policy.purpose(:marketing) do
+        basis :consent
+        requires :email
+      end
+      policy.consent_policy.grant_consent(purpose: :marketing, subject: 1)
 
       assert_raises(PurposeFieldMismatchError) do
         policy.validate_access!([:ssn], :marketing, subject: 1)
@@ -134,7 +138,10 @@ module PamDsl
     def test_policy_can_declare_online_identifier_field
       PamDsl.define_policy :accounts do
         field :username, type: :online_identifier, sensitivity: :internal
-        purpose(:authentication) { requires :username }
+        purpose :authentication do
+          basis :contract
+          requires :username
+        end
       end
       policy = PamDsl.registry.get(:accounts)
       field = policy.get_field(:username)
@@ -151,7 +158,11 @@ module PamDsl
 
     def test_undeclared_field_still_raises_invalid_field_error
       policy = Policy.new(:user_data)
-      policy.purpose(:marketing) { requires :email }
+      policy.purpose(:marketing) do
+        basis :consent
+        requires :email
+      end
+      policy.consent_policy.grant_consent(purpose: :marketing, subject: 1)
 
       assert_raises(InvalidFieldError) do
         policy.validate_access!([:nonexistent], :marketing, subject: 1)
@@ -430,6 +441,7 @@ module PamDsl
         basis :consent
         requires :email
       end
+      policy.consent_policy.grant_consent(purpose: :marketing, subject: 1)
       policy.consent_policy.grant_consent(purpose: :marketing, subject: 1)
 
       assert policy.validate_access!([:email], :marketing, subject: 1)

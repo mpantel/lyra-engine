@@ -134,7 +134,7 @@ module Lyra
           # Use AR's instantiate method - proper way to build from DB-style attributes
           # Lyra's own reconstruction: the purpose check is made on the records
           # a query returns (CachedRelationDelivery), not on every one built.
-          record = Lyra::PurposeBoundReads.internal { model_class.instantiate(filtered_attrs) }
+          record = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.instantiate(filtered_attrs) }
 
           # Note: We don't mark as readonly because the app may need to modify
           # and re-save (which will go through event sourcing)

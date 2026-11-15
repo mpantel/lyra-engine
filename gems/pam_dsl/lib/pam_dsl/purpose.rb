@@ -36,7 +36,10 @@ module PamDsl
     def initialize(name)
       @name = name.to_sym
       @description = ""
-      @legal_basis = :consent
+      # No basis declared is no basis decided: access is refused and the register
+      # lists the purpose as a gap. It used to default to :consent, which the
+      # register printed as Art. 6(1)(a) and nothing checked.
+      @legal_basis = UNDETERMINED
       @art9_bases = []
       @lia_documented = false
       @required_fields = []

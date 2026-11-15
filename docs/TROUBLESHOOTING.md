@@ -407,9 +407,10 @@ row that has no stream.
 `delete_all`, `insert_all`, ...) publish one bypass event per affected record.
 
 **Fix**: This is by design: each changed record's stream records the change.
-`Lyra.projection_write { ... }` runs a block without bypass events and without
-strict-access checks, so its changes are missing from the log (in Monitor,
-`lyra:repair DRY_RUN=1` then reports the records). Reserve it for data the log
+`Lyra.unrecorded_write(reason: "...") { ... }` runs a block without bypass events and
+without strict-access checks, so its changes are missing from the log (in Monitor,
+`lyra:repair DRY_RUN=1` then reports the records); the call itself is recorded in
+the stream `Lyra::UnrecordedWrites`. Reserve it for data the log
 need not hold; see [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#common-pitfalls).
 
 ---

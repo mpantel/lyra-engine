@@ -66,7 +66,7 @@ module Lyra
         shortest = ([rule.duration] + rule.field_durations.values).compact.min
         return [] unless shortest
 
-        PurposeBoundReads.internal do
+        PurposeBoundReads.internal(INTERNAL) do
           candidates(model, anchor, now - shortest).filter_map do |record|
             next unless rule.applies.call(record)
 

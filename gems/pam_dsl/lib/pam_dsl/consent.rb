@@ -113,12 +113,11 @@ module PamDsl
 
   # Represents a consent requirement
   class ConsentRequirement
-    attr_reader :purpose, :required, :granular, :withdrawable, :description, :expires_after
+    attr_reader :purpose, :required, :withdrawable, :description, :expires_after
 
     def initialize(purpose)
       @purpose = purpose.to_sym
       @required = true
-      @granular = false
       @withdrawable = true
       @description = ""
       @expires_after = nil
@@ -130,10 +129,13 @@ module PamDsl
       self
     end
 
-    # Enable granular consent
-    def granular!(value = true)
-      @granular = value
-      self
+    # Removed in 1.0.0: the flag was recorded and never enforced, so a policy that
+    # declared it looked as if consent were per field when it was not. Declare one
+    # consent block per purpose (Recital 32 asks for consent per purpose).
+    def granular!(_value = true)
+      raise ConsentGrammarError,
+            "granular! was removed in 1.0.0: it was recorded but never enforced. " \
+            "Declare one consent block per purpose instead."
     end
 
     # Set if consent is withdrawable
@@ -157,11 +159,6 @@ module PamDsl
     # Check if consent is required
     def required?
       @required
-    end
-
-    # Check if consent is granular
-    def granular?
-      @granular
     end
 
     # Check if consent is withdrawable
@@ -223,9 +220,11 @@ module PamDsl
 
     # Validate consent for (purpose, subject) — implements consent_active(u, s, C) from Def. 5.
     # consent_active holds iff (u,s) ∈ CS and state(u,s) = Granted.
-    def validate!(purpose, subject:)
+    # required: true when the purpose's basis is consent, so consent is needed
+    # even if no requirement is declared for it.
+    def validate!(purpose, subject:, required: false)
       requirement = requirement_for(purpose)
-      return true unless requirement&.required?
+      return true unless required || requirement&.required?
 
       current_state = @store.record_for(purpose, subject)&.state
 

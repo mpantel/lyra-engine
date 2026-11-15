@@ -9,7 +9,7 @@ PAM DSL provides a fluent, expressive way to define privacy policies using the P
 - **Define PII fields** with type and sensitivity classification
 - **Specify processing purposes** with legal bases (GDPR compliant)
 - **Configure retention policies** with field-level granularity
-- **Manage consent requirements** with expiration and granular control
+- **Manage consent requirements** with expiration and withdrawal
 - **Validate data access** against defined policies, blocking violations (strict mode) or recording them (audit mode)
 - **Declare the Article 30 record of processing**: data subjects, recipients, international transfers and security measures
 
@@ -77,7 +77,6 @@ PamDsl.define_policy :user_data do
   consent do
     for_purpose :marketing do
       required!
-      granular!
       withdrawable!
       expires_in 1.year
       describe "We'll send you product updates and offers"
@@ -173,7 +172,7 @@ end
 - `:vital_interests` - Protection of vital interests
 - `:public_task` - Task in public interest
 - `:legitimate_interests` - Legitimate interests
-- `:undetermined` - Not a legal basis: what the policy generator writes until the controller decides one. Access under it is refused (`PamDsl::UndeterminedBasisError`) and the Article 30 register lists it as a gap.
+- `:undetermined` - Not a legal basis: what the policy generator writes until the controller decides one, and what a purpose has when it declares no `basis` (before 1.0.0 that defaulted to `:consent`). Access under it is refused (`PamDsl::UndeterminedBasisError`) and the Article 30 register lists it as a gap.
 
 #### Legitimate Interests Assessment (LIA)
 
@@ -315,15 +314,13 @@ PamDsl.define_policy :my_policy do
   consent do
     for_purpose :marketing do
       required!           # Must have consent
-      granular!           # Allow fine-grained consent
       withdrawable!       # Can be withdrawn anytime
       expires_in 2.years  # Consent expires after 2 years
       describe "We'll send you marketing emails about new products"
     end
 
     for_purpose :analytics do
-      required! false     # Optional consent
-      granular!
+      required! false     # Optional consent (not allowed where the purpose's basis is :consent)
       describe "Help us improve by sharing anonymous usage data"
     end
   end
@@ -340,8 +337,8 @@ Before calling `validate_access!` for a consent-based purpose, populate the stor
 > one process (a Puma worker, a job worker) is not seen by the others, so it alone cannot make a
 > withdrawal take effect everywhere (Art. 7(3)). An application that relies on consent must keep
 > the decisions in its own durable store (a table, or events in the data subject's stream) and load
-> them into this store, at start-up and on every change, or per request. `granular!` and
-> `withdrawable!` are recorded with the requirement but not enforced. Persistent, event-backed
+> them into this store, at start-up and on every change, or per request. `withdrawable!` is
+> recorded with the requirement but not enforced. Persistent, event-backed
 > consent is future work.
 
 Each `(purpose, subject)` pair has a `ConsentRecord` in one of four states:
@@ -1382,8 +1379,7 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 DSL configuration (policy-time):
 - `for_purpose(purpose, &block)` - Declare a consent requirement for a purpose
 - `required!(value)` - Set if required
-- `granular!(value)` - Enable granular consent
-- `withdrawable!(value)` - Set if withdrawable
+- `withdrawable!(value)` - Set if withdrawable. For a purpose whose basis is `:consent`, `withdrawable!(false)` and `required!(false)` raise `PamDsl::ConsentGrammarError` when the policy is defined (Arts. 6(1)(a), 7(3)). `granular!` was removed in 1.0.0: it was recorded and never enforced; declare one consent block per purpose.
 - `expires_in(duration)` - Set expiration window
 - `describe(text)` - Describe the consent request
 
