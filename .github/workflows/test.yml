@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 4.0 is the gemspecs' floor (.ruby-version: 4.0.7)
+        # 4.0 is the gemspecs' floor (.ruby-version: 4.0.9)
         ruby-version: ['4.0']
 
     # The dummy app's test database (test/dummy/config/database.yml)

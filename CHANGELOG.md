@@ -346,6 +346,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record whose event attributes had string keys, as Monitor's do.
 
 ### Changed
+- **Ruby 4.0.9, Rails 8.1.4.1, pg 1.7.0.** Security releases: Ruby 4.0.9 fixes memory
+  corruption when compiling crafted regular expressions, Rails 8.1.4.1 fixes advisories in
+  Active Support and Action View (Active Record unchanged). Lyra's requirements are unchanged
+  (Ruby 4.0+, Rails 8.0+); the project and the example app now run these versions.
 - **`config.erasure_max_copies`** (default 10) sets `everywhere`'s threshold for the application;
   `erase!(max_copies:)` and `lyra:erase MAX_COPIES=` still override it per call. Each value left
   as shared is reported in the new `result.shared` as `{ field:, type:, holders: }` (never the

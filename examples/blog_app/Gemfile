@@ -2,7 +2,7 @@ source "https://rubygems.org"
 
 ruby ">= 3.4.5"
 
-gem "rails", "8.1.4" # the version the engine is tested with
+gem "rails", "8.1.4.1" # the version the engine is tested with
 gem "pg", "~> 1.1"
 
 # PetriFlow (optional for Lyra, verification). Lyra's rake tasks eager load the
