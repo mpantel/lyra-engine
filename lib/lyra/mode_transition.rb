@@ -99,6 +99,7 @@ module Lyra
         from = current
         to = label(mode, projection_mode)
         report = nil
+        refuse_unevaluable_default_scopes!(from, to) unless force
 
         if gate_enabled? && gate_required?(from, to) && !force
           report = certified_check(from, to) || check(to: to, from: from, rebuild: rebuild)
@@ -280,6 +281,24 @@ module Lyra
         return if Lyra.config.reference_links == false
 
         Lyra.config.monitored_models.each { |model| Lyra::Projections::ReferenceLinks.catch_up(model, force: true) }
+      end
+
+      # ES-NoProj reads through each model's default scopes from the event
+      # store, and refuses a read whose default scope it cannot evaluate (an
+      # SQL string, a join, an ordering by an expression): every read of
+      # such a model would fail. The switch into ES-NoProj names them first.
+      # force: true switches anyway.
+      def refuse_unevaluable_default_scopes!(from, to)
+        return unless to == "event_sourcing/disabled" && from != to
+
+        refused = Lyra::Projections::DefaultScopes.unevaluable(Lyra.config.monitored_models)
+        return if refused.empty?
+
+        raise Refused.new("Lyra refuses #{from} -> #{to}: ES-NoProj cannot evaluate the default scope of " \
+                          "#{refused.map { |model, _| model.name }.join(', ')} from the event store, and would refuse " \
+                          "every read of #{refused.size == 1 ? 'that model' : 'those models'}. Write the default scope " \
+                          "as hash conditions and column orderings, or use another projection mode. " \
+                          "(#{refused.first.last})")
       end
 
       def apply(mode, projection_mode)

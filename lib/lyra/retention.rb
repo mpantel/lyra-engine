@@ -21,6 +21,17 @@ module Lyra
   # config.retention_anchors names for the model ({ "Registration" =>
   # :registered_at }). Rule conditions (when { ... }) are given the record.
   # Already-erased attributes are not erased again, so a run is idempotent.
+  # In ES-NoProj the records, and their anchor, are read from the event store
+  # (no default scope applied, as in every mode: a soft-deleted record is
+  # still due), and a deletion or soft deletion is written as an event.
+  #
+  # A record under a restriction of processing (Art. 18, with PAM DSL's
+  # rights and Lyra::Rights) is skipped and reported (outcome :restricted,
+  # the restrictions in +detail+; Result#restricted lists them): the subject
+  # asked for it to be kept (18(1)(b), (c)), and erasing it is processing
+  # beyond storage. It is acted on at the first run after the restriction is
+  # lifted. An objection's 18(1)(d) restriction, which covers one purpose,
+  # does not hold it.
   #
   # Run it on a schedule: bin/rails lyra:retention:apply (DRY_RUN=1 lists
   # what would happen, and works with the executor off), or enqueue
@@ -37,6 +48,9 @@ module Lyra
     end
 
     Result = Struct.new(:actions, :dry_run, keyword_init: true) do
+      # The records skipped because a restriction of processing holds them.
+      def restricted = actions.select { |a| a.outcome == :restricted }
+
       def summary
         counts = actions.group_by(&:outcome).transform_values(&:size)
         "#{dry_run ? 'would act on' : 'acted on'} #{actions.size} records: " +
@@ -81,10 +95,13 @@ module Lyra
 
       def candidates(model, anchor, cutoff)
         if events_only?
-          # ES-NoProj: no table to query; every record, rebuilt from its events.
-          return ModeTransition.record_ids(model)
-                               .filter_map { |id| model.unscoped.find_by(model.primary_key => id) }
-                               .select { |record| (started = record.public_send(anchor)) && started < cutoff }
+          # ES-NoProj: the events are the only store (the table is empty or
+          # stale). Every live record, rebuilt from its stream with no default
+          # scope applied (as unscoped: a soft-deleted record is still due),
+          # its anchor read from that state.
+          return Lyra::Projections::EventStoreReader.all(model).to_a.select do |record|
+            (started = record.public_send(anchor)) && started < cutoff
+          end
         end
 
         Lyra::Projections::LazyProjection.catch_up! if lazy?
@@ -119,6 +136,8 @@ module Lyra
       def erase(model, record, fields, strategy, dry_run, now)
         fields -= erased_fields(model, record.id)
         return nil if fields.empty?
+        held = restricted(record, fields)
+        return action(model, record, strategy, fields, :restricted, held) if held
         return action(model, record, strategy, fields, :would_erase) if dry_run
 
         Lyra::Erasure.erase!(model, record.id, fields: fields, reason: reason(model, strategy, now), erased_by: SOURCE)
@@ -127,6 +146,8 @@ module Lyra
 
       def hard_delete(model, record, personal, dry_run, now)
         fields = personal - erased_fields(model, record.id)
+        held = restricted(record, nil)
+        return action(model, record, :hard_delete, fields, :restricted, held) if held
         return action(model, record, :hard_delete, fields, :would_delete) if dry_run
 
         if fields.any?
@@ -136,7 +157,7 @@ module Lyra
           # Erased before, with its access log kept then: the record goes now, and its log with it.
           Lyra::Erasure.erase_access_log!(model, record.id, reason: reason(model, :hard_delete, now), erased_by: SOURCE)
         end
-        model.unscoped.find(record.id).destroy!
+        current(model, record.id).destroy!
         action(model, record, :hard_delete, fields, :deleted)
       end
 
@@ -144,10 +165,35 @@ module Lyra
         column = (SOFT_DELETE_COLUMNS & model.column_names).first
         return action(model, record, :soft_delete, [], :skipped, "no deleted_at or discarded_at column") unless column
         return nil if record.public_send(column)
+        held = restricted(record, nil)
+        return action(model, record, :soft_delete, [], :restricted, held) if held
         return action(model, record, :soft_delete, [], :would_soft_delete) if dry_run
 
-        model.unscoped.find(record.id).update!(column => now)
+        current(model, record.id).update!(column => now)
         action(model, record, :soft_delete, [], :soft_deleted)
+      end
+
+      # The record +id+ as it is now (after an erasure), to write through:
+      # its row, or in ES-NoProj its state rebuilt from its events, whose
+      # destroy! or update! the interceptor records as an event (there is no
+      # row to read or write). No default scope either way.
+      def current(model, id)
+        return model.unscoped.find(id) unless events_only?
+
+        Lyra::Projections::EventStoreReader.find(model, id) ||
+          raise(ActiveRecord::RecordNotFound.new("#{Lyra.stream_name(model, id)} has no live record in its events",
+                                                 model.name, model.primary_key, id))
+      end
+
+      # The restrictions holding +record+ (for +fields+; nil: all), as the
+      # action's detail, or nil.
+      def restricted(record, fields)
+        return nil unless defined?(Lyra::Rights::ErasureGuard)
+
+        held = Lyra::Rights::ErasureGuard.covering_record(record, fields: fields)
+        return nil if held.empty?
+
+        "restricted: #{held.map { |r| Lyra::Rights::ErasureGuard.describe(r) }.join('; ')}"
       end
 
       # Attributes an earlier erasure of this record already covered.

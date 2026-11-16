@@ -132,6 +132,13 @@
                       <strong>Required fields:</strong> <%= purpose.required_fields.join(', ') %>
                     </div>
                   <% end %>
+                  <% if purpose.respond_to?(:objectable) %>
+                    <div class="required-fields">
+                      <strong>Right to object:</strong> <%= purpose.objectable || "none" %>;
+                      <strong>continues under a restriction:</strong>
+                      <%= purpose.restriction_exceptions.any? ? purpose.restriction_exceptions.map { |e| e.to_s.tr('_', ' ') }.join(', ') : "no (no Art. 18(2) exception declared)" %>
+                    </div>
+                  <% end %>
                 </div>
               <% end %>
             </div>

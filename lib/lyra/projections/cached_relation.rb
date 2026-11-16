@@ -31,65 +31,312 @@ module Lyra
     #   relation = CachedRelation.new(User, records)
     #   relation.where(status: "active").order(:name).limit(10)
     #
-    # What an ES-NoProj query returns to the application: records narrowed to
-    # the selected columns, each checked against its policy for the purpose
-    # in scope (Lyra::PurposeBoundReads). A query here loads every record of
-    # the model and filters in memory, so the check is made on the records
-    # returned, not on the ones built; only the outermost call checks.
+    # What an ES-NoProj query returns to the application, and what it uses
+    # (Lyra::PurposeBoundReads): the same rule as ActiveRecord's relations.
+    #
+    # A query here filters eagerly, so each relation keeps what its query
+    # named (query_terms: the conditions of where, where.not and where!, the
+    # order keys, a subquery's own terms; select and group are kept already)
+    # and the check is made when the answer is asked for:
+    #
+    # - a record load (to_a, first, find_by, each, length, ...) has its named
+    #   attributes checked without the consent step, then returns records
+    #   narrowed to the selected columns, each checked against its policy,
+    #   consent included, for what it holds and what the query named;
+    # - an aggregate, exists?, ids, pluck, pick, a bulk write or in_batches is
+    #   checked whole, subject Model$*.
+    #
+    # Only the outermost call checks: the relations a query builds inside
+    # itself (a group's aggregates, exists? through find_by, a subquery while
+    # a where filters) are its machinery, not deliveries.
     module CachedRelationDelivery
-      %i[to_a to_ary [] first last second third take take! first! last! find_by find_by!].each do |name|
+      %i[to_a to_ary [] first last second third take take! first! last!].each do |name|
         define_method(name) do |*args, **kwargs, &block|
           deliver { super(*args, **kwargs, &block) }
         end
       end
 
+      # With a block (and no id), Enumerable's find over the records the
+      # relation loads, as Active Record does: each checked first.
       def find(*args, &block)
-        return super if block
+        return deliver { @records.to_a }.find(*args, &block) if block
 
         deliver { super }
       end
 
-      def each(&block)
+      # select with a block is Enumerable's over the loaded records, as in
+      # Active Record, and returns an Array: the block sees only records the
+      # purpose check delivered (narrowed to the selection, each checked,
+      # consent included). It used to see the cached records, unchecked.
+      def select(*args, &block)
         return super unless block
-        return super if Thread.current[:lyra_cached_delivery]
 
-        deliver { @records }.each(&block)
+        deliver { @records.to_a }.select(&block)
       end
 
+      def find_by(*args, **kwargs, &block)
+        deliver(conditions_term(args.first || kwargs)) { super }
+      end
+
+      def find_by!(*args, **kwargs, &block)
+        deliver(conditions_term(args.first || kwargs)) { super }
+      end
+
+      # Without a block, an Enumerator over the checked records, as
+      # ActiveRecord's each over its loaded records.
+      def each(&block)
+        return super if Thread.current[:lyra_cached_delivery]
+        return to_enum(:each) { size } unless block
+
+        deliver { @records.to_a }.each(&block)
+      end
+
+      # Batch by batch, as Active Record loads them: each batch delivered
+      # (checked) in a checking scope of its own, so the subject's rights are
+      # read afresh before each (Lyra::Rights.batches).
       def find_in_batches(batch_size: 1000, &block)
-        deliver { @records }.each_slice(batch_size, &block)
+        return deliver { @records.to_a }.each_slice(batch_size) unless block
+        return deliver { @records.to_a }.each_slice(batch_size, &block) unless Lyra::PurposeBoundReads.checking?
+
+        Lyra::PurposeBoundReads.batch_scopes do |next_batch|
+          Lyra::PurposeBoundReads.once do
+            @records.each_slice(batch_size) do |slice|
+              batch = deliver { slice }
+              Lyra::PurposeBoundReads.outside_once { block.call(batch) }
+            ensure
+              next_batch.call
+            end
+          end
+        end
+      end
+
+      def find_each(batch_size: 1000, &block)
+        return super unless block && Lyra::PurposeBoundReads.checking?
+
+        find_in_batches(batch_size: batch_size) { |batch| batch.each(&block) }
+      end
+
+      # As ActiveRecord: these load the records.
+      def length = deliver { @records.to_a }.length
+      def present? = deliver { @records.to_a }.present?
+      def blank? = deliver { @records.to_a }.blank?
+
+      # As ActiveRecord: these count or test for existence. With a block,
+      # they load the records.
+      %i[size empty? total_count ids].each do |name|
+        define_method(name) { aggregated { super() } }
+      end
+
+      %i[any? none? one? many?].each do |name|
+        define_method(name) do |&block|
+          next deliver { @records.to_a }.public_send(name, &block) if block
+
+          aggregated { super() }
+        end
+      end
+
+      def count(column_name = nil, &block)
+        return deliver { @records.to_a }.count(&block) if block
+
+        all = column_name.nil? || [:all, "*", "all"].include?(column_name)
+        aggregated(all ? [] : [[:value, column_name]]) { super }
+      end
+
+      def sum(column_name = nil, &block)
+        return deliver { @records.to_a }.sum(&block) if block
+
+        aggregated([[:value, column_name]]) { super }
+      end
+
+      %i[average minimum maximum].each do |name|
+        define_method(name) do |column_name|
+          aggregated([[:value, column_name]]) { super(column_name) }
+        end
+      end
+
+      def calculate(operation, column_name = nil)
+        all = operation.to_s == "count" && (column_name.nil? || [:all, "*", "all"].include?(column_name))
+        aggregated(all ? [] : [[:value, column_name]]) { super }
+      end
+
+      # A Hash of conditions, or an SQL fragment with its binds: what they
+      # name is used (the fragment is not evaluated here; see UnsupportedQuery).
+      def exists?(conditions = nil)
+        terms = case conditions
+                when Hash then conditions_term(conditions)
+                when Array then conditions.first.is_a?(String) ? [[:value, conditions.first]] : []
+                else []
+                end
+        aggregated(terms) { super }
       end
 
       def pluck(*column_names)
-        Lyra::PurposeBoundReads.check_columns(model_class, column_names)
+        aggregated([[:value, column_names]]) { super }
+      end
+
+      def pick(*column_names)
+        aggregated([[:value, column_names]]) { super }
+      end
+
+      # Bulk writes (method_missing below runs them): their filter is a use,
+      # and so is what update_all's SET expressions read.
+      %i[update_all delete_all touch_all destroy_all].each do |name|
+        define_method(name) do |*args, **kwargs, &block|
+          unless Thread.current[:lyra_cached_delivery]
+            reads = name == :update_all ? Lyra::PurposeBoundReads::RelationCheck.set_reads(args.first || kwargs) : nil
+            query_check(:all, reads ? [[:value, reads]] : [])
+          end
+          super(*args, **kwargs, &block)
+        end
+      end
+
+      # Checked once for the relation; the application's block is its own
+      # code, checked each time.
+      def in_batches(*args, **kwargs, &block)
+        return super unless block && Lyra::PurposeBoundReads.checking?
+
+        Lyra::PurposeBoundReads.batch_scopes do |next_batch|
+          Lyra::PurposeBoundReads.once do
+            query_check(:all)
+            super(*args, **kwargs) do |batch|
+              Lyra::PurposeBoundReads.outside_once { block.call(batch) }
+            ensure
+              next_batch.call
+            end
+          end
+        end
+      end
+
+      # As ActiveRecord's records: the records the query loads, checked.
+      def records
+        deliver { @records.to_a }
+      end
+
+      # As ActiveRecord's: it loads the records (each shown is checked).
+      def inspect
+        shown = deliver { @records.to_a.first(11) }
+        entries = shown.first(10).map(&:inspect)
+        entries << "..." if shown.size > 10
+        "#<#{self.class.name} [#{entries.join(', ')}]>"
+      end
+
+      def to_s
+        inspect
+      end
+
+      # Filtering: what it names is recorded on the relation it returns.
+      # Relations evaluated while it filters (a subquery) are part of it.
+      def where(*args, **kwargs)
+        relation = inside_query { super }
+        conditions = args.empty? ? kwargs : args.first
+        return relation if conditions.blank? || conditions == :chain || !relation.is_a?(CachedRelation) || relation.equal?(self)
+
+        relation.continue_plan(self, [:where, conditions]) if conditions.is_a?(Hash)
+        relation.add_query_terms(conditions.is_a?(String) ? [[:value, conditions]] : conditions_term(conditions))
+      end
+
+      def not(conditions)
+        inside_query { super }.add_query_terms(conditions_term(conditions))
+      end
+
+      def order(*args)
+        relation = super
+        return relation if args.empty? || relation.equal?(self)
+
+        relation.continue_plan(self, [:order, args])
+        relation.add_query_terms([[:value, args]])
+      end
+
+      def reorder(*args)
+        relation = super
+        relation.continue_plan(self, [:reorder, args])
+        args.compact.empty? ? relation : relation.add_query_terms([[:value, args]])
+      end
+
+      def order!(*args)
         super
+        args.empty? ? self : add_query_terms!([[:value, args]])
+      end
+
+      def or(other)
+        super.add_query_terms(other.query_terms)
       end
 
       private
 
-      def deliver
-        return yield if Thread.current[:lyra_cached_delivery]
-
-        Thread.current[:lyra_cached_delivery] = true
-        result = yield
-        Thread.current[:lyra_cached_delivery] = false
-        case result
-        when Array then result.map { |record| delivered(record) }
-        when ActiveRecord::Base then delivered(result)
-        else result
-        end
-      ensure
-        Thread.current[:lyra_cached_delivery] = false
+      def conditions_term(conditions)
+        conditions.present? ? [[:conditions, conditions]] : []
       end
 
-      def delivered(record)
+      # Nested deliveries inside the block are the query's own work.
+      def inside_query
+        previous = Thread.current[:lyra_cached_delivery]
+        Thread.current[:lyra_cached_delivery] = true
+        yield
+      ensure
+        Thread.current[:lyra_cached_delivery] = previous
+      end
+
+      def query_check(kind, extra_terms = [])
+        return unless Lyra::PurposeBoundReads.checking?
+
+        names = lyra_query_names(extra_terms)
+        named = names.result
+        Lyra::PurposeBoundReads.check_query(model_class, named, kind, names.whole, joined: joined_classes)
+        named
+      end
+
+      # An aggregate, exists?, pluck: checked whole, then run as one query,
+      # over the records a right in force does not leave out
+      # (Lyra::Rights::Queries; a record whose people cannot be read raises).
+      def aggregated(extra_terms = [])
+        return yield if Thread.current[:lyra_cached_delivery]
+        return yield unless Lyra::PurposeBoundReads.checking?
+
+        Lyra::PurposeBoundReads.once do
+          named = query_check(:all, extra_terms)
+          kept = Lyra::PurposeBoundReads.rights_kept_records(model_class, named, @records)
+          kept ? inside_query { with_records(kept) { yield } } : inside_query { yield }
+        end
+      end
+
+      # The block run with +records+ as this relation's records.
+      def with_records(records)
+        saved = @records
+        @records = records
+        yield
+      ensure
+        @records = saved
+      end
+
+      # A record load: its named attributes checked first, then each record.
+      def deliver(extra_terms = [])
+        return yield if Thread.current[:lyra_cached_delivery]
+
+        named = query_check(:load, extra_terms)
+        names = named ? named.fetch(model_class, []) : []
+        result = inside_query { yield }
+        case result
+        when Array then result.map { |record| delivered(record, names) }
+        when ActiveRecord::Base then delivered(result, names)
+        else result
+        end
+      end
+
+      def delivered(record, names)
         return record unless record.is_a?(ActiveRecord::Base)
 
         if selected_columns
+          whole = record
           values = record.attributes_before_type_cast.slice(*selected_columns)
           record = Lyra::PurposeBoundReads.internal(INTERNAL) { model_class.instantiate(values) }
+          # Its people, read from the whole record before it was narrowed
+          # (the table under ES-NoProj has no row to read them from).
+          if Lyra::PurposeBoundReads.rights_in_force?
+            Lyra::PurposeBoundReads.internal(INTERNAL) { Lyra::Rights::SubjectKeys.remember(record, whole) }
+          end
         end
-        Lyra::PurposeBoundReads.check(record)
+        Lyra::PurposeBoundReads.check(record, names)
         record
       end
     end
@@ -98,7 +345,7 @@ module Lyra
       include Enumerable
       include CachedJoins
 
-      attr_reader :model_class, :records
+      attr_reader :model_class
       # Columns a select(...) asked for: the records returned are narrowed to
       # them, as SQL would return them, so that a purpose-bound read checks
       # what the query selected (Lyra::PurposeBoundReads). Carried through
@@ -123,6 +370,56 @@ module Lyra
 
       def group_columns = @group_columns || []
 
+      # What the query this relation answers named, as [kind, term] pairs
+      # (CachedRelationDelivery records them): [:conditions, hash] or
+      # [:value, columns or an SQL fragment]. Carried through every relation
+      # derived from this one, for the purpose check.
+      attr_writer :query_terms
+
+      def query_terms = @query_terms || []
+
+      # The order the records are in, as [{ column => :asc/:desc }]: an
+      # order adds to it and reorder replaces it, as in ActiveRecord (a
+      # default scope's order comes first). Carried through every relation
+      # derived from this one.
+      attr_writer :ordering
+
+      def ordering = @ordering || []
+
+      # The default scope (an ActiveRecord relation) these records were
+      # narrowed by (DefaultScopes.narrow), carried through every relation
+      # derived from this one.
+      attr_accessor :default_scope_applied
+
+      # How the records were selected, while that was conditions and orders
+      # only: [base, steps]. +base+ is the relation (or a Proc building it)
+      # the selection started from; +steps+ are [:scope, relation, what] (a
+      # default scope, or an ActiveRecord relation merged in), [:where, hash],
+      # [:order, args] and [:reorder, args]. unscope and rewhere replay it
+      # without what they take off, as ActiveRecord rebuilds its query.
+      # where, order, reorder and merge carry it on; any other query method
+      # (limit, where.not, an SQL fragment, a join) leaves it behind, and an
+      # unscope after it that would change the answer is refused.
+      attr_accessor :plan
+
+      # This relation's plan: +source+'s plus +step+ (nothing if +source+
+      # has none).
+      def continue_plan(source, step)
+        @plan = source.plan && [source.plan[0], source.plan[1] + [step]]
+        self
+      end
+
+      # A limit, offset or page was applied: what the relation holds is a
+      # window of its selection.
+      attr_writer :windowed
+
+      def windowed? = @windowed ? true : false
+
+      # Attributes create_with gives a record built through the relation.
+      attr_writer :create_with_attributes
+
+      def create_with_attributes = @create_with_attributes || {}
+
       def initialize(model_class, records = [])
         @model_class = model_class
         @records = records.to_a
@@ -134,9 +431,64 @@ module Lyra
         relation.selected_columns = selected_columns
         relation.create_attributes = create_attributes
         relation.group_columns = group_columns
+        relation.query_terms = query_terms
+        relation.joined_classes = joined_classes
+        relation.ordering = ordering
+        relation.default_scope_applied = default_scope_applied
+        relation.windowed = windowed?
+        relation.create_with_attributes = create_with_attributes
         relation.extending!(*extensions) if extensions.any?
         relation
       end
+
+      # The models joined into this relation's query, kept when a later call
+      # (group, order) builds a relation without the joined rows: a column
+      # named without its table may be theirs.
+      attr_writer :joined_classes
+
+      def joined_classes
+        ((@joined_classes || []) + joined_associations.values.map { _1.reflection.klass }).uniq
+      end
+
+      # This relation, with +terms+ added to what its query named.
+      def add_query_terms(terms)
+        @query_terms = query_terms + terms if terms.any?
+        self
+      end
+      alias_method :add_query_terms!, :add_query_terms
+
+      # The attribute names this relation's query names (and +extra_terms+),
+      # by model, as Lyra::PurposeBoundReads.named_fields_of gives them for
+      # an ActiveRecord relation: its conditions (a condition on a joined
+      # table counts for that table's model), order keys, group and select
+      # columns, and a subquery's own.
+      def lyra_named_fields(extra_terms = [])
+        lyra_query_names(extra_terms).result
+      end
+
+      # The same as a Lyra::PurposeBoundReads::NamedFields, with what this
+      # relation's subqueries name (#whole).
+      def lyra_query_names(extra_terms = [])
+        named = Lyra::PurposeBoundReads::NamedFields.new
+        named.joined(model_class, joined_classes)
+        (query_terms + extra_terms).each do |kind, term|
+          kind == :conditions ? named.conditions(term, model_class) : named.value(term, model_class)
+        end
+        named.value(group_columns, model_class).value(selected_columns, model_class)
+      end
+
+      # A relation over the records the block selects, keeping this one's
+      # selection (Model.lyra_processable under ES-NoProj).
+      def lyra_select_records(&block)
+        spawn_records(@records.select(&block))
+      end
+
+      # The records as they are, for Lyra's own relations (records is the
+      # application's, checked).
+      def raw_records
+        @records
+      end
+      protected :raw_records
 
       # =========================================================================
       # Enumerable / Array-like interface
@@ -264,6 +616,20 @@ module Lyra
         ))
       end
 
+      # As ActiveRecord's: the one record, RecordNotFound when there is none
+      # and SoleRecordExceeded when there are more.
+      def sole
+        found, undesired = first(2)
+        raise ActiveRecord::RecordNotFound.new("Couldn't find #{model_class.name}", model_class) if found.nil?
+        raise ActiveRecord::SoleRecordExceeded.new(model_class) if undesired
+
+        found
+      end
+
+      def find_sole_by(attributes)
+        where(attributes).sole
+      end
+
       def exists?(conditions = nil)
         case conditions
         when nil, false
@@ -272,8 +638,12 @@ module Lyra
           @records.any? { |r| r.id.to_s == conditions.to_s }
         when Hash
           find_by(conditions).present?
+        when Array
+          # exists?(["title = ?", x]): a fragment, as where takes it (or refuses it).
+          where(*conditions).any?
         else
-          @records.any?
+          # It used to answer whether any record exists, ignoring the condition.
+          raise UnsupportedQuery.new(model_class, "exists?(#{conditions.inspect[0, 60]})")
         end
       end
 
@@ -401,16 +771,24 @@ module Lyra
         joins(*associations)
       end
 
+      # As in ActiveRecord, an order adds to the one the relation has (a
+      # default scope's order, an earlier order call); reorder replaces it.
       def order(*args)
         return self if args.empty?
 
-        keys = order_keys(args)
+        sorted_by(ordering + order_keys(args))
+      end
+
+      def sorted_by(keys)
         sorted = @records.sort do |a, b|
           compare_for_order(a, b, keys)
         end
 
-        spawn_records(sorted)
+        relation = spawn_records(sorted)
+        relation.ordering = keys
+        relation
       end
+      private :sorted_by
 
       # Order arguments as [{ column => :asc/:desc }]: symbols, hashes,
       # "col [ASC|DESC], ..." strings and Arel orderings of a column. Anything
@@ -444,23 +822,30 @@ module Lyra
           raise UnsupportedQuery.new(model_class, "or(#{other.class})")
         end
 
-        spawn_records((@records + other.records).uniq { |record| record.id })
+        spawn_records((@records + other.raw_records.to_a).uniq { |record| record.id })
       end
 
       def reorder(*args)
-        order(*args)
+        keys = args.compact.empty? ? [] : order_keys(args)
+        return sorted_by(keys) if keys.any?
+
+        relation = spawn_records(@records)
+        relation.ordering = []
+        relation
       end
 
       def reverse_order
-        spawn_records(@records.reverse)
+        relation = spawn_records(@records.reverse)
+        relation.ordering = ordering.map { |key| key.transform_values { |direction| direction == :desc ? :asc : :desc } }
+        relation
       end
 
       def limit(count)
-        spawn_records(@records.first(count))
+        spawn_records(@records.first(count)).tap { _1.windowed = true }
       end
 
       def offset(count)
-        spawn_records(@records.drop(count))
+        spawn_records(@records.drop(count)).tap { _1.windowed = true }
       end
 
       # =========================================================================
@@ -507,6 +892,7 @@ module Lyra
         paginated = @records[start_idx, @per_page] || []
 
         result = spawn_records(paginated)
+        result.windowed = true
         result.instance_variable_set(:@current_page, @current_page)
         result.instance_variable_set(:@per_page, @per_page)
         result.instance_variable_set(:@total_records, @records.size)
@@ -557,9 +943,153 @@ module Lyra
         spawn_records([])
       end
 
+      # As Model.unscoped: under ES-NoProj every record of a monitored model,
+      # from the event store, with no default scope.
       def unscoped
-        self
+        return self unless events_only? && model_class.respond_to?(:lyra_monitored) && model_class.lyra_monitored
+
+        EventStoreReader.relation(model_class)
       end
+
+      # unscope(where: :deleted_at), unscope(:where), unscope(:order), and the
+      # scopes made of them (paranoia's with_deleted, discard's
+      # with_discarded). While the relation was selected by conditions and
+      # orders only (its plan), the selection is replayed without what is
+      # taken off, the default scope included, as ActiveRecord rebuilds its
+      # query: Model.with_discarded, Model.where(...).with_discarded,
+      # author.books.where(...).with_discarded. After another query method
+      # (a limit, where.not, an SQL fragment) an unscope that would change
+      # the answer is refused rather than answered short: the records it
+      # would bring back are no longer in the relation.
+      def unscope(*args)
+        args = args.flatten
+        return self if args.empty?
+
+        if plan
+          base, steps = plan
+          return replay_plan(base, unscoped_steps(base, steps, args))
+        end
+
+        unscope_without_plan(args)
+      end
+
+      # As ActiveRecord's: the conditions on these columns are replaced
+      # (unscope, then where), the default scope's included.
+      def rewhere(conditions)
+        raise UnsupportedQuery.new(model_class, "rewhere(#{conditions.inspect[0, 60]})") unless conditions.is_a?(Hash)
+        return self if conditions.empty?
+
+        unscope(where: conditions.keys).where(conditions)
+      end
+
+      def unscope!(*args)
+        replace_with!(unscope(*args))
+      end
+
+      # The plan's base with +steps+ applied.
+      def replay_plan(base, steps)
+        relation = base.is_a?(Proc) ? base.call : base
+        default = nil
+        steps.each do |kind, arg, what|
+          relation =
+            case kind
+            when :scope
+              default = arg if what == :default
+              relation.narrowed_by(arg, what == :default ? DefaultScopes.description(model_class) : what)
+            when :where then relation.where(arg)
+            when :order then relation.order(*arg)
+            when :reorder then relation.reorder(*arg)
+            end
+        end
+        relation = relation.spawn if relation.equal?(base)
+        relation.plan = [base, steps]
+        relation.default_scope_applied = default
+        relation
+      end
+      private :replay_plan
+
+      # +steps+ without what unscope(*args) takes off. A condition the base
+      # itself was read with (an association's foreign key) cannot be taken
+      # off here, and is refused.
+      def unscoped_steps(base, steps, args)
+        args.each do |arg|
+          where_columns, other = unscope_target(arg)
+          if where_columns
+            check_base_conditions!(base, where_columns, args)
+            steps = steps.filter_map do |kind, value, what|
+              next [kind, value, what] unless kind == :where
+
+              kept = where_columns == :all ? {} : value.reject { |key, _| where_columns.include?(column_of(key)) }
+              kept.empty? ? nil : [kind, kept, what]
+            end
+          elsif other == :order
+            steps = steps.reject { |kind, *| kind == :order || kind == :reorder }
+          end
+          steps = steps.map do |kind, value, what|
+            kind == :scope ? [kind, DefaultScopes.built { value.unscope(arg) }, what] : [kind, value, what]
+          end
+        end
+        steps
+      end
+      private :unscoped_steps
+
+      # [columns, nil] for a where unscope (:all for every condition), or
+      # [nil, the clause] for another.
+      def unscope_target(arg)
+        case arg
+        when :where, "where" then [:all, nil]
+        when Hash
+          raise UnsupportedQuery.new(model_class, "unscope(#{arg.inspect})") unless arg.keys.map(&:to_sym) == [:where]
+
+          [Array(arg.values.first).map { |column| column_of(column) }, nil]
+        else [nil, arg.to_sym]
+        end
+      end
+      private :unscope_target
+
+      def column_of(key) = key.to_s.split(".").last.delete('"')
+      private :column_of
+
+      def check_base_conditions!(base, columns, args)
+        return if base.is_a?(Proc)
+
+        named = base.query_terms.flat_map { |kind, term| kind == :conditions && term.is_a?(Hash) ? term.keys.map { column_of(_1) } : [] }
+        hit = columns == :all ? named : named & columns
+        return if hit.empty?
+
+        raise UnsupportedQuery.new(model_class, "unscope(#{args.inspect[1..-2]}) of #{hit.join(', ')}, which already " \
+                                                "selected the relation's records (an association's key, or a condition " \
+                                                "before a limit, where.not or SQL fragment)")
+      end
+      private :check_base_conditions!
+
+      # Without a plan: what the unscope would change must not be in the
+      # relation already. An order can be dropped (records are kept in key
+      # order, as an unordered query may return them).
+      def unscope_without_plan(args)
+        relation = self
+        args.each do |arg|
+          where_columns, other = unscope_target(arg)
+          if default_scope_applied
+            rest = DefaultScopes.built { default_scope_applied.unscope(arg) }
+            if rest.where_clause != default_scope_applied.where_clause || rest.order_values != default_scope_applied.order_values
+              raise UnsupportedQuery.new(model_class, "unscope(#{args.inspect[1..-2]}) after other query methods " \
+                                                      "(the records the default scope leaves out are not in the relation " \
+                                                      "any more: unscope first, as in #{model_class.name}.unscope(...).where(...))")
+            end
+          end
+          if where_columns
+            check_base_conditions!(self, where_columns, args)
+          elsif other == :order && ordering.any?
+            relation = relation.reorder(model_class.primary_key => :asc)
+            relation.ordering = []
+          elsif %i[limit offset].include?(other) && windowed?
+            raise UnsupportedQuery.new(model_class, "unscope(:#{other}) after a #{other}")
+          end
+        end
+        relation
+      end
+      private :unscope_without_plan
 
       def readonly(value = true)
         self
@@ -622,14 +1152,15 @@ module Lyra
       end
 
       def scope_for_create
-        create_attributes
+        create_attributes.merge(create_with_attributes)
       end
 
       # Records created through the relation take its equality conditions
-      # (an association's foreign key), as on ActiveRecord; they are created
-      # through the model, so under ES-NoProj the write is an event.
+      # (an association's foreign key) and create_with's attributes, as on
+      # ActiveRecord; they are created through the model, so under ES-NoProj
+      # the write is an event.
       def new(attributes = nil, &block)
-        model_class.new(create_attributes.merge((attributes || {}).to_h.transform_keys(&:to_s)), &block)
+        model_class.new(scope_for_create.merge((attributes || {}).to_h.transform_keys(&:to_s)), &block)
       end
       alias_method :build, :new
 
@@ -651,6 +1182,118 @@ module Lyra
 
       def find_or_create_by!(attributes, &block)
         find_by(attributes) || create!(attributes, &block)
+      end
+
+      # As ActiveRecord's: the first record the relation selects, or one
+      # built or created with its equality conditions. They used to run on
+      # a bare relation of the model, creating records without them.
+      def first_or_initialize(attributes = nil, &block)
+        first || new(attributes, &block)
+      end
+
+      def first_or_create(attributes = nil, &block)
+        first || create(attributes, &block)
+      end
+
+      def first_or_create!(attributes = nil, &block)
+        first || create!(attributes, &block)
+      end
+
+      # As ActiveRecord: create, and when a unique index of the table would
+      # refuse the record (a record of the model, any of them, already has
+      # its values), the record the relation finds instead. The event store
+      # enforces no index, so the would-be violation is looked for first;
+      # without such an index a record is created, as ActiveRecord creates
+      # one.
+      def create_or_find_by(attributes, &block)
+        unique_conflict?(attributes) ? find_by!(attributes) : create(attributes, &block)
+      end
+
+      def create_or_find_by!(attributes, &block)
+        unique_conflict?(attributes) ? find_by!(attributes) : create!(attributes, &block)
+      end
+
+      def unique_conflict?(attributes)
+        values = scope_for_create.merge(attributes.to_h.transform_keys(&:to_s))
+        indexes = model_class.with_connection { |connection| connection.schema_cache.indexes(model_class.table_name) }
+        indexes.any? do |index|
+          next false unless index.unique && index.columns.is_a?(Array) && index.where.nil? && (index.columns - values.keys).empty?
+
+          conditions = index.columns.to_h { |column| [column, values[column]] }
+          Lyra::PurposeBoundReads.internal(INTERNAL) { EventStoreReader.where(model_class, conditions).exists? }
+        end
+      end
+      private :unique_conflict?
+
+      def create_with(attributes)
+        relation = spawn_records(@records)
+        relation.plan = plan
+        relation.create_with_attributes = attributes.nil? ? {} : create_with_attributes.merge(attributes.to_h.transform_keys(&:to_s))
+        relation
+      end
+
+      def create_with!(attributes)
+        @create_with_attributes = attributes.nil? ? {} : create_with_attributes.merge(attributes.to_h.transform_keys(&:to_s))
+        self
+      end
+
+      # As ActiveRecord's relation update: each selected record updated
+      # (callbacks and validations run; under ES-NoProj each is an event),
+      # or, given an id, that record of the relation.
+      def update(id = :all, attributes)
+        return find(id).tap { _1.update(attributes) } unless id == :all
+
+        records.each { |record| record.update(attributes) }
+      end
+
+      def update!(id = :all, attributes)
+        return find(id).tap { _1.update!(attributes) } unless id == :all
+
+        records.each { |record| record.update!(attributes) }
+      end
+
+      # As ActiveRecord's: each selected record's counters moved by the
+      # given amounts (nil counting as 0), and touch: the timestamps, in
+      # one update_all per set of current values, so each record gets the
+      # event an update_all writes. It used to bump every record of the
+      # model.
+      def update_counters(counters)
+        counters = counters.dup
+        touch = counters.delete(:touch)
+        counters = counters.transform_keys(&:to_s)
+        unknown = counters.keys - model_class.column_names
+        raise UnsupportedQuery.new(model_class, "update_counters(#{unknown.join(', ')})") if unknown.any?
+        return 0 if @records.empty? || counters.empty?
+
+        touched = touch ? model_class.touch_attributes_with_time(*(touch == true ? [] : Array(touch))) : {}
+        groups = @records.group_by { |record| counters.keys.map { |column| record.read_attribute(column) } }
+        model_class.transaction do
+          groups.sum do |values, group|
+            updates = counters.keys.zip(values).to_h { |column, value| [column, (value || 0) + counters[column]] }
+            spawn_records(group).update_all(updates.merge(touched))
+          end
+        end
+      end
+
+      # There is no SQL: the relation is answered from the event store.
+      def to_sql
+        raise UnsupportedQuery.new(model_class, "to_sql (the relation is answered from the event store, not by SQL)")
+      end
+
+      # Hints for the database, which ES-NoProj reads do not reach. A lock
+      # takes no row lock: writes take Lyra's aggregate lock.
+      %i[lock annotate optimizer_hints strict_loading].each do |name|
+        define_method(name) { |*_args| self }
+      end
+
+      # As ActiveRecord defines them: where, then the bulk write. They went
+      # through the scope branch of method_missing and were refused.
+      def delete_by(*args)
+        where(*args).delete_all
+      end
+
+      def destroy_by(*args)
+        where(*args).destroy_all
       end
 
       def limit!(value)
@@ -689,52 +1332,59 @@ module Lyra
         spawn_records(@records.dup)
       end
 
+      # As ActiveRecord's merge: the records both select, in this relation's
+      # order and then the other's. An ActiveRecord relation of the model is
+      # evaluated (CachedRelation#narrowed_by: its where clause, order and
+      # limit; what it unscopes is taken off this one first); a relation read
+      # from the event store is intersected with this one. Anything else
+      # (another model's relation, joins, a window of the other's records)
+      # raises UnsupportedQuery. It used to return this relation unchanged,
+      # and a bulk write after it acted on every record.
       def merge(other, *rest)
-        # For association scopes, just return self since we already have filtered records
-        self
+        merged =
+          case other
+          when nil then self
+          when CachedRelation then merge_events_relation(other)
+          when ActiveRecord::Relation then merge_active_record_relation(other)
+          else raise UnsupportedQuery.new(model_class, "merge(#{other.class})")
+          end
+        rest.empty? ? merged : merged.merge(*rest)
       end
 
       def merge!(other, *rest)
-        self
+        replace_with!(merge(other, *rest))
       end
 
       def bind_attribute(name, value)
         self
       end
 
-      def rewhere(conditions)
-        where(conditions)
-      end
-
       def except(*skips)
-        self
+        unscope(*skips)
       end
 
       def only(*keeps)
         self
       end
 
-      def where!(conditions)
-        # In-place where modification (for AR internal use)
-        # Filter records and update @records directly
-        return self if conditions.nil?
-
-        @records = @records.select do |record|
-          case conditions
-          when Hash
-            conditions.all? { |key, value| matches_value?(record, key, value) }
-          else
-            true
-          end
+      def where!(conditions, *rest)
+        # In-place where (ActiveRecord's internals build relations with it).
+        # Hash conditions only: anything else used to be ignored, keeping
+        # every record.
+        return self if conditions.blank?
+        unless conditions.is_a?(Hash) && rest.empty?
+          raise UnsupportedQuery.new(model_class, "where!(#{[conditions, *rest].inspect[1..-2][0, 60]})")
         end
-        self
+
+        replace_with!(where(conditions))
       end
 
       def order!(*args)
         # In-place order modification
         return self if args.empty?
-        keys = order_keys(args)
+        keys = ordering + order_keys(args)
         @records = @records.sort { |a, b| compare_for_order(a, b, keys) }
+        @ordering = keys
         self
       end
 
@@ -987,45 +1637,111 @@ module Lyra
           return model_class.public_send(method_name)
         end
 
-        # Try to delegate to model class scopes
-        if model_class.respond_to?(method_name)
-          # Execute the scope on a bare unscoped relation to get the where conditions
-          # This works because scopes add where clauses to the relation
-          begin
-            # Temporarily bypass Lyra's read overrides so scope calls go through AR
-            # Without this, scope lambdas that call `where(...)` would hit our override
-            # and return CachedRelation instead of building AR conditions
-            Thread.current[:lyra_bypass_read_override] = true
-            base_relation = model_class.unscoped
-            scope_result = base_relation.public_send(method_name, *args, **kwargs, &block)
-          rescue Lyra::StrictDataAccessViolation
-            # Don't swallow strict data access violations - these are intentional framework errors
-            raise
-          rescue => e
-            # Answering anyway (as this used to, unfiltered) would be wrong.
-            raise UnsupportedQuery.new(model_class, "#{method_name} (it raised #{e.class})")
-          ensure
-            Thread.current[:lyra_bypass_read_override] = nil
-          end
+        # Active Record's own class methods and relation methods that this
+        # class does not evaluate (sole, find_sole_by, invert_where,
+        # find_by_sql, a bang query method, ...): refused before anything
+        # runs. They used to run on a bare relation of the model, past this
+        # relation's conditions: update and update_counters wrote to every
+        # record, first_or_create! created one without the conditions.
+        if active_record_method?(method_name)
+          return model_class.public_send(method_name, *args, **kwargs, &block) if MODEL_READERS.include?(method_name)
 
-          unless scope_result.is_a?(ActiveRecord::Relation)
-            raise UnsupportedQuery.new(model_class, "#{method_name}, which is not a scope")
-          end
-
-          extra = unsupported_clauses(scope_result) - %w[order limit]
-          raise UnsupportedQuery.new(model_class, "scope #{method_name} (it uses #{extra.join(', ')})") if extra.any?
-
-          where_hash = extract_where_conditions(scope_result, strict: true)
-          raise UnsupportedQuery.new(model_class, "scope #{method_name}") if where_hash.nil?
-
-          # A scope's where, then its order and limit, as SQL applies them.
-          relation = where_hash.empty? ? self : where(where_hash)
-          relation = relation.order(*scope_result.order_values) if scope_result.order_values.any?
-          relation = relation.limit(scope_result.limit_value) if scope_result.limit_value
-          relation
-        else
-          super
+          raise UnsupportedQuery.new(model_class, "#{method_name} on a relation")
         end
+
+        return super unless model_class.respond_to?(method_name)
+
+        # A named scope: its relation is built as ActiveRecord builds it
+        # (past Lyra's reads; building runs no query) and this relation is
+        # narrowed by it.
+        return named_scope(method_name, *args, **kwargs, &block) if named_scope?(method_name)
+
+        # Any other class method of the model runs with this relation as the
+        # model's current scope, as ActiveRecord runs it on a relation: its
+        # reads and writes (where, update_all) act on this relation's
+        # records. That holds only where the model's reads answer from the
+        # scope (a monitored model under ES-NoProj); elsewhere they would
+        # read the table, and the call is refused before it runs.
+        unless events_only? && model_class.respond_to?(:lyra_monitored) && model_class.lyra_monitored &&
+               !Thread.current[:lyra_bypass_read_override]
+          raise UnsupportedQuery.new(model_class, "#{method_name}, which is not a scope")
+        end
+
+        result =
+          begin
+            scoping { model_class.public_send(method_name, *args, **kwargs, &block) }
+          rescue NoMethodError => e
+            raise unless e.receiver.is_a?(CachedRelation)
+
+            raise UnsupportedQuery.new(model_class, "#{method_name} (it called #{e.name}, which is not evaluated here)")
+          end
+        result.is_a?(ActiveRecord::Relation) ? narrowed_by(result, method_name.to_s) : result
+      end
+
+      # Readers of the model a scope body may ask its relation for.
+      MODEL_READERS = %i[arel_table table_name primary_key column_names columns_hash attribute_names connection
+                         sanitize_sql sanitize_sql_like sanitize_sql_array predicate_builder type_for_attribute
+                         name base_class].freeze
+
+      def active_record_method?(method_name)
+        unless model_class.respond_to?(method_name)
+          return ActiveRecord::Relation.method_defined?(method_name) || ActiveRecord::Relation.private_method_defined?(method_name)
+        end
+
+        path = model_class.method(method_name).source_location&.first
+        path.nil? || (DefaultScopes.active_record_path?(path) && !path.end_with?("/scoping/named.rb"))
+      end
+      private :active_record_method?
+
+      def named_scope?(method_name)
+        model_class.method(method_name).source_location&.first.to_s.end_with?("/active_record/scoping/named.rb")
+      end
+      private :named_scope?
+
+      def named_scope(method_name, *args, **kwargs, &block)
+        begin
+          # Built past Lyra's read overrides: scope lambdas that call where
+          # build ActiveRecord conditions instead of reading the event store.
+          Thread.current[:lyra_bypass_read_override] = true
+          scope_result = model_class.unscoped.public_send(method_name, *args, **kwargs, &block)
+        rescue Lyra::StrictDataAccessViolation
+          raise
+        rescue => e
+          # Answering anyway (as this used to, unfiltered) would be wrong.
+          raise UnsupportedQuery.new(model_class, "#{method_name} (it raised #{e.class})")
+        ensure
+          Thread.current[:lyra_bypass_read_override] = nil
+        end
+
+        unless scope_result.is_a?(ActiveRecord::Relation)
+          raise UnsupportedQuery.new(model_class, "#{method_name}, which is not a scope")
+        end
+
+        # A scope that unscopes (with_discarded) takes the default scope
+        # off first, as it does on ActiveRecord's relation.
+        base = scope_result.unscope_values.any? ? unscope(*scope_result.unscope_values) : self
+        narrowed = base.narrowed_by(scope_result, "scope #{method_name}")
+        narrowed = narrowed.spawn if narrowed.equal?(base)
+        narrowed.continue_plan(base, [:scope, scope_result, "scope #{method_name}"])
+      end
+      private :named_scope
+
+      # This relation narrowed as an ActiveRecord relation of the same model
+      # selects: its where clause, then its order and limit, as SQL applies
+      # them. Anything else it holds (joins, an SQL fragment, a where.not)
+      # raises UnsupportedQuery naming +what+, rather than answer with records
+      # the relation does not select.
+      def narrowed_by(relation, what)
+        extra = unsupported_clauses(relation) - %w[order limit]
+        raise UnsupportedQuery.new(model_class, "#{what} (it uses #{extra.join(', ')})") if extra.any?
+
+        where_hash = extract_where_conditions(relation, strict: true)
+        raise UnsupportedQuery.new(model_class, what) if where_hash.nil?
+
+        narrowed = where_hash.empty? ? self : where(where_hash)
+        narrowed = narrowed.order(*relation.order_values) if relation.order_values.any?
+        narrowed = narrowed.limit(relation.limit_value) if relation.limit_value
+        narrowed
       end
 
       # Clauses of a scope's relation, other than its where clause, that this
@@ -1126,6 +1842,48 @@ module Lyra
           node.respond_to?(:value) ? node.value : node
         end
       end
+
+      # This relation's state taken from +other+ (the bang methods).
+      def replace_with!(other)
+        %i[@records @ordering @query_terms @create_attributes @create_with_attributes @plan @default_scope_applied
+           @selected_columns @group_columns @windowed @rows @joins @joined_classes].each do |ivar|
+          instance_variable_set(ivar, other.instance_variable_get(ivar))
+        end
+        self
+      end
+      protected :replace_with!
+
+      def merge_events_relation(other)
+        unless other.model_class == model_class
+          raise UnsupportedQuery.new(model_class, "merge of a #{other.model_class.name} relation")
+        end
+        raise UnsupportedQuery.new(model_class, "merge of a relation with a limit or offset") if other.windowed?
+        raise UnsupportedQuery.new(model_class, "merge of a joined relation") if other.joined_associations.any? || joined_associations.any?
+
+        pk = model_class.primary_key
+        keys = other.raw_records.to_a.to_h { |record| [record.read_attribute(pk), true] }
+        merged = spawn_records(@records.select { |record| keys.key?(record.read_attribute(pk)) })
+        merged.add_query_terms(other.query_terms)
+        merged.create_attributes = create_attributes.merge(other.create_attributes)
+        merged.create_with_attributes = create_with_attributes.merge(other.create_with_attributes)
+        merged = merged.send(:sorted_by, ordering + other.ordering) if other.ordering.any?
+        merged
+      end
+      private :merge_events_relation
+
+      def merge_active_record_relation(other)
+        unless other.model == model_class
+          raise UnsupportedQuery.new(model_class, "merge of a #{other.model.name} relation")
+        end
+
+        base = other.unscope_values.any? ? unscope(*other.unscope_values) : self
+        merged = base.narrowed_by(other, "merge(#{other.class.name})")
+        merged = merged.spawn if merged.equal?(self)
+        merged.continue_plan(base, [:scope, other, "merge(#{other.class.name})"])
+        merged.create_with_attributes = create_with_attributes.merge(other.create_with_value.stringify_keys)
+        merged
+      end
+      private :merge_active_record_relation
 
       private
 
@@ -1254,6 +2012,16 @@ module Lyra
       end
 
       def matches_value?(record, key, value)
+        # A tuple condition, where([:a, :b] => [[1, 2], ...]), as ActiveRecord
+        # builds for a record's query constraints (an association's
+        # delete(record)): the record matches one of the tuples.
+        if key.is_a?(Array)
+          return Array(value).any? do |tuple|
+            tuple = Array(tuple)
+            tuple.size == key.size && key.zip(tuple).all? { |column, v| matches_value?(record, column, v) }
+          end
+        end
+
         record_value = record.send(key)
         # A record, or a relation of records, stands for its primary key, as in
         # ActiveRecord: where(variant_id: [variant]) matched nothing, and

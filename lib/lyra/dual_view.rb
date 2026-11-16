@@ -28,9 +28,10 @@ module Lyra
     # CRUD view - current database state. Read as the caller reads: under
     # reads_without_purpose :deny it needs a purpose that allows the declared
     # fields, as any read does. Lyra's own comparisons (the mode gate, the
-    # sampler, repair) read as Lyra.
+    # sampler, repair) read as Lyra. The row is looked up by the model's
+    # primary key, whatever its column is called.
     def crud_state
-      record = model_class.find_by(id: model_id)
+      record = model_class.find_by(Lyra.key_column(model_class) => model_id)
 
       return { exists: false } unless record
 

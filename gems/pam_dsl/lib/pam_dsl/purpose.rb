@@ -1,8 +1,9 @@
 module PamDsl
   # Represents a processing purpose
   class Purpose
-    attr_reader :name, :description, :legal_basis, :art9_bases, :required_fields, :optional_fields, :metadata,
-                :data_subjects, :recipients, :transfers
+    attr_reader :name, :description, :legal_basis, :art9_bases, :art10_authorisations, :required_fields,
+                :optional_fields, :metadata, :data_subjects, :recipients, :transfers,
+                :restriction_exceptions, :important_public_interest_reference
 
     # Art. 9(2) sub-clauses permitting processing of special-category data
     ART9_BASES = [
@@ -41,6 +42,7 @@ module PamDsl
       # register printed as Art. 6(1)(a) and nothing checked.
       @legal_basis = UNDETERMINED
       @art9_bases = []
+      @art10_authorisations = []
       @lia_documented = false
       @required_fields = []
       @optional_fields = []
@@ -48,6 +50,10 @@ module PamDsl
       @data_subjects = []
       @recipients = []
       @transfers = nil # nil: not declared; []: declared none
+      @restriction_exceptions = []
+      @important_public_interest_reference = nil
+      @direct_marketing = false
+      @research_or_statistics = nil # nil: not research; else { public_interest_task: true|false }
     end
 
     # Set description
@@ -89,6 +95,24 @@ module PamDsl
           raise Error, "Invalid Art. 9(2) basis: #{b}. Must be one of #{ART9_BASES.join(', ')}"
         end
         @art9_bases << b unless @art9_bases.include?(b)
+      end
+      self
+    end
+
+    # Declare what authorises processing Art. 10 data (criminal convictions and
+    # offences) for this purpose: the official authority under whose control it
+    # is processed, or the Union or Member State law that authorises it, named
+    # in text (the act and article). Art. 10 has no list of grounds like
+    # Art. 9(2), so the authorisation is named, not chosen from a set; an
+    # Art. 9(2) basis does not stand in for it. Multiple calls accumulate.
+    def art10_authorisation(*authorisations)
+      authorisations.flatten.each do |authorisation|
+        unless authorisation.is_a?(String) && !authorisation.strip.empty?
+          raise Error, "Invalid Art. 10 authorisation: #{authorisation.inspect}. Name the official authority " \
+                       "or the Union or Member State law that authorises the processing, as text"
+        end
+        text = authorisation.strip
+        @art10_authorisations << text unless @art10_authorisations.include?(text)
       end
       self
     end
@@ -148,9 +172,104 @@ module PamDsl
       self
     end
 
+    # ── Arts. 18 and 21: what the purpose does when a subject exercises a right ──
+
+    # The Art. 18(2) grounds on which a purpose may go on processing a subject's
+    # data while its processing is restricted. Storage needs none: it is not a
+    # purpose, and Art. 18(2) excepts it.
+    RESTRICTION_EXCEPTIONS = {
+      consent: "the data subject's consent",
+      legal_claims: "the establishment, exercise or defence of legal claims",
+      protection_of_rights: "the protection of the rights of another natural or legal person",
+      important_public_interest: "important public interest of the Union or of a Member State"
+    }.freeze
+
+    # Declare that the purpose continues while a subject's processing is
+    # restricted, on one or more Art. 18(2) grounds. :important_public_interest
+    # needs reference: naming the Union or Member State law. The :consent
+    # exception holds only with an active consent for (purpose, subject) granted
+    # after the restriction was requested. Multiple calls accumulate.
+    def allowed_when_restricted(*exceptions, reference: nil)
+      exceptions = exceptions.flatten.map(&:to_sym)
+      raise Error, "allowed_when_restricted needs at least one Art. 18(2) exception" if exceptions.empty?
+
+      unknown = exceptions - RESTRICTION_EXCEPTIONS.keys
+      if unknown.any?
+        raise Error, "Invalid Art. 18(2) exception: #{unknown.join(', ')}. " \
+                     "Must be one of #{RESTRICTION_EXCEPTIONS.keys.join(', ')}"
+      end
+      apply_public_interest_reference(exceptions, reference)
+      @restriction_exceptions |= exceptions
+      self
+    end
+
+    # Does the purpose declare this Art. 18(2) exception?
+    def continues_under_restriction?(exception)
+      @restriction_exceptions.include?(exception.to_sym)
+    end
+
+    # Mark the purpose as direct marketing (Art. 21(2)): the subject can object
+    # whatever the basis, and an objection is upheld at once (Art. 21(3)).
+    def direct_marketing!
+      raise Error, "Purpose #{@name} cannot be both direct marketing and research or statistics" if @research_or_statistics
+
+      @direct_marketing = true
+      self
+    end
+
+    def direct_marketing?
+      @direct_marketing
+    end
+
+    # Mark the purpose as scientific or historical research or statistics under
+    # Art. 89(1). The subject can object (Art. 21(6)) unless the processing is
+    # necessary for a task carried out in the public interest, which the
+    # controller states with public_interest_task:.
+    def research_or_statistics!(public_interest_task:)
+      unless [true, false].include?(public_interest_task)
+        raise Error, "research_or_statistics! needs public_interest_task: true or false"
+      end
+      raise Error, "Purpose #{@name} cannot be both research or statistics and direct marketing" if @direct_marketing
+
+      @research_or_statistics = { public_interest_task: public_interest_task }.freeze
+      self
+    end
+
+    # The research marker as declared: nil, or { public_interest_task: true|false }.
+    def research_or_statistics
+      @research_or_statistics
+    end
+
+    def research_or_statistics?
+      !@research_or_statistics.nil?
+    end
+
+    def public_interest_task?
+      @research_or_statistics&.fetch(:public_interest_task) == true
+    end
+
+    # The article that gives a subject the right to object to this purpose, or
+    # nil when there is none: "Art. 21(2)" for direct marketing (any basis);
+    # "Art. 21(1)" for the bases :public_task and :legitimate_interests,
+    # research or not (Art. 21(1) covers all processing on Art. 6(1)(e) or (f),
+    # and Art. 21(6) does not take it away); "Art. 21(6)" for research or
+    # statistics on another basis, unless it is necessary for a task in the
+    # public interest. Derived, never declared.
+    def objectable
+      return "Art. 21(2)" if direct_marketing?
+      return "Art. 21(1)" if %i[public_task legitimate_interests].include?(@legal_basis)
+
+      "Art. 21(6)" if research_or_statistics? && !public_interest_task?
+    end
+
     # True when the purpose carries at least one Art. 9(2) basis (Def. 1, Condition 5)
     def art9_basis?
       @art9_bases.any?
+    end
+
+    # True when the purpose declares at least one Art. 10 authorisation
+    def art10_authorised?
+      @art10_authorisations.any?
     end
 
     # Check if purpose requires consent
@@ -175,6 +294,21 @@ module PamDsl
     # Check if a field is allowed for this purpose
     def allows_field?(field_name)
       all_fields.include?(field_name.to_sym)
+    end
+
+    private
+
+    # :important_public_interest names its law; a reference names nothing else.
+    def apply_public_interest_reference(exceptions, reference)
+      if exceptions.include?(:important_public_interest)
+        unless reference.is_a?(String) && !reference.strip.empty?
+          raise Error, "allowed_when_restricted :important_public_interest needs reference: naming the Union " \
+                       "or Member State law (Art. 18(2))"
+        end
+        @important_public_interest_reference = reference.strip
+      elsif reference
+        raise Error, "reference: names the law of an :important_public_interest exception; none is declared here"
+      end
     end
   end
 end

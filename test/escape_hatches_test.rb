@@ -121,7 +121,7 @@ class EscapeHatchesTest < Minitest::Test
     Lyra::PurposeBoundReads.internal(lyra_internal) do
       assert_raises(Lyra::InternalApiError) { Lyra::PurposeBoundReads.internal { 1 } }
 
-      assert Thread.current[:lyra_internal_read], "the outer internal read is still on"
+      assert Lyra::PurposeBoundReads.internal?, "the outer internal read is still on"
     end
   end
 

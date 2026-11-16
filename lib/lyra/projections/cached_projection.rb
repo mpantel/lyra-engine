@@ -337,7 +337,8 @@ module Lyra
         # +base+: the attributes the +events+ are applied onto (the state at
         # an earlier event), instead of an empty record.
         def reconstruct_state(model_class, id, events, base = nil)
-          attributes = base ? base.dup : { "id" => id }
+          key = Lyra.key_column(model_class)
+          attributes = base ? base.dup : { key => id }
 
           events.each do |event|
             case Lyra::Event.operation_of(event)
@@ -353,8 +354,9 @@ module Lyra
             end
           end
 
-          # Convert id to integer if needed
-          attributes["id"] = id.to_i if id.to_s =~ /^\d+$/
+          # The key as the row holds it (an integer key from the stream name's
+          # text), under the primary key column
+          attributes[key] = Lyra.key_value(model_class, id)
           attributes
         end
 

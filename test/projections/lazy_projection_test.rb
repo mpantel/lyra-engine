@@ -207,6 +207,96 @@ class LazyProjectionTest < Minitest::Test
     ActiveRecord::ConnectionAdapters::PostgreSQLAdapter.define_method(:table_exists?, exists) if exists
   end
 
+  # The freshness check before every read reads the checkpoint and the
+  # newest event id in one statement; it took two.
+  def test_an_up_to_date_read_checks_the_log_in_one_query
+    author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    LazyAuthor.count
+
+    sql = statements { assert_equal "Ann", LazyAuthor.find(author.id).name }
+
+    lazy = sql.grep(/event_store_events|#{LazyProjection::TABLE}/o)
+    assert_equal 1, lazy.size, "the freshness check issued:\n#{lazy.join("\n")}"
+    assert_equal 2, sql.size, "a check and the read itself; issued:\n#{sql.join("\n")}"
+  end
+
+  # A catch-up that finds nothing to apply (another reader got there first,
+  # or an open gap is re-checked and still empty) used to rewrite the
+  # checkpoint with the same values, under the lock every other reader waits on.
+  def test_a_catch_up_that_applies_nothing_writes_no_checkpoint
+    LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    LazyAuthor.count
+    missing = raw("SELECT MAX(id) FROM event_store_events").to_i + 1_000_000
+    raw("UPDATE #{LazyProjection::TABLE} SET gaps = '{\"#{missing}\":#{Time.now.to_i}}'")
+    LazyProjection.instance_variable_set(:@gaps_checked_at, nil) # due for a re-check
+
+    sql = statements { assert_equal 0, LazyProjection.catch_up! }
+
+    assert sql.any? { |s| s.include?("WHERE id IN (#{missing})") }, "the open gap was re-checked"
+    assert_empty sql.grep(/\A\s*(UPDATE|INSERT)/i).grep(/#{LazyProjection::TABLE}/o)
+    assert_equal({ missing => LazyProjection.checkpoint.last[missing] }, LazyProjection.checkpoint.last)
+  end
+
+  # A reader that finds another reader catching up waits for it to end and
+  # then reads the checkpoint again; it does not queue for the lock to apply
+  # the same events a second time.
+  def test_a_reader_waiting_on_a_running_catch_up_does_not_repeat_it
+    ann = LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    holder = hold_catch_up
+    sql = name = nil
+    reader = in_thread { sql = statements { name = LazyAuthor.find(ann.id).name } }
+    wait_until_waiting_on_the_lock
+
+    holder.release
+    reader.join
+    assert_equal "Ann", name
+
+    assert_empty sql.grep(/pg_advisory_xact_lock\(/), "the reader queued for the lock:\n#{sql.join("\n")}"
+    assert_empty sql.grep(/WHERE id > /), "the reader caught up again:\n#{sql.join("\n")}"
+    assert_empty sql.grep(/\A\s*(UPDATE|INSERT)/i).grep(/#{LazyProjection::TABLE}/o)
+  end
+
+  # What the reader sees after waiting includes every event committed before
+  # its read, also those the catch-up it waited for did not get to.
+  def test_a_reader_waiting_on_a_running_catch_up_sees_what_was_committed_before_its_read
+    LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    holder = hold_catch_up # has applied Ann, not yet committed
+    LazyAuthor.create!(name: "Bea", email: "bea@example.com") # committed after it looked
+    reader = in_thread { LazyAuthor.order(:name).pluck(:name) }
+    wait_until_waiting_on_the_lock
+
+    holder.release
+    assert_equal %w[Ann Bea], reader.value
+  end
+
+  # A reader's own write, still uncommitted, can fall below a checkpoint
+  # another reader's catch-up moved past it; that catch-up lists its id as
+  # missing. Waiting for that catch-up must not hide the write from the
+  # reader that made it: the reader's own events are visible to it, so it
+  # catches up itself, and the missing event is replayed.
+  def test_a_reader_waiting_on_a_running_catch_up_sees_its_own_uncommitted_write
+    LazyAuthor.create!(name: "Ann", email: "ann@example.com")
+    LazyAuthor.count
+    wrote = Queue.new
+    go = Queue.new
+    reader = in_thread do
+      ActiveRecord::Base.transaction do
+        LazyAuthor.create!(name: "Own", email: "own@example.com")
+        wrote << true
+        go.pop
+        LazyAuthor.order(:name).pluck(:name)
+      end
+    end
+    wrote.pop
+    LazyAuthor.create!(name: "Bea", email: "bea@example.com") # a later id, committed
+    holder = hold_catch_up # passes the reader's event, listed as missing
+    go << true
+    wait_until_waiting_on_the_lock
+
+    holder.release
+    assert_equal %w[Ann Bea Own], reader.value
+  end
+
   def test_lazy_mode_needs_event_sourcing_mode
     Lyra.config.enable_monitor!
     author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")
@@ -218,6 +308,58 @@ class LazyProjectionTest < Minitest::Test
   private
 
   def raw(sql) = ActiveRecord::Base.connection.select_value(sql)
+
+  # The SQL this thread issues in the block, schema queries excluded.
+  def statements
+    seen = []
+    thread = Thread.current
+    subscription = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      next unless Thread.current == thread
+      next if payload[:name].to_s == "SCHEMA" || payload[:cached]
+
+      seen << payload[:sql].to_s
+    end
+    yield
+    seen
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscription)
+  end
+
+  def in_thread(&block)
+    Thread.new { ActiveRecord::Base.connection_pool.with_connection(&block) }.tap { |t| t.report_on_exception = false }
+  end
+
+  # A reader in another connection that has caught up in its own transaction
+  # and keeps it open: the catch-up lock stays taken until release.
+  Holder = Struct.new(:thread, :go) do
+    def release
+      go << true
+      thread.join
+    end
+  end
+
+  def hold_catch_up
+    held = Queue.new
+    go = Queue.new
+    thread = in_thread do
+      ActiveRecord::Base.transaction do
+        LazyAuthor.count
+        held << true
+        go.pop
+      end
+    end
+    held.pop
+    Holder.new(thread, go)
+  end
+
+  # Until some session waits for an advisory lock it has not been granted.
+  def wait_until_waiting_on_the_lock
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    until raw("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted").to_i.positive?
+      flunk "no reader waits on the catch-up lock" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      sleep 0.01
+    end
+  end
 
   def event_ids = ActiveRecord::Base.connection.select_values("SELECT id FROM event_store_events").map(&:to_i)
 

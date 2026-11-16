@@ -36,8 +36,9 @@ module Lyra
             fk_value = send(foreign_key)
             return nil if fk_value.nil?
 
-            # Try database first (fast path)
-            associated = class_name.constantize.find_by(id: fk_value)
+            # Try database first (fast path), by the target's primary key
+            target = class_name.constantize
+            associated = target.find_by(Lyra.key_column(target) => fk_value)
             return associated if associated
 
             # Fall back to event store reconstruction (slow path)

@@ -343,6 +343,12 @@ module Lyra
     # Detect if this is an association nullify operation (dependent: :nullify)
     # Rails sets a single foreign key column to NULL when destroying parent records
     def association_nullify_update?(updates)
+      StrictDataAccessRelation.nullify_update?(updates)
+    end
+
+    # The same test for the events-only store, where the association writes
+    # through the event-backed relation (AssociationInterceptor).
+    def self.nullify_update?(updates)
       return false unless updates.is_a?(Hash)
       return false unless updates.size == 1
 
@@ -359,7 +365,9 @@ module Lyra
       # Get the records being updated with their current values
       # In ES Disabled mode, records don't exist in DB, so we need to query
       # the event store via the model's read path (which uses CachedRelation)
-      records_data = fetch_affected_records_for_nullify(column)
+      # Lyra's own read, for the events: the write itself is checked
+      # (Lyra::PurposeBoundReads::RelationCheck).
+      records_data = Lyra::PurposeBoundReads.internal(INTERNAL) { fetch_affected_records_for_nullify(column) }
 
       records_data.each do |id, old_value|
         Lyra::BypassEvents.publish(klass, id, :updated,

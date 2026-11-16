@@ -2,6 +2,12 @@ require "test_helper"
 
 module PamDsl
   class PIIDetectorTest < Minitest::Test
+    # Several tests switch the process-wide PIIDetector.partial_match; restore
+    # the default even when an assertion fails before the test resets it.
+    def teardown
+      PIIDetector.reset!
+    end
+
     # ===========================================================================
     # Basic Detection Tests
     # ===========================================================================

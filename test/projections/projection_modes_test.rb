@@ -167,7 +167,7 @@ module Lyra
         end
 
         model_class.define_singleton_method(:where) do |conditions|
-          where_id = conditions[:id]
+          where_id = conditions.transform_keys(&:to_s)["id"] # the primary key column
           where_result
         end
 
@@ -194,7 +194,7 @@ module Lyra
         end
 
         model_class.define_singleton_method(:where) do |conditions|
-          where_id = conditions[:id]
+          where_id = conditions.transform_keys(&:to_s)["id"] # the primary key column
           where_result
         end
 

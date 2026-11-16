@@ -176,3 +176,226 @@ class RetentionTest < Minitest::Test
     conn.execute("DELETE FROM event_store_events")
   end
 end
+
+# Lyra::Retention in every mode, from one table of expectations. In ES-NoProj
+# the event store is the only store (the table is empty): the candidates, and
+# the records retention acts on, come from the events, and a deletion is an
+# event. A record its model's default scope leaves out (soft-deleted) is
+# still retention's to act on, in every mode.
+class RetentionModesTest < Minitest::Test
+  TABLE = :ret_items
+
+  MODES = {
+    monitor: -> { Lyra.config.enable_monitor! },
+    hijack: -> { Lyra.config.enable_hijack! },
+    es_sync: lambda {
+      Lyra.config.enable_event_sourcing!
+      Lyra.config.projection_mode = :sync
+    },
+    es_lazy: lambda {
+      Lyra.config.enable_event_sourcing!
+      Lyra.config.projection_mode = :lazy
+    },
+    es_noproj: lambda {
+      Lyra.config.enable_event_sourcing!
+      Lyra.config.projection_mode = :disabled
+    }
+  }.freeze
+
+  # scenario => [the rule's on_expiry, the run's outcome, the record after it]
+  SCENARIOS = {
+    dry_run: [:anonymize, :would_erase, :untouched],
+    anonymize: [:anonymize, :erased, :anonymized],
+    anonymize_soft_deleted: [:anonymize, :erased, :anonymized],
+    hard_delete: [:hard_delete, :deleted, :destroyed],
+    soft_delete: [:soft_delete, :soft_deleted, :soft_deleted],
+    restricted_anonymize: [:anonymize, :restricted, :untouched],
+    restricted_hard_delete: [:hard_delete, :restricted, :untouched],
+    restricted_soft_delete: [:soft_delete, :restricted, :untouched]
+  }.freeze
+
+  def setup
+    skip "Requires Rails and database" unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connection.table_exists?(:users)
+    skip "Requires pam_dsl" unless Lyra.pam_dsl_available?
+
+    PamDsl.reset!
+    ActiveRecord::Base.connection.create_table(TABLE, force: true) do |t|
+      t.string :name
+      t.string :email
+      t.datetime :deleted_at
+      t.timestamps
+    end
+    Object.send(:remove_const, :RetItem) if defined?(RetItem)
+    Object.const_set(:RetItem, Class.new(ActiveRecord::Base) do
+      self.table_name = "ret_items"
+      default_scope { where(deleted_at: nil) }
+    end)
+    RetItem.reset_column_information
+    RetItem.include(Lyra::Interceptors::CrudInterceptor)
+    RetItem.monitor_with_lyra(privacy_policy: :ret_item_policy)
+    Lyra.config.monitor_model(RetItem, privacy_policy: :ret_item_policy)
+    clean
+    Lyra.config.retention_executor = true
+  end
+
+  def teardown
+    return unless defined?(RetItem)
+
+    Lyra.config.retention_executor = false
+    Lyra.config.projection_mode = :sync
+    Lyra.config.enable_monitor!
+    clean
+    Lyra.config.monitored_models.delete_if { |m| m.name == "RetItem" }
+    Object.send(:remove_const, :RetItem)
+    ActiveRecord::Base.connection.drop_table(TABLE, if_exists: true)
+    PamDsl.reset!
+  end
+
+  MODES.each_key do |mode|
+    SCENARIOS.each do |scenario, (strategy, outcome, after)|
+      define_method("test_#{scenario}_in_#{mode}") { run_scenario(mode, scenario, strategy, outcome, after) }
+    end
+  end
+
+  # The anchor column (config.retention_anchors) is read from the state the
+  # events give the record.
+  def test_the_named_anchor_is_read_from_the_events_in_es_noproj
+    MODES.fetch(:es_noproj).call
+    define_policy(:anonymize)
+    Lyra.config.retention_anchors = { "RetItem" => :deleted_at }
+    item = RetItem.create!(name: "Ann", email: "ann@example.com")
+    assert_empty apply(dry_run: true).actions, "no deleted_at: the period has not started"
+
+    RetItem.unscoped.find(item.id).update!(deleted_at: Time.current)
+    assert_equal [:would_erase], apply(dry_run: true).actions.map(&:outcome)
+  ensure
+    Lyra.config.retention_anchors = {}
+  end
+
+  # lyra:retention:apply in ES-NoProj: what it would do, then what it did.
+  def test_the_rake_task_in_es_noproj
+    MODES.fetch(:es_noproj).call
+    define_policy(:anonymize)
+    item = RetItem.create!(name: "Ann", email: "ann@example.com")
+
+    dry = rake_retention("DRY_RUN" => "1")
+    assert_match(/would act on 1 records: 1 would_erase/, dry)
+    assert_match(/RetItem #{item.id}: anonymize email, name -> would_erase/, dry)
+
+    done = rake_retention
+    assert_match(/acted on 1 records: 1 erased/, done)
+    assert_equal [nil, nil], state_of(item).values_at("name", "email")
+  end
+
+  private
+
+  def run_scenario(mode, scenario, strategy, outcome, after)
+    MODES.fetch(mode).call
+    define_policy(strategy)
+    item = RetItem.create!(name: "Ann", email: "ann@example.com")
+    RetItem.unscoped.find(item.id).update!(deleted_at: Time.current) if scenario == :anonymize_soft_deleted
+    if scenario.to_s.start_with?("restricted")
+      PamDsl.rights.restrict!(subject: "RetItem$#{item.id}", ground: :needed_for_legal_claims)
+    end
+    before = state_of(item)
+
+    result = nil
+    table_reads = statements(/ret_items/) { result = apply(dry_run: scenario == :dry_run) }
+
+    if mode == :es_noproj
+      assert_nil row_of(item), "es_noproj: the events are the only store"
+      assert_empty table_reads, "es_noproj: retention does not read or write the table"
+    end
+    assert_equal [[item.id.to_s, strategy, outcome]], result.actions.map { [_1.id.to_s, _1.strategy, _1.outcome] },
+                 "#{mode}: #{result.actions.map(&:to_s)}"
+    case after
+    when :untouched
+      assert_equal before, state_of(item), "#{mode}: nothing done"
+    when :anonymized
+      # (nullable columns: erasure leaves nil)
+      assert_equal [nil, nil], state_of(item).values_at("name", "email"), "#{mode}: events"
+      refute_match(/Ann|ann@example/, stream(item).map { _1.data.to_s }.join, "#{mode}: no event keeps them")
+      assert_equal [nil, nil], row_of(item).values_at("name", "email"), "#{mode}: row" if row_kept?(mode)
+    when :destroyed
+      assert_equal :destroyed, Lyra::Event.operation_of(stream(item).last), "#{mode}: a destroy event"
+      assert_nil row_of(item), "#{mode}: row" if row_kept?(mode)
+    when :soft_deleted
+      assert_equal :updated, Lyra::Event.operation_of(stream(item).last), "#{mode}: an update event"
+      refute_nil state_of(item)["deleted_at"], "#{mode}: events"
+      refute_nil row_of(item)["deleted_at"], "#{mode}: row" if row_kept?(mode)
+    end
+    return if %i[dry_run restricted].include?(scenario) || outcome == :restricted
+
+    assert_empty apply.actions, "#{mode}: a second run has nothing to do"
+  end
+
+  # The modes whose table follows each write (ES-Lazy's catches up on reads).
+  def row_kept?(mode) = %i[monitor hijack es_sync].include?(mode)
+
+  def define_policy(strategy)
+    PamDsl.reset!
+    PamDsl.define_policy(:ret_item_policy) do
+      field :email, type: :email, sensitivity: :confidential
+      field :name, type: :name
+      purpose :contact do
+        basis :contract
+        requires :email, :name
+      end
+      retention do
+        for_model("RetItem") do
+          keep_for 1.year
+          on_expiry strategy
+        end
+      end
+    end
+  end
+
+  def apply(dry_run: false)
+    Lyra::Retention.apply!(models: [RetItem], dry_run: dry_run, now: Time.current + 2.years)
+  end
+
+  def rake_retention(env = {})
+    require "rake"
+    saved = %w[MODELS DRY_RUN].to_h { [_1, ENV[_1]] }
+    ENV["MODELS"] = "RetItem"
+    ENV.delete("DRY_RUN")
+    ENV.update(env)
+    Rake.application = Rake::Application.new
+    Rake::Task.define_task(:environment)
+    load File.expand_path("../lib/tasks/lyra_mode.rake", __dir__)
+    later = Time.current + 2.years
+    out, = capture_io { Time.stub(:current, later) { Rake::Task["lyra:retention:apply"].invoke } }
+    out
+  ensure
+    saved&.each { |k, v| v.nil? ? ENV.delete(k) : ENV[k] = v }
+    Rake.application = nil
+  end
+
+  # The record as its events give it (attribute names as strings).
+  def state_of(item)
+    (Lyra::DualView.new(RetItem, item.id).event_sourced_state[:state] || {}).transform_keys(&:to_s)
+  end
+
+  def row_of(item) = ActiveRecord::Base.connection.select_one("SELECT * FROM ret_items WHERE id = #{item.id}")
+
+  def stream(item) = Lyra.config.event_store.read.stream("RetItem$#{item.id}").to_a
+
+  # The SQL statements matching +pattern+ run in the block.
+  def statements(pattern)
+    found = []
+    subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      found << payload[:sql] if payload[:sql].match?(pattern)
+    end
+    yield
+    found
+  ensure
+    ActiveSupport::Notifications.unsubscribe(subscriber)
+  end
+
+  def clean
+    conn = ActiveRecord::Base.connection
+    conn.execute("DELETE FROM ret_items") if conn.table_exists?(TABLE)
+    conn.execute("DELETE FROM event_store_events_in_streams")
+    conn.execute("DELETE FROM event_store_events")
+  end
+end

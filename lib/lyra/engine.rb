@@ -63,9 +63,13 @@ module Lyra
 
       # Install strict data access relation extension for update_all/delete_all
       # This intercepts bulk operations on relations (Model.where(...).update_all)
+      # Then the purpose-bound query hooks (Lyra::PurposeBoundReads), above
+      # it: a query refused for its purpose is refused before a bulk write
+      # snapshots or publishes anything.
       initializer "lyra.install_strict_data_access", after: "lyra.inject_interceptors" do
         ActiveSupport.on_load(:active_record) do
           ActiveRecord::Relation.prepend(Lyra::StrictDataAccessRelation)
+          Lyra::PurposeBoundReads.install!
         end
       end
 
@@ -82,6 +86,27 @@ module Lyra
         ActiveSupport.on_load(:active_job) do
           before_perform { Lyra::ModeSync.maybe_sync! }
         end
+      end
+
+      # Lyra::Rights: the durable store for the subject's rights (Arts. 18 and
+      # 21) and for consent, and the subject key resolver, installed into PAM
+      # DSL when both are loaded (lyra/rights does it on load). At boot, after
+      # the application's initializers, only what is still unset is installed
+      # again: a store or resolver the application installed there is kept
+      # (its way to opt out). The resolver's cached plans go with each code
+      # reload.
+      # Each web request is a checking scope (Lyra::Rights::Middleware): the
+      # rights are read afresh at its first check. Jobs include
+      # Lyra::Rights::Job when lyra/rights loads.
+      initializer "lyra.rights_scope" do |app|
+        app.config.middleware.use Lyra::Rights::Middleware if defined?(Lyra::Rights::Middleware)
+      end
+
+      initializer "lyra.rights", after: :load_config_initializers do |app|
+        next unless defined?(Lyra::Rights)
+
+        Lyra::Rights.install!(only_unset: true)
+        app.config.to_prepare { Lyra::Rights::SubjectKeys.reset! }
       end
 
       # Lyra::Correlation::Middleware and Lyra::Correlation::Job: the writes of

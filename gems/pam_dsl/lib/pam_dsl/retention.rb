@@ -71,7 +71,27 @@ module PamDsl
     # Set default retention duration
     def default(duration)
       @default_duration = duration
+      @default_declared = true
       self
+    end
+
+    # Whether the policy declared its default (`default ...`); otherwise the
+    # 7 years above is PAM's, not the controller's.
+    def default_declared?
+      @default_declared == true
+    end
+
+    # The period the policy itself declares for a model (and field): the
+    # field's own, else the model rule's, else a declared default; nil when
+    # the policy declares none (PAM's own 7-year default is not a
+    # declaration). What a data subject's copy reports (Art. 15(1)(d)).
+    def declared_duration_for(model_class, field_name: nil)
+      rule = rule_for(model_class)
+      own = rule && field_name && rule.field_overrides[field_name.to_sym]
+      return own if own
+      return rule.duration if rule&.duration
+
+      default_declared? ? @default_duration : nil
     end
 
     # Define retention rule for a model

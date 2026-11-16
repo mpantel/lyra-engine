@@ -54,7 +54,16 @@ module Lyra
           target_klass = lyra_resolve_target_class
           return nil unless target_klass
 
-          Lyra::Projections::EventStoreReader.find(target_klass, foreign_key_value)
+          # The record is returned to the application: checked as a loaded
+          # row is by after_find (Lyra::PurposeBoundReads), consent included.
+          # As ActiveRecord's association scope, it is read through the
+          # target's default scopes, less what the association's scope
+          # unscopes (belongs_to :variant, -> { with_discarded }).
+          record = Lyra::Projections::EventStoreReader.find(target_klass, foreign_key_value)
+          default_scope = record && Lyra::Projections::DefaultScopes.for_association(target_klass, reflection, owner)
+          record = nil if default_scope && !Lyra::Projections::DefaultScopes.admits?(target_klass, record, default_scope)
+          Lyra::PurposeBoundReads.check(record) if record
+          record
         end
       end
 
@@ -82,10 +91,16 @@ module Lyra
           owner_key_value = owner.read_attribute(reflection.active_record_primary_key)
           return nil if owner_key_value.nil?
 
-          Lyra::Projections::EventStoreReader.find_by(
-            reflection.klass,
-            { reflection.foreign_key => owner_key_value }
+          # Through the target's default scopes, as the belongs_to above: a
+          # soft-deleted record is not the one the owner has.
+          klass = reflection.klass
+          record = Lyra::Projections::DefaultScopes.find_by(
+            klass, { reflection.foreign_key => owner_key_value },
+            Lyra::Projections::DefaultScopes.for_association(klass, reflection, owner)
           )
+          # Checked as a loaded row is, with the key it was found by.
+          Lyra::PurposeBoundReads.check(record, Array(reflection.foreign_key).map(&:to_s)) if record
+          record
         end
       end
 
@@ -107,8 +122,12 @@ module Lyra
         # scope (scope.update_all), where Lyra records them as the
         # dependent_association bypass they are. Given the event-backed scope
         # they became plain update_all bypasses, refused in strict mode.
+        # Recorded writes go to the event store instead
+        # (lyra_delete_or_nullify_from_events); only Lyra's own projection
+        # writes still use the table scope.
         def delete_or_nullify_all_records(method)
           return super unless lyra_should_use_cache?
+          return lyra_delete_or_nullify_from_events(method, lyra_dependent_children) unless Thread.current[:lyra_projection_write]
 
           previous = Thread.current[:lyra_association_own_scope]
           Thread.current[:lyra_association_own_scope] = true
@@ -173,7 +192,10 @@ module Lyra
         # records, not on the target (shipment.orders was filtered on an
         # order_id Spree::Order does not have): they are read through that
         # association and its source. A polymorphic (as:) association matches
-        # the owner's type too, and the association's own scope applies.
+        # the owner's type too. The target's default scopes apply, less what
+        # the association's scope unscopes, and then the association's own
+        # scope, as in ActiveRecord's association scope; reading, counting,
+        # plucking and the collection's queries all start here.
         def lyra_get_cached_relation
           relation =
             if reflection.through_reflection?
@@ -196,6 +218,7 @@ module Lyra
                 on_load: ->(records) { records.each { |record| set_inverse_instance(record) } }
               )
             end
+          relation = Lyra::Projections::DefaultScopes.narrow(relation, lyra_target_default_scope)
           lyra_apply_reflection_scope(relation)
         end
 
@@ -214,6 +237,84 @@ module Lyra
 
         def lyra_find_target_from_cache
           lyra_get_cached_relation.to_a
+        end
+
+        # Removing records from the association (delete(record), or assigning
+        # a new set) deletes or nullifies them as dependent: says, through the
+        # association's scope narrowed to them. In the events-only store that
+        # is the same write as above, on those of the records the association
+        # selects.
+        def delete_records(records, method)
+          return super if method == :destroy || !lyra_should_use_cache? || Thread.current[:lyra_projection_write]
+
+          pk = reflection.klass.primary_key
+          return super unless pk.is_a?(String)
+
+          ids = records.map { |record| record.read_attribute(pk) }
+          lyra_delete_or_nullify_from_events(method, lyra_dependent_children.select { |child| ids.include?(child.read_attribute(pk)) })
+        end
+
+        # dependent: :delete_all and :nullify in the events-only store. The
+        # table scope ActiveRecord writes through matches no row there (or
+        # stale ones), so the children were left alive in the log, and a
+        # nullify found them by foreign key alone, past the association's
+        # scope. Each child gets the event delete_all or update_all writes for
+        # it there. A nullify is the dependent_association bypass, outside
+        # strict mode, wherever StrictDataAccessRelation counts it as one.
+        #
+        # The owner's counter cache is left as it is: ES-NoProj does not
+        # maintain counter caches, so the log still holds the old count, and
+        # lowering the one in memory made it disagree (and go negative).
+        def lyra_delete_or_nullify_from_events(method, children)
+          relation = Lyra::Projections::CachedRelation.new(reflection.klass, children)
+          if method == :delete_all
+            relation.delete_all
+          elsif Lyra::StrictDataAccessRelation.nullify_update?(nullified_owner_attributes)
+            Lyra.without_strict_access do
+              relation.send(:bulk_mutate_as, :update_all, "dependent_association", nullified_owner_attributes)
+            end
+          else
+            relation.update_all(nullified_owner_attributes)
+          end
+        end
+
+        # The children a dependent write reaches: those ActiveRecord's scope
+        # for the association selects, read from the event store as Lyra's
+        # own read (as a bulk write's snapshot is). That is the owner's
+        # records, narrowed by the target's default scopes (less what the
+        # association's scope unscopes) and then by the association's scope.
+        # Leaving the default scopes out deleted or nullified children the
+        # application had put out of scope (a soft-deleted one). A scope the event store cannot evaluate
+        # (an SQL string) raises UnsupportedQuery: deleting or nullifying
+        # other children than the association selects is worse than refusing
+        # the parent's destroy.
+        def lyra_dependent_children
+          owner_key_value = owner.read_attribute(reflection.active_record_primary_key)
+          return [] if owner_key_value.nil?
+
+          what = "dependent: #{options[:dependent].inspect} of #{owner.class.name}##{reflection.name}"
+          conditions = { reflection.foreign_key => owner_key_value }
+          conditions[reflection.type] = owner.class.polymorphic_name if reflection.type
+          default_scope = lyra_target_default_scope
+          Lyra::PurposeBoundReads.internal(INTERNAL) do
+            relation = Lyra::Projections::DeferredRelation.new(reflection.klass, conditions: conditions)
+            relation = Lyra::Projections::DefaultScopes.narrow(
+              relation, default_scope, "#{what} (#{Lyra::Projections::DefaultScopes.description(reflection.klass)})"
+            )
+            begin
+              relation = lyra_apply_reflection_scope(relation)
+            rescue Lyra::Projections::UnsupportedQuery
+              raise Lyra::Projections::UnsupportedQuery.new(reflection.klass, "#{what} (its scope)")
+            end
+            relation.records.to_a
+          end
+        end
+
+        # The target's default scopes as ActiveRecord applies them to the
+        # association (scope_for_association), less what the association's
+        # own scope unscopes; nil when they select every record.
+        def lyra_target_default_scope
+          Lyra::Projections::DefaultScopes.for_association(reflection.klass, reflection, owner)
         end
       end
 

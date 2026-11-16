@@ -347,7 +347,7 @@ module PamDsl
 
     # --- Art. 9 (Def. 1, Condition 5) ---
 
-    def test_restricted_field_without_art9_basis_raises_sensitivity_violation
+    def test_restricted_field_without_art9_basis_raises_special_category_violation
       policy = Policy.new(:health_data)
       policy.field(:diagnosis, type: :health, sensitivity: :restricted) do
         allow_for :treatment
@@ -357,8 +357,57 @@ module PamDsl
         requires :diagnosis
       end
 
-      assert_raises(SensitivityViolationError) do
+      assert_raises(SpecialCategoryViolationError) do
         policy.validate_access!([:diagnosis], :treatment, subject: 1)
+      end
+    end
+
+    # Condition 5 is a special-category (Art. 9) violation, not a sensitivity one:
+    # sensitivity is an Art. 32 risk tier that gates nothing. A :health field at
+    # :internal, with no Art. 9(2) basis on the purpose, raises it.
+    def test_special_category_field_without_art9_basis_raises_special_category_violation
+      policy = Policy.new(:health_data)
+      policy.field(:vitals, type: :health, sensitivity: :internal) { allow_for :treatment }
+      policy.purpose(:treatment) do
+        basis :contract
+        requires :vitals
+      end
+
+      error = assert_raises(PamDsl::SpecialCategoryViolationError) do
+        policy.validate_access!([:vitals], :treatment, subject: 1)
+      end
+      assert_match(/special-category \(Article 9\)/, error.message)
+      assert_kind_of PamDsl::Error, error
+    end
+
+    # The old name stays as a deprecated alias until 2.0, so existing rescue
+    # clauses still catch the error.
+    def test_sensitivity_violation_error_is_a_deprecated_alias
+      policy = Policy.new(:health_data)
+      policy.field(:vitals, type: :health) { allow_for :treatment }
+      policy.purpose(:treatment) do
+        basis :contract
+        requires :vitals
+      end
+
+      deprecated, Warning[:deprecated] = Warning[:deprecated], true
+      begin
+        _out, err = capture_io do
+          assert_same PamDsl::SpecialCategoryViolationError, PamDsl::SensitivityViolationError
+        end
+        assert_match(/constant PamDsl::SensitivityViolationError is deprecated/, err)
+
+        caught = nil
+        capture_io do
+          begin
+            policy.validate_access!([:vitals], :treatment, subject: 1)
+          rescue PamDsl::SensitivityViolationError => e
+            caught = e
+          end
+        end
+        assert_instance_of PamDsl::SpecialCategoryViolationError, caught
+      ensure
+        Warning[:deprecated] = deprecated
       end
     end
 
@@ -404,7 +453,7 @@ module PamDsl
         requires :vitals
       end
 
-      assert_raises(SensitivityViolationError) do
+      assert_raises(SpecialCategoryViolationError) do
         policy.validate_access!([:vitals], :treatment, subject: 1)
       end
     end
@@ -460,7 +509,7 @@ module PamDsl
         requires :name, :diagnosis
       end
 
-      assert_raises(SensitivityViolationError) do
+      assert_raises(SpecialCategoryViolationError) do
         policy.validate_access!([:name, :diagnosis], :treatment, subject: 1)
       end
     end

@@ -8,7 +8,8 @@ module PamDsl
   # - :strict (the default) blocks it: the first violation is raised as its
   #   typed exception (UndeclaredPurposeError, InvalidFieldError,
   #   PurposeFieldMismatchError, ConsentRequiredError,
-  #   SensitivityViolationError).
+  #   SpecialCategoryViolationError, CriminalDataViolationError, and
+  #   Condition 6's ObjectedProcessingError and RestrictedProcessingError).
   # - :audit lets it through and records every violation found, not only
   #   the first: each is logged and passed to the on_violation handlers, and
   #   validate_access! returns false. Audit mode is for introducing a policy

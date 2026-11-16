@@ -5,6 +5,7 @@ module Lyra
     # Valid projection modes (event sourcing): :disabled is ES-NoProj, :lazy
     # is ES-Lazy (project on read).
     PROJECTION_MODES = [:sync, :async, :disabled, :lazy].freeze
+    RIGHTS_REFRESH_MODES = %i[scope interval].freeze
 
     attr_reader :mode, :projection_mode
     attr_accessor :event_store, :hijack_enabled, :retention_policy
@@ -54,6 +55,31 @@ module Lyra
     # (Lyra::DataAccess$<Model>$<id>), unless the call says (access_log:).
     # Off by default: the log may be evidence the application must keep.
     attr_accessor :erase_access_log
+    # How long, in seconds, a process answers the checks of the data subject's
+    # restrictions, objections (Condition 6) and consent from what it last read
+    # (Lyra::Rights). A right or consent recorded in this process is seen at
+    # once; one recorded in another process within this interval. Default 1.
+    attr_accessor :rights_refresh_interval
+    # When a process reads the rights and consent afresh (from 1.0.0):
+    # :scope (the default) at the first check of each checking scope (a
+    # Lyra.with_purpose block, a web request, a job, a batch of a batch loop:
+    # Lyra::Rights.scope), and otherwise after rights_refresh_interval;
+    # :interval only after rights_refresh_interval, so a right recorded in
+    # another process may apply up to that long later, in the middle of a
+    # request, and no scope costs a query of its own. Scopes open either way.
+    attr_reader :rights_refresh
+    # With Lyra::Erasure.erase!(…, everywhere: true): a value held by more
+    # other records than this (default 10) is taken to be shared by many people
+    # (a placeholder, a city) and left, and reported in Result#shared. The
+    # person's linked records (belongs_to the erased record) do not count. The
+    # call's max_copies: and the task's MAX_COPIES= override it. From 1.0.0.
+    attr_reader :erasure_max_copies
+    # Record each explicit Art. 15 copy (GDPRCompliance#data_export, not
+    # record: false) as an event in Lyra::SubjectAccessExports$<subject>, which
+    # access-log erasure leaves: who exported, when, which sections, never
+    # values (Lyra::AccessLog.record_export). On by default (accountability,
+    # Art. 5(2), and evidence the request was answered); false turns it off.
+    attr_accessor :record_subject_access_exports
     # What a read of a model with a privacy policy does when no purpose is
     # declared (Lyra::PurposeBoundReads): :allow (default), :audit or :deny.
     attr_reader :reads_without_purpose, :unrecorded_writes
@@ -137,6 +163,10 @@ module Lyra
       @record_access_events = false
       @access_metadata_proc = nil
       @erase_access_log = false
+      @rights_refresh_interval = 1
+      @rights_refresh = :scope
+      @erasure_max_copies = 10 # Lyra::Erasure::MAX_COPIES
+      @record_subject_access_exports = true
       @reads_without_purpose = :allow
       @unrecorded_writes = :allow
       @monitor_append_failure = :log
@@ -156,6 +186,17 @@ module Lyra
     # One of PROJECTION_MODES; a string is taken as its symbol.
     def projection_mode=(mode)
       @projection_mode = validate_choice!(:projection_mode, mode, PROJECTION_MODES)
+    end
+
+    def rights_refresh=(mode)
+      @rights_refresh = validate_choice!(:rights_refresh, mode, RIGHTS_REFRESH_MODES)
+    end
+
+    def erasure_max_copies=(value)
+      count = value.is_a?(Integer) ? value : Integer(value.to_s, 10, exception: false)
+      raise ArgumentError, "erasure_max_copies must be a positive integer (got #{value.inspect})" unless count&.positive?
+
+      @erasure_max_copies = count
     end
 
     def dashboard_max_events=(value)

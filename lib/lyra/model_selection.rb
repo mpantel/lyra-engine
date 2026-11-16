@@ -69,6 +69,7 @@ module Lyra
         warn_about_mode(chosen.size) if spec.all
         log(chosen.keys, spec)
         chosen.map do |model, options|
+          refuse_composite_key!(model, resolve: true)
           model.monitor_with_lyra(options) unless model.respond_to?(:lyra_monitored) && model.lyra_monitored
           model
         end
@@ -102,7 +103,41 @@ module Lyra
         false # no database yet (assets:precompile), or a model that cannot reflect
       end
 
+      # Refuse (ArgumentError) a model whose primary key is composite
+      # (self.primary_key = [:a, :b], or one its table declares): a record is
+      # one stream named by its key, and every lookup by key is by one column.
+      # A single primary key of any name and type is supported. Checks the key
+      # the model declared or has already read; with +resolve+, reads it from
+      # the schema now when the table exists (config.models does, once the
+      # application has loaded; monitor_with_lyra in a class body does not
+      # touch the database).
+      def refuse_composite_key!(model, resolve: false)
+        key = known_primary_key(model)
+        key = model.primary_key if key.nil? && resolve && table_present?(model)
+        return unless key.is_a?(Array)
+
+        raise ArgumentError, "#{model.name || model} has a composite primary key (#{key.join(', ')}), which Lyra does " \
+                             "not support: a monitored model needs a single-column primary key"
+      end
+
       private
+
+      # The primary key +model+ declared or has already read from the schema,
+      # without reading it now; nil when it is not known yet.
+      def known_primary_key(model)
+        return nil unless model.instance_variable_defined?(:@primary_key)
+
+        # Unread, Active Record holds a BasicObject placeholder here, which
+        # has no is_a?.
+        key = model.instance_variable_get(:@primary_key)
+        Array === key || String === key ? key : nil
+      end
+
+      def table_present?(model)
+        model.table_exists?
+      rescue StandardError
+        false
+      end
 
       def resolve(name)
         model = begin

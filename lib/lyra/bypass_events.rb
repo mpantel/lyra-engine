@@ -85,6 +85,7 @@ module Lyra
       def current_metadata
         {
           user_id: current(:user)&.id,
+          user_type: Lyra::Attribution.actor_type(current(:user)),
           request_id: current(:request_id),
           correlation_id: Lyra::Correlation.current_id,
           causation_id: Lyra::Causation.current_id

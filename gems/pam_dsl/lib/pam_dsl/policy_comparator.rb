@@ -245,8 +245,11 @@ module PamDsl
       lines << ""
     end
 
+    # A plain number of seconds is worded by DurationFormat, the same with and
+    # without ActiveSupport; an ActiveSupport::Duration as before.
     def format_duration(duration)
       return "N/A" unless duration
+      return DurationFormat.seconds(duration) if DurationFormat.seconds?(duration)
 
       if duration >= 1.year
         years = (duration / 1.year).to_i
@@ -264,7 +267,9 @@ module PamDsl
         name: purpose.name,
         legal_basis: purpose.legal_basis,
         required_fields: purpose.required_fields,
-        optional_fields: purpose.optional_fields
+        optional_fields: purpose.optional_fields,
+        objectable: purpose.objectable,
+        allowed_when_restricted: purpose.restriction_exceptions
       }
     end
 
@@ -289,8 +294,11 @@ module PamDsl
       {
         name: field.name,
         type: field.type,
-        sensitivity: field.sensitivity
-      }
+        sensitivity: field.sensitivity,
+        withheld_from_access: field.withheld_from_access,
+        about: field.about,
+        collected_from: field.collected_from
+      }.compact
     end
   end
 end

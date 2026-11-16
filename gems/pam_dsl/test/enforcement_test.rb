@@ -57,7 +57,7 @@ module PamDsl
 
       refute @policy.validate_access!([:diagnosis], :treatment, subject: 1)
       refute @policy.validate_access!([:email], :nonexistent, subject: 1)
-      assert_equal [SensitivityViolationError, UndeclaredPurposeError], recorded
+      assert_equal [SpecialCategoryViolationError, UndeclaredPurposeError], recorded
     end
 
     def test_a_valid_access_is_true_in_either_mode_and_records_nothing

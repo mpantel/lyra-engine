@@ -114,16 +114,22 @@ module Lyra
         read_partners(reflection.klass, key_column => keys).group_by { _1.read_attribute(key_column) }
       end
 
+      # Lyra reads the partners to evaluate the join, as the database reads
+      # the joined rows; none is returned to the application. What the query
+      # names on the joined table is checked against that model's policy
+      # (Lyra::PurposeBoundReads), not the partners themselves.
       def read_partners(klass, conditions)
-        if events_only_model?(klass)
-          EventStoreReader.where(klass, conditions).to_a
-        else
-          begin
-            previous = Thread.current[:lyra_bypass_read_override]
-            Thread.current[:lyra_bypass_read_override] = true
-            klass.unscoped.where(conditions).to_a
-          ensure
-            Thread.current[:lyra_bypass_read_override] = previous
+        Lyra::PurposeBoundReads.internal(INTERNAL) do
+          if events_only_model?(klass)
+            EventStoreReader.where(klass, conditions).to_a
+          else
+            begin
+              previous = Thread.current[:lyra_bypass_read_override]
+              Thread.current[:lyra_bypass_read_override] = true
+              klass.unscoped.where(conditions).to_a
+            ensure
+              Thread.current[:lyra_bypass_read_override] = previous
+            end
           end
         end
       end

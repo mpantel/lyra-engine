@@ -63,6 +63,8 @@ module Lyra
           super(model_class, [])
           @model_class = model_class
           @records = Records.new { load_records }
+          # What the query named, for the purpose check (CachedRelation#query_terms).
+          self.query_terms = [[:conditions, conditions]]
           scalars = conditions.select { |key, value| plain_value?(model_class, key, value) && !value.is_a?(Array) && !value.is_a?(Range) }
           self.create_attributes = scalars.transform_keys(&:to_s)
         else
@@ -81,15 +83,20 @@ module Lyra
         relation = self.class.new(model_class, conditions: merged, on_load: @on_load)
         relation.selected_columns = selected_columns
         relation.group_columns = group_columns
+        relation.query_terms = query_terms + relation.query_terms
         relation.extending!(*extensions) if extensions.any?
         relation.create_attributes = create_attributes.merge(relation.create_attributes)
+        relation.default_scope_applied = default_scope_applied
+        relation.windowed = windowed?
+        relation.create_with_attributes = create_with_attributes
+        relation.continue_plan(self, [:where, args.first])
         relation
       end
 
       private
 
       def load_records
-        found = EventStoreReader.where(model_class, @conditions).records
+        found = EventStoreReader.where(model_class, @conditions).raw_records.to_a
         @on_load&.call(found)
         found
       end

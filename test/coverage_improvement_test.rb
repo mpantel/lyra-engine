@@ -267,6 +267,15 @@ module Lyra
       "es_disabled_#{@email_counter}_#{rand(100000)}@example.com"
     end
 
+    # Whether the users table has the row, past Lyra's event-store reads.
+    def table_row?(id)
+      previous = Thread.current[:lyra_bypass_read_override]
+      Thread.current[:lyra_bypass_read_override] = true
+      ::User.unscoped.exists?(id)
+    ensure
+      Thread.current[:lyra_bypass_read_override] = previous
+    end
+
     # Test lyra_read_from_events? returns true in ES disabled mode
     def test_lyra_read_from_events_returns_true_in_es_disabled_mode
       assert ::User.send(:lyra_read_from_events?)
@@ -394,8 +403,8 @@ module Lyra
       ordered_relation = Lyra::Projections::CachedRelation.new(::User, [])
 
       Lyra::Projections::EventStoreReader.stubs(:relation).with(::User).returns(mock_relation)
-      mock_relation.stubs(:order).with(::User.primary_key => :desc).returns(ordered_relation)
-      ordered_relation.stubs(:first).with(nil).returns(nil)
+      mock_relation.stubs(:order).with(::User.primary_key => :asc).returns(ordered_relation)
+      ordered_relation.stubs(:last).with(nil).returns(nil)
 
       result = ::User.last
       assert_nil result
@@ -433,8 +442,8 @@ module Lyra
       ordered_relation = Lyra::Projections::CachedRelation.new(::User, [])
 
       Lyra::Projections::EventStoreReader.stubs(:relation).with(::User).returns(mock_relation)
-      mock_relation.stubs(:order).with(::User.primary_key => :desc).returns(ordered_relation)
-      ordered_relation.stubs(:first).with(5).returns([])
+      mock_relation.stubs(:order).with(::User.primary_key => :asc).returns(ordered_relation)
+      ordered_relation.stubs(:last).with(5).returns([])
 
       result = ::User.last(5)
       assert_equal [], result
@@ -462,17 +471,16 @@ module Lyra
 
       deleted = ::User.where(id: [gone1.id, gone2.id]).delete_all
 
-      # ::User.exists? is itself overridden in this mode to check the event
-      # store, not the table (an id's creation event outlives delete_all on
-      # the row) -- so check the real table directly via .unscoped, which
-      # Lyra deliberately does not intercept.
+      # ::User.exists? and ::User.unscoped read the event store in this mode,
+      # not the table (an id's creation event outlives delete_all on the
+      # row) -- so check the real table directly (table_row?).
       assert_equal 2, deleted
-      assert ::User.unscoped.exists?(keep.id), "delete_all deleted a record outside its #where filter"
-      refute ::User.unscoped.exists?(gone1.id)
-      refute ::User.unscoped.exists?(gone2.id)
+      assert table_row?(keep.id), "delete_all deleted a record outside its #where filter"
+      refute table_row?(gone1.id)
+      refute table_row?(gone2.id)
     ensure
       Lyra.config.projection_mode = :sync
-      [keep, gone1, gone2].each { |u| u&.destroy if u && ::User.unscoped.exists?(u.id) }
+      [keep, gone1, gone2].each { |u| u&.destroy if u && table_row?(u.id) }
     end
 
     def test_delete_all_on_empty_relation_deletes_nothing
@@ -486,10 +494,10 @@ module Lyra
       deleted = ::User.where(id: [survivor.id]).delete_all
 
       assert_equal 0, deleted
-      assert ::User.unscoped.exists?(survivor.id)
+      assert table_row?(survivor.id)
     ensure
       Lyra.config.projection_mode = :sync
-      survivor&.destroy if survivor && ::User.unscoped.exists?(survivor.id)
+      survivor&.destroy if survivor && table_row?(survivor.id)
     end
 
     # Regression test for extract_where_conditions missing

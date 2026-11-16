@@ -131,7 +131,21 @@ end
 See [Sensitivity Levels and Legislative Background](#sensitivity-levels-and-legislative-background) for detailed regulatory mapping.
 
 **PII Types:**
-`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:online_identifier`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:credential`, `:token`, `:payment_token`, `:custom`
+`:email`, `:name`, `:phone`, `:address`, `:ssn`, `:date_of_birth`, `:ip_address`, `:online_identifier`, `:credit_card`, `:financial`, `:health`, `:biometric`, `:location`, `:identifier`, `:credential`, `:token`, `:payment_token`, `:custom`, and from 1.0.0 the other GDPR Art. 9(1) special categories and Art. 10 data:
+
+| Type | Holds | GDPR |
+|------|-------|------|
+| `:health` | data concerning health | Art. 9(1) |
+| `:biometric` | biometric data for uniquely identifying a person | Art. 9(1) |
+| `:genetic` | genetic data | Art. 9(1) |
+| `:racial_ethnic_origin` | racial or ethnic origin | Art. 9(1) |
+| `:political_opinion` | political opinions | Art. 9(1) |
+| `:religious_belief` | religious or philosophical beliefs | Art. 9(1) |
+| `:trade_union_membership` | trade-union membership | Art. 9(1) |
+| `:sex_life_orientation` | sex life or sexual orientation | Art. 9(1) |
+| `:criminal_offence` | criminal convictions and offences, or related security measures | Art. 10 |
+
+The eight Art. 9(1) types are the special categories (`Field::SPECIAL_CATEGORY_TYPES`, `special_category?`): a purpose that reads one needs an Art. 9(2) basis (`art9_basis`). `:criminal_offence` is not a special category (`Field::CRIMINAL_DATA_TYPES`, `criminal_data?`): a purpose that reads it needs an Art. 10 authorisation (`art10_authorisation`). See [Art. 9(2) Basis for Special-Category Data](#art-92-basis-for-special-category-data) and [Art. 10 Authorisation for Criminal-Offence Data](#art-10-authorisation-for-criminal-offence-data).
 
 Any other type, or a sensitivity outside the four levels, raises `PamDsl::InvalidFieldError` when the field is declared. A field's sensitivity defaults to `:internal`.
 
@@ -195,7 +209,7 @@ end
 
 #### Art. 9(2) Basis for Special-Category Data
 
-When a purpose accesses **special-category fields** — those whose `type` is a GDPR Article 9 category (`:health`, `:biometric`) — you **must** also declare an Art. 9(2) basis. Without it, `validate_access!` raises `SensitivityViolationError`. Multiple bases are accepted. Note that this is driven by the field **type**, not by the `:restricted` sensitivity level: `:restricted` is an Article 32 *risk* tier (used for high-risk-but-ordinary data such as financial or national-identifier fields), so a `:restricted` field of a non-Article-9 type does **not** require an Art. 9(2) basis, while an Article-9-type field requires one even below `:restricted`.
+When a purpose accesses **special-category fields** — those whose `type` is a GDPR Article 9(1) category (`:health`, `:biometric`, `:genetic`, `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief`, `:trade_union_membership`, `:sex_life_orientation`) — you **must** also declare an Art. 9(2) basis. Without it, `validate_access!` raises `SpecialCategoryViolationError` (before 1.0.0 named `SensitivityViolationError`, which stays as a deprecated alias until 2.0). Multiple bases are accepted. Note that this is driven by the field **type**, not by the `:restricted` sensitivity level: `:restricted` is an Article 32 *risk* tier (used for high-risk-but-ordinary data such as financial or national-identifier fields), so a `:restricted` field of a non-Article-9 type does **not** require an Art. 9(2) basis, while an Article-9-type field requires one even below `:restricted`.
 
 ```ruby
 purpose :medical_diagnosis do
@@ -225,6 +239,33 @@ end
 - `:health_care` - 9(2)(h): medical diagnosis, health or social care
 - `:public_health` - 9(2)(i): public health
 - `:research_archiving` - 9(2)(j): scientific/historical research or statistics
+
+#### Art. 10 Authorisation for Criminal-Offence Data
+
+A field of type `:criminal_offence` holds Art. 10 data: criminal convictions and offences, or related security measures. Art. 10 does not make it a special category, and its rule is different: the data may be processed only under the control of official authority, or when Union or Member State law authorises the processing with appropriate safeguards. There is no list of grounds to choose from as in Art. 9(2), so a purpose that reads such a field names what authorises it, as text, with `art10_authorisation`. Without one, `validate_access!` (and `validate_fields!`) raises `PamDsl::CriminalDataViolationError`; in audit mode the violation is recorded like the others.
+
+The two conditions are separate: an Art. 9(2) basis does not satisfy Art. 10, and an Art. 10 authorisation does not satisfy Art. 9. A purpose that reads both kinds of data declares both.
+
+```ruby
+PamDsl.define_policy :staff_vetting do
+  field :conviction_record, type: :criminal_offence, sensitivity: :restricted
+  field :union_member, type: :trade_union_membership
+
+  purpose :vetting do
+    basis :legal_obligation
+    art10_authorisation "the act and article that require the check"  # Art. 10
+    requires :conviction_record
+  end
+
+  purpose :payroll_deductions do
+    basis :contract
+    art9_basis :employment_law                                        # Art. 9(2)(b)
+    requires :union_member
+  end
+end
+```
+
+`art10_authorisation` accepts one or more non-blank strings and accumulates across calls; `art10_authorisations` returns them and `art10_authorised?` is true when there is at least one. The Article 30 report prints them on an `Art. 10:` line for each purpose that reads Art. 10 data (and the Art. 9(2) bases on an `Art. 9(2) Basis:` line for each purpose that reads special-category data), and `article_30_gaps` lists a purpose that reads such data without them.
 
 #### Article 30 Declarations
 
@@ -257,7 +298,75 @@ policy.article_30_gaps   # => [] when every item is declared
 
 `data_subjects`, `recipients` and `security_measures` accumulate across calls and store strings; called with no arguments they return what has been declared. Each `transfer` call adds `{ to:, safeguard: }` (both stored as strings). A purpose's transfers are undeclared until it calls `transfer` or `no_transfers!`, so "none" must be stated rather than assumed.
 
-`policy.article_30_gaps` returns what the record cannot state because the policy does not declare it, as `[purpose_name, clause]` pairs (`purpose_name` is nil for the policy-wide security measures), for example `[:order_fulfillment, "Art. 30(1)(d) categories of recipients"]`. The Article 30 report prints these gaps in its completeness section.
+`policy.article_30_gaps` returns what the record cannot state because the policy does not declare it, as `[purpose_name, clause]` pairs (`purpose_name` is nil for the policy-wide security measures), for example `[:order_fulfillment, "Art. 30(1)(d) categories of recipients"]`. It also lists a purpose whose basis is `:undetermined`, a purpose that reads special-category data without an Art. 9(2) basis (`"Art. 9(2) basis for special-category data"`), and one that reads Art. 10 data without an Art. 10 authorisation (`"Art. 10 authorisation for criminal-offence data"`). The Article 30 report prints these gaps in its completeness section.
+
+#### Restriction and Objection Declarations (Arts. 18 and 21)
+
+A purpose declares what happens to it when a data subject exercises one of two rights: restriction of processing (Art. 18) and the right to object (Art. 21). The runtime side is in [Restriction of Processing and the Right to Object](#restriction-of-processing-and-the-right-to-object-arts-18-and-21).
+
+```ruby
+PamDsl.define_policy :shop do
+  purpose :analytics do
+    basis :legitimate_interests            # objectable by its basis (Art. 21(1)); nothing to declare
+    lia_documented!
+  end
+
+  purpose :newsletter do
+    basis :consent
+    direct_marketing!                      # Art. 21(2)-(3): objectable whatever the basis; an objection stops it at once
+  end
+
+  purpose :usage_statistics do
+    basis :public_task
+    research_or_statistics! public_interest_task: false   # Art. 89(1); on public task Art. 21(1) applies
+  end
+
+  purpose :defence_of_claims do
+    basis :legitimate_interests
+    lia_documented!
+    allowed_when_restricted :legal_claims  # Art. 18(2): continues while the subject's processing is restricted
+  end
+
+  purpose :invoicing do
+    basis :legal_obligation
+    allowed_when_restricted :important_public_interest, reference: "the act and article that impose the duty"
+  end
+end
+```
+
+- `allowed_when_restricted(*exceptions, reference: nil)` takes one or more of the Art. 18(2) grounds: `:consent`, `:legal_claims`, `:protection_of_rights` (of another natural or legal person) and `:important_public_interest` (of the Union or a Member State), which needs `reference:` naming the law. Any other symbol raises `PamDsl::Error` when the policy loads. Calls accumulate. Storage needs no declaration: it is not a purpose, and Art. 18(2) excepts it. A purpose with no exception stops for a restricted subject, whatever its basis: a restriction stops contract and legal-obligation processing too unless the policy declares an exception the DPO accepts. No exception is implied for `:legal_obligation`. The `:consent` exception holds only with an active consent for (purpose, subject) granted at or after the time the restriction was requested, since a consent given before it was not given in view of it.
+- `direct_marketing!` marks the purpose as direct marketing (Art. 21(2)). The subject can object whatever the basis, and the objection is upheld at once (Art. 21(3)).
+- `research_or_statistics!(public_interest_task:)` marks the purpose as research or statistics under Art. 89(1). On the bases `:public_task` and `:legitimate_interests` the right to object is Art. 21(1) whatever this marker says (Art. 21(1) covers all processing on Art. 6(1)(e) or (f), and Art. 21(6) does not take it away). On any other basis, `public_interest_task: true` (necessary for a task carried out in the public interest) leaves no right to object (Art. 21(6), last clause), and with `false` the subject can object under Art. 21(6). A purpose cannot be both direct marketing and research.
+- `objectable` is derived, never declared: `"Art. 21(2)"` for direct marketing, `"Art. 21(1)"` for the bases `:public_task` and `:legitimate_interests` (research or not), `"Art. 21(6)"` for research on another basis that is not on a public-interest task, and `nil` otherwise (`:consent`, `:contract`, `:legal_obligation`, `:vital_interests` or an undetermined basis, outside research, or research on a public-interest task on one of those bases).
+
+`to_h` and the policy comparator include the declarations. The Article 30 report prints, for each purpose, a `Right to Object:` line (the article, or `none` with the reason) and an `Under Restriction:` line (the exceptions, or `stops`), and its JSON export carries `objectable`, `direct_marketing`, `research_or_statistics`, `allowed_when_restricted` and `important_public_interest_reference` (the same names as `to_h`). `GDPRCompliance#processing_activities` adds `objectable` and `allowed_when_restricted` for the policy purpose each source matches. Neither is an Art. 30(1) item, so neither adds a gap. The policy generator never writes these declarations: they are the controller's decisions.
+#### Right of Access Declarations (Art. 15)
+
+`GDPRCompliance#data_export` gives the data subject a copy of their data (Art. 15(3)) and the information of Art. 15(1)-(2). Most of it comes from the declarations above (purposes, bases, recipients, transfers, retention). Four more are the controller's to make, as field options (keywords, or calls in the field's block) and one policy-level declaration:
+
+```ruby
+PamDsl.define_policy :epay do
+  field :email, type: :email, collected_from: :data_subject      # Art. 15(1)(g): the source
+  field :vat_number, type: :identifier do
+    collected_from "the tax registry"
+  end
+  field :payer_name, type: :name, about: :payer                  # another person's data: for review
+  field :password_digest, type: :credential,
+        withheld_from_access: "Art. 15(4): <the controller's assessment>"
+
+  access_notice controller: "University of X, Registry, dpo@x.example",            # who the controller is
+                rights: "rectification, erasure, restriction, objection: ...",     # Art. 15(1)(e)
+                complaint: "the national supervisory authority, www.example.org",  # Art. 15(1)(f)
+                automated_decisions: "No decision is based solely on automated processing."  # Art. 15(1)(h)
+end
+```
+
+- `withheld_from_access:` takes the basis the controller relies on, as text, and the copy names the field and that basis under `withheld` instead of giving its value. A field without it is exported: PAM picks no basis. Art. 15(4) and a national restriction of the right of access under Art. 23 (for instance Greece's Law 4624/2019) are examples a controller might rely on; whether one applies is for the controller and its DPO to decide.
+- `about:` names whose data the field is when it is not the data subject's (`:payer`, `:guardian`); `:data_subject` (or nothing) is the subject's own. Such a field goes to the copy's `review`, with its value and history, for the controller to weigh the other person's rights before the copy is handed over.
+- `collected_from` is `:data_subject` or text naming the source. A declared field without it is listed in the copy's `gaps`. An empty or nil `collected_from` or `about` raises `InvalidFieldError`, and an empty or nil `access_notice` item `PamDsl::Error`: an empty declaration would read as declared.
+- `access_notice` accepts `controller`, `rights`, `complaint` and `automated_decisions`, as text; repeated calls add items, and `policy.access_notice` returns them. An item no policy of the subject's records declares is listed in the copy's `gaps`.
+
+`field_to_h` (and so `policy.to_h`) includes the three field options, and `policy.to_h[:access_notice]` the notice.
 
 ### Retention Policies
 
@@ -331,15 +440,22 @@ end
 
 Before calling `validate_access!` for a consent-based purpose, populate the store with the subject's actual consent decision. The store is the runtime $CS$ component from the formal model — indexed by `(purpose, subject)` pairs.
 
-> **The store is held in memory, per process.** `ConsentStore` keeps its records in a hash inside
-> the policy object and does not persist them. A restart or deploy loses every record, so the store
-> alone cannot demonstrate that a consent was given (GDPR Art. 7(1)). A grant or withdrawal made in
-> one process (a Puma worker, a job worker) is not seen by the others, so it alone cannot make a
-> withdrawal take effect everywhere (Art. 7(3)). An application that relies on consent must keep
-> the decisions in its own durable store (a table, or events in the data subject's stream) and load
-> them into this store, at start-up and on every change, or per request. `withdrawable!` is
-> recorded with the requirement but not enforced. Persistent, event-backed
-> consent is future work.
+> **Without a shared store, the store is held in memory, per process.** `ConsentStore` keeps its
+> records in a hash inside the policy object and does not persist them. A restart or deploy loses
+> every record, so the store alone cannot demonstrate that a consent was given (GDPR Art. 7(1)). A
+> grant or withdrawal made in one process (a Puma worker, a job worker) is not seen by the others,
+> so it alone cannot make a withdrawal take effect everywhere (Art. 7(3)). `withdrawable!` is
+> recorded with the requirement but not enforced.
+>
+> **A shared store** (from 1.0.0): when `PamDsl.consent_store` is set, every policy's
+> `consent_policy.store` is that store, so consent is kept once per (purpose, subject), whichever
+> policy records or checks it, and survives `PamDsl.reset!`. It answers `request`, `grant`,
+> `withdraw`, `record_for`, `granted?` and `durable?` (and, optionally, `consents_for(subject_key)`,
+> which `GDPRCompliance#consent_audit` then lists as `recorded_consents`). Lyra installs a durable
+> one that keeps consent as events in its event store, seen by every process: an application
+> using Lyra no longer loads its consent decisions into PAM DSL at start-up or per request (a
+> repeated grant records nothing).
+> `ConsentRecord.restore` rebuilds a record in a state a store recorded.
 
 Each `(purpose, subject)` pair has a `ConsentRecord` in one of four states:
 
@@ -535,8 +651,10 @@ begin
   policy.validate_access!([:email], :marketing, subject: current_user.id)
 rescue PamDsl::ConsentRequiredError => e
   puts "Consent error: #{e.message}"
-rescue PamDsl::SensitivityViolationError => e
+rescue PamDsl::SpecialCategoryViolationError => e
   puts "Art. 9 violation: #{e.message}"
+rescue PamDsl::CriminalDataViolationError => e
+  puts "Art. 10 violation: #{e.message}"
 rescue PamDsl::Error => e
   # UndeclaredPurposeError, InvalidFieldError, PurposeFieldMismatchError
   puts "Access refused: #{e.message}"
@@ -560,7 +678,20 @@ duration = policy.retention_for('User', field_name: :email)
 policy_hash = policy.to_h
 ```
 
-`validate_access!` checks, in order: the purpose is declared (`UndeclaredPurposeError`), consent is active when the purpose needs it (`ConsentRequiredError`), each field is declared (`InvalidFieldError`) and allowed for the purpose (`PurposeFieldMismatchError`), and a purpose touching an Article 9 type has an Art. 9(2) basis (`SensitivityViolationError`). All errors inherit from `PamDsl::Error`. `policy.access_violations(fields, purpose, subject:)` returns every violation found, in that order, without raising or recording anything.
+`validate_access!` checks, in order: the purpose is declared (`UndeclaredPurposeError`), consent is active when the purpose needs it (`ConsentRequiredError`), each field is declared (`InvalidFieldError`) and allowed for the purpose (`PurposeFieldMismatchError`), a purpose touching an Article 9 type has an Art. 9(2) basis (`SpecialCategoryViolationError`), a purpose touching an Art. 10 type has an Art. 10 authorisation (`CriminalDataViolationError`), and, last, the subject has no restriction or upheld objection that covers the access (Condition 6: `RestrictedProcessingError`, `ObjectedProcessingError`; see [below](#restriction-of-processing-and-the-right-to-object-arts-18-and-21)). All errors inherit from `PamDsl::Error`. `policy.access_violations(fields, purpose, subject:)` returns every violation found, in that order, without raising or recording anything.
+
+#### Fields Without a Subject
+
+Consent is decided per data subject, and some uses do not know their subjects yet: a query, before it runs, names the fields it will select, filter or sort on, but not the people it will find. `validate_fields!(fields, purpose, subject: nil)` checks every condition of `validate_access!` except consent and the subject's restrictions and objections (Condition 6), which are per subject: the purpose is declared, its basis is determined (not `:undetermined`), each field is declared and allowed for the purpose, an Article 9 type has an Art. 9(2) basis, and an Art. 10 type has an Art. 10 authorisation. It is enforced as `validate_access!` is (strict raises the first violation, audit reports every one and returns `false`) and goes to the access recorder. `subject:` is optional and only labels the record and the reported violations. `field_violations(fields, purpose)` returns the violations without raising or recording.
+
+```ruby
+policy.validate_fields!([:email], :marketing)               # => true, whatever anyone's consent
+policy.validate_fields!([:ssn], :marketing)                 # raises PurposeFieldMismatchError
+policy.field_violations([:ssn], :marketing)                 # => [#<PamDsl::PurposeFieldMismatchError ...>]
+policy.validate_access!([:email], :marketing, subject: 42)  # consent checked for subject 42
+```
+
+A purpose whose basis is `:consent` needs an active consent for every subject `validate_access!` is called with, whether or not the policy declares a consent block for it (Art. 6(1)(a)). `validate_fields!` does not replace that check: it is the part that can be made before the subjects are known. Lyra uses it to check a record load's query before it runs, and then checks each record returned with `validate_access!`.
 
 ### Enforcement Modes
 
@@ -591,7 +722,7 @@ PamDsl.on_violation do |violation|
 end
 ```
 
-`PamDsl.reset!` clears the registered policies, the global enforcement mode (back to `:strict`) and the violation handlers.
+`PamDsl.reset!` clears the registered policies, the global enforcement mode (back to `:strict`), the violation handlers, the rights event handlers and the default in-memory rights store (a rights store installed with `PamDsl.rights_store=`, memory or durable, stays).
 
 ### Access Recorder
 
@@ -607,6 +738,94 @@ PamDsl.access_recorder = AccessAudit
 ```
 
 There is one recorder per process, set by the host application; Lyra installs its access log (`Lyra::AccessLog`, active when `config.record_access_events` is on). `PamDsl.reset!` leaves the recorder in place.
+
+### Restriction of Processing and the Right to Object (Arts. 18 and 21)
+
+The rights belong to the data subject, not to a policy. `PamDsl.rights` records each request, notice, decision and lift as an event in `PamDsl.rights_store`, and computes each request's state from its events. A restriction applies to the subject's data under every policy; an objection concerns one purpose of one policy. Redefining a policy (a code reload) does not touch them. PAM records the controller's decisions: it does not weigh grounds, verify accuracy, or tell the subject or the recipients anything.
+
+```ruby
+rights = PamDsl.rights
+
+# Art. 18(1)(a)-(c): all of the subject's data, or only some fields
+r = rights.restrict!(subject: "Payer$7", ground: :accuracy_contested,   # 18(1)(a)
+                     fields: [:lastname, :address],                      # optional; none = all of the data
+                     requested_at: asked_at, recorded_by: "dpo-office")
+rights.notify_lift!(r.id, at: told_at, by: "dpo-office")   # Art. 18(3): the subject is told first
+rights.lift!(r.id, reason: :verified_accurate)             # raises RightsTransitionError without that notice
+
+# Art. 21(1): pending, and the purpose is restricted for this subject (Art. 18(1)(d)) until decided
+o = rights.object!(subject: "Payer$7", policy: :shop, purpose: :analytics, grounds: "the subject's words")
+rights.decide!(o.id, outcome: :overridden, grounds: :compelling_legitimate_grounds,
+               reason: "the controller's reasons", by: "dpo-office", notified_at: told_at)
+# or: rights.decide!(o.id, outcome: :upheld, by: "dpo-office")   # the purpose stops for this subject
+rights.withdraw_objection!(o.id)                           # the subject's own withdrawal, pending or upheld
+
+rights.state("Payer$7")    # => restrictions and objections with their history, and the events
+rights.open_requests       # => restrictions not lifted and objections not decided, oldest first; each answers age
+rights.find(r.id)          # => the Restriction or Objection, or nil
+
+PamDsl.on_rights_event { |event| Notifier.rights_event(event) }   # e.g. tell the recipients (Art. 19)
+```
+
+**Restrictions.** The grounds are `:accuracy_contested` (Art. 18(1)(a)), `:unlawful_erasure_opposed` (b) and `:needed_for_legal_claims` (c). The fourth, `:objection_pending` (d), is created only by `object!`. A restriction is `:active`, then `:lift_notified` (still restricting), then `:lifted`; `lift!` before `notify_lift!` raises `RightsTransitionError`. `requested_at` (when the subject asked; the month of Art. 12(3) runs from it) is kept apart from `recorded_at`. `fields:` are names a registered policy declares (others raise `ArgumentError`).
+
+**Times.** `requested_at:`, `at:` and `notified_at:` take a `Time` (an `ActiveSupport::TimeWithZone` is one) or a `DateTime`, which is converted; a `Date`, a `String` or a number raises `ArgumentError`. They run forwards: a request is not in the future, a notice is not before its request, a lift is not before its notice, a decision or withdrawal is not before its request, and an override's `notified_at` lies between the request and the decision (`at:`, default now). Otherwise `ArgumentError`, and nothing is recorded. A restriction records the recipients the registered policies declare for the purposes that use its fields, so the controller sees whom Art. 19 says to tell.
+
+**Objections.** What `object!` does depends on the purpose's `objectable` (see the declarations above):
+
+| Purpose | `objectable` | What `object!` does |
+|---|---|---|
+| `direct_marketing!` (any basis) | `"Art. 21(2)"` | upheld at once (Art. 21(3)); it then stops every `direct_marketing!` purpose of every policy for that subject |
+| basis `:public_task` or `:legitimate_interests` (research or not) | `"Art. 21(1)"` | pending, with an Art. 18(1)(d) restriction of that purpose; then `decide!` |
+| `research_or_statistics! public_interest_task: false`, on another basis | `"Art. 21(6)"` | pending, with an Art. 18(1)(d) restriction of that purpose; then `decide!(outcome: :upheld)` (it cannot be overridden) |
+| anything else | `nil` | records the rejection with its reason, then raises `ObjectionNotApplicableError`, whose message is that reason (for a consent purpose it points to withdrawal, Art. 7(3)) |
+
+A pending objection restricts the objected purpose only (a reading of Art. 18(1)(d) and 18(2) the DPO should confirm), and that restriction ends with the decision, never by `lift!`. `decide!` takes `outcome: :upheld` or `:overridden`. An override needs `grounds:` (`:compelling_legitimate_grounds` or `:legal_claims`; only an Art. 21(1) objection can be overridden), a `reason:` in text, and `notified_at:` (it lifts the 18(1)(d) restriction, so Art. 18(3) applies). An Art. 21(6) objection has no ground to override on: the article yields only to a task in the public interest, and the policy declares the purpose not to be one; uphold it, or correct the declaration. An upheld objection stays in force until the subject withdraws it: a later consent does not lift it (Art. 21(3)). An upheld objection to direct marketing stops every purpose marked `direct_marketing!`, in every policy, for that subject; the objection records the purpose objected to (a reading of Art. 21(3) the DPO should confirm).
+
+**One objection at a time.** While an objection to a purpose of a policy is in force (pending or upheld), `object!` for the same purpose returns it and records nothing, and once direct marketing is objected to, so does `object!` for any direct-marketing purpose. A retry (after a hook failed, say) is therefore safe, and two processes objecting at once end with one objection. After a decision that ended it (overridden, withdrawn), a new `object!` records a new objection.
+
+Event types: `ProcessingRestricted`, `RestrictionLiftNotified`, `RestrictionLifted`, `ObjectionReceived`, `ObjectionUpheld`, `ObjectionOverridden`, `ObjectionRejected` and `ObjectionWithdrawn`. Each `PamDsl::Rights::Event` has `type`, `request_id`, `subject_key`, `data` (grounds, field and purpose names and the controller's reasons; never personal data values), `at` (when it happened), `recorded_at` and `recorded_by`. Keep personal data out of the free-text grounds and reasons: the records are evidence that the right was handled (Art. 5(2)) and are kept when the subject's data is erased.
+
+**Hooks.** Every `on_rights_event` handler is called with every event of a transition, even when one raises; then the first error is raised (the others are logged) and the events stay recorded. A rejected objection still raises `ObjectionNotApplicableError`, with the handler's error as its `cause`.
+
+`open_requests` lists restrictions not lifted and objections not decided, oldest first. A pending objection appears once: its 18(1)(d) restriction is its `restriction_id`.
+
+#### Condition 6
+
+`validate_access!` (and `access_violations`) checks Condition 6 after every other condition, so an access refused for another reason reports the same error as before. With a subject:
+
+- an **upheld objection** to this purpose of this policy, or an upheld objection to direct marketing when this purpose is `direct_marketing!`, gives `ObjectedProcessingError`, whatever the purpose declares;
+- a **restriction in force** (active or lift-notified) gives `RestrictedProcessingError` when it covers the access (it names no fields, or names one of the fields accessed; an 18(1)(d) restriction covers only the objected purpose) and the purpose declares no `allowed_when_restricted` exception that applies.
+
+Strict mode raises the first violation; audit mode reports each one and returns `false`; the access recorder receives the refusal with its class, like any other. `validate_fields!` and `field_violations` have no subject and do not check Condition 6: deciding which of many subjects a query may reach is the host's job (Lyra leaves restricted subjects out of model-wide queries).
+
+`validate_rights!(field_names, purpose, subject:)` checks Condition 6 alone (from 1.0.0), for an access whose other conditions are checked elsewhere or that names no declared field: a host calls it for a record loaded by undeclared columns, which a restriction of all of the subject's data, a pending objection's restriction of the purpose, or an upheld objection still covers. It neither checks the purpose's declaration nor consent, records only a refusal, and is free when nothing is in force. `rights_violations(field_names, purpose, subject:)` gives the same violations without enforcing them. A purpose the policy does not declare declares no exception. Condition 6 asks the host for a subject's keys only when a request in force could cover the access (`PamDsl::Rights.could_apply?`: an upheld objection to the purpose, or a restriction that covers it and that no exception other than `:consent` admits); `Rights.applicable(requests, policy, purpose, fields)` and `Rights.violations_among(requests, policy, purpose, fields, subject)` let a host decide many subjects in one pass (Lyra does, for model-wide queries). `Rights.project` refuses a decision on, or the withdrawal of, an objection whose Art. 18(1)(d) restriction is not recorded.
+
+**Subject keys.** A right is recorded under a subject key. `PamDsl.subject_keys(subject)` gives the keys Condition 6 looks up: by default, a non-empty String, Symbol or Integer is its own key (`7` and `"7"` are one key), `nil` and a model-wide subject such as `"Payer$*"` have none, and any other object (a model instance, a Struct, an Array) raises `ArgumentError`, in `restrict!`/`object!` and in `validate_access!` alike, so that a right is never recorded under, or looked up by, a key that matches nothing. A host sets `PamDsl.subject_key_resolver` (an object answering `call(subject)` with the keys, or `nil` for the default) to map, for example, a record to its own key and to the keys of the people it names; `restrict!` and `object!` given such an object record under its first key. With no rights recorded, Condition 6 returns at once, without resolving the subject.
+
+#### The Rights Store
+
+`PamDsl.rights_store` is a protocol, so the host decides where rights are kept. A store keeps the events, append-only, one stream per subject key, and answers:
+
+- `append(events, expected_version:)`: append one or more events for one subject key, atomically, if the subject's stream holds exactly `expected_version` events; otherwise raise `PamDsl::RightsConcurrencyError` and append nothing (two processes cannot both lift, or both decide, one request). Before storing, check the stream with `PamDsl::Rights.project(existing + events)`, which raises `PamDsl::RightsTransitionError` for a step the rights do not allow (a lift without the Art. 18(3) notice, a decision on a decided objection, an unknown request or event type), and store nothing if it raises.
+- `events_for(subject_key)`: the subject's events, in order, as `PamDsl::Rights::Event` values whose `at` and `recorded_at` are `Time` objects (a store that serialises events returns Times) and whose `data` has symbol keys, symbols kept as symbols.
+- `subject_key_for(request_id)`: the key of the stream holding a request, or `nil`.
+- `active`: every request in force (`PamDsl::Rights::Restriction` not lifted, `PamDsl::Rights::Objection` pending or upheld). `PamDsl::Rights.project(events)` folds events into these.
+
+Including `PamDsl::RightsStore::Base` adds `active_for(keys)` and `any_active?` (which Condition 6 calls on every access with a subject; override them when they can be answered more cheaply) and `durable?` (false; a store whose records outlive the process and are shared by every process returns true).
+
+PAM DSL ships one store, `PamDsl::RightsStore::Memory`, the default: in memory, per process, lost on restart. It is for tests, development and scripts. While `PamDsl.require_durable_rights_store` is on, `PamDsl.rights` refuses to record in a store whose `durable?` is false (`RightsStoreNotDurableError`), this one or a host's, so that a right a subject exercised cannot be lost silently; reading still works and finds nothing, so an application that records no rights is unaffected. The flag is off by default. Under Rails, PAM's railtie turns it on outside the development and test environments; `config.pam_dsl.require_durable_rights_store = true` or `false` sets it for every environment. A durable store comes from the host: Lyra installs one that keeps the events in its event store. Without Lyra, an application implements the four methods above over its own durable storage.
+
+#### Reports
+
+- **The Art. 15 copy** (`GDPRCompliance#data_export`, from 1.0.0) has `restrictions` and `objections`: the subject's own requests (`PamDsl.rights.export(keys)`), each with its ground or article, fields, purpose, state, dates and the controller's decisions and reasons, oldest first; an objection's 18(1)(d) restriction is part of the objection. Who on the staff recorded or decided a request is left out. The keys read are `"<subject_type>$<subject_id>"`, or what the `rights_keys:` option (`->(records) { [key, ...] }`) gives: Lyra adds the keys of the subject's records that name no one else.
+- **The register** prints each purpose's right to object and Art. 18(2) exceptions (Art. 30 report, its JSON, `to_h`). The per-subject `GDPRCompliance#processing_activities` gives, for each activity, `rights_by_purpose` (`{ purpose => { objectable:, allowed_when_restricted: } }` for its declared purposes, read from each model's policy) and, when there is exactly one such purpose, its `objectable` and `allowed_when_restricted`. Before 1.0.0's rights work these read only the `policy_name:` policy, so with a `policy_resolver:` (Lyra's) they were always empty.
+
+#### With Lyra
+
+Lyra applies the rights where it checks reads (see Lyra's PRIVACY_COMPLIANCE.md): a record a restriction or upheld objection covers is refused when loaded, even by undeclared columns; model-wide queries leave the restricted subjects out (a join or subquery reaching one is refused); `Model.lyra_processable` gives batch jobs the records they may process; `Lyra::Erasure.erase!` refuses a restricted record unless it lifts a notified restriction (`lifting:`); retention skips restricted records and reports them; the rights are read afresh at the first check of each purpose block, request, job and batch. Writes are not checked in 1.0.0. The lifecycle of a restriction and of an objection is also a pair of PetriFlow nets in Lyra's verification tests, matched against `PamDsl::Rights.project`.
+
+What PAM does not do: it does not send the Art. 19 notifications or the subject's replies (use `on_rights_event`), it does not provide the channel through which objections arrive (Art. 21(5)), and it checks only the accesses that reach `validate_access!` or `validate_rights!`.
 
 ### Advanced Examples
 
@@ -736,7 +955,7 @@ report_hash = reporter.to_h
 
 **Article 30 Report** (generated from the declared policy):
 - Controller and DPO contact
-- Processing activities, one per declared purpose (Art. 30(1)(b)-(e)): description, legal basis with its Art. 6(1) citation, data subjects, data categories (required and optional fields), whether consent is required, recipients, and transfers with their safeguards
+- Processing activities, one per declared purpose (Art. 30(1)(b)-(e)): description, legal basis with its Art. 6(1) citation, the Art. 9(2) bases and Art. 10 authorisations of a purpose that reads such data, data subjects, data categories (required and optional fields), whether consent is required, recipients, and transfers with their safeguards
 - Retention schedule (Art. 30(1)(f)): the default and each model rule, with its deletion strategy and field overrides
 - Technical and organisational measures (Art. 30(1)(g)) declared with `security_measures`
 - Completeness: every Article 30(1) item the policy does not declare (`article_30_gaps`); undeclared items are also marked NOT DECLARED where they would appear
@@ -806,6 +1025,17 @@ In the default (partial) mode, for example:
 | `:credential` | `password`, `encrypted_password`, `password_digest`, `api_key`, `secret` |
 | `:token` | a person's account and session tokens: `reset_password_token`, `remember_token`, `confirmation_token`, `authentication_token`, `session_token`, `guest_token` |
 | `:payment_token` | `stripe_customer_id`, `paypal_account_id`, `gateway_customer_profile_id` (a column named `payment_token` falls under the `*_token` exclusion) |
+| `:health` | `medical`, `health`, `diagnosis`, `prescription`, and names containing them (`medical_record`) |
+| `:biometric` | `fingerprint`, `face`, `retina`, `biometric` |
+| `:genetic` | `genetic`, `genome`, `genomic`, `genotype`, `dna`, and names containing them (`genetic_test_result`, `dna_sample`) |
+| `:racial_ethnic_origin` | `ethnicity`, `ethnic_origin`, `ethnic_group`, `racial_origin`; `race` only as the whole name or its end (`applicant_race`) |
+| `:political_opinion` | `political_opinion`, `political_views`, `political_affiliation`, `political_party`, `party_affiliation`, `party_membership` |
+| `:religious_belief` | `religion`, `religious_belief`, `religious_affiliation`, `religious_denomination`, `philosophical_belief` |
+| `:trade_union_membership` | `trade_union`, `labour_union`/`labor_union`, `union_member`, `union_membership` |
+| `:sex_life_orientation` | `sexual_orientation`, `sexual_preference`, `sexual_life`, `sex_life` |
+| `:criminal_offence` | `criminal_record`, `criminal_conviction`, `criminal_offence`/`criminal_offense`, `criminal_history`, `criminal_background_check`, `conviction` |
+
+The special-category and Art. 10 names are matched conservatively: a word that often means something else is not enough on its own (`party` is often a counterparty, `union` a set operation, `orientation` a page's, `denomination` a banknote's, `offence` a sport's), and neither is `gender`, which Art. 9(1) does not list. The generator marks each such field in its draft with the condition a purpose reading it must meet (`art9_basis` or `art10_authorisation`).
 
 Not detected by default: `fax` and `coordinates` (the exact mode does match `fax`), and login names are reported as `:identifier`, not `:online_identifier`.
 
@@ -1010,8 +1240,8 @@ masked = PamDsl::PIIMasker.mask(data)
 masked = PamDsl::PIIMasker.mask(data, strategy: :full)
 # => { email: "[REDACTED]", name: "[REDACTED]", status: "active" }
 
-# Redact only sensitive PII (ssn, credit_card, financial, health, biometric,
-# identifier, credential, token, payment_token)
+# Redact only sensitive PII (ssn, credit_card, financial, identifier, credential,
+# token, payment_token, the Art. 9 special categories and Art. 10 data)
 data = { email: "alice@example.com", ssn: "123-45-6789" }
 masked = PamDsl::PIIMasker.mask(data, strategy: :redact_sensitive)
 # => { email: "a***@example.com", ssn: "[REDACTED]" }
@@ -1128,6 +1358,33 @@ json = compliance.portable_export(format: :json)
 csv = compliance.portable_export(format: :csv)
 xml = compliance.portable_export(format: :xml)
 ```
+
+#### The Art. 15 copy
+
+Beside the keys above, `data_export` returns the copy of the data and the information of Art. 15(1)-(2) (`PamDsl::SubjectAccess`):
+
+```ruby
+report = compliance.data_export   # history: true, accesses: true, disclose_actors: false, verified_by: nil, record: true
+report[:records]             # each record whole: attributes (every field), withheld, review, history (from/to per change)
+report[:accesses]            # the access log's entries; nil when the store keeps none
+report[:processing_context]  # per purpose admitting the records' declared fields: basis, recipients, transfers, retention, sources
+report[:notice]              # the policy's access_notice
+report[:gaps]                # [purpose or nil, item] for what the policy does not declare
+```
+
+The store supplies what only it knows through the constructor's options; without them the records are rebuilt from the subject's events and `accesses` is `nil`:
+
+| Option | Signature |
+|---|---|
+| `policy_resolver:` | `->(model_name) { PamDsl::Policy or nil }`: each model's policy, for subjects whose records span policies (falls back to `policy_name:`) |
+| `records_reader:` | `->(subject_id, subject_type, events, history:) { [{ model:, id:, state:, as_of:, attributes:, history_from:, periods:, history: [{ at:, operation:, field:, from:, to:, actor: }] }] }` |
+| `access_reader:` | `->(subject_id, subject_type, records) { [{ at:, record:, purpose:, legal_basis:, fields:, outcome:, actor: }] or nil }`; `{ entries: [...], gap: "..." }` for a partial log, whose gap the copy lists |
+| `export_recorder:` | `->(export) { ... }`: called after each explicit export with its sections, record count and `verified_by`, never values; not for `data_export(record: false)` or `full_report`, which are views rather than answered requests |
+| `actor_label:` | `->(actor, subject) { label }`: default `"you"` (the actor's `user_id` and `user_type` are the subject's), `"staff or you"` (the subject's id, no `user_type`), `"staff"`, `"system"` (no user) |
+
+A records reader's record may also carry `set_outside_periods: [field, ...]`, values set while the record was another person's: the copy lists them under `withheld` with the basis "set while the record was another person's" instead of giving them. Retention in `processing_context` is what the policy declares (`Policy#declared_retention_for`), `nil` and a gap where it declares nothing; columns no declaration covers are a gap too. `pii_inventory` and `data_lineage` leave out fields declared `withheld_from_access:` or `about:` another person.
+
+Who acted is a role label unless `disclose_actors: true`. `history: false` and `accesses: false` are for a request the subject narrowed, and the copy lists what it leaves out in `gaps`. Where a policy governs a model, `processing_activities` reads its purposes, bases, categories, recipients and retention, and `rectification_history` lists updates of declared fields as well as detected ones.
 
 #### Custom Extractors
 
@@ -1303,7 +1560,12 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `PamDsl.logger` / `PamDsl.logger=` - Where audit-mode violations are logged
 - `PamDsl.access_recorder` / `PamDsl.access_recorder=` - Object receiving every `validate_access!` call (`record?(policy)`, `call(access)`)
 - `PamDsl.reporter(policy_name = nil, **options)` - Build a `Reporter`, defaulting to the Rails-configured policy, organization and DPO contact
-- `PamDsl.reset!` - Clear all policies, the enforcement mode and the violation handlers (not the access recorder)
+- `PamDsl.rights` - The rights API (`restrict!`, `notify_lift!`, `lift!`, `object!`, `decide!`, `withdraw_objection!`, `find`, `state`, `open_requests`, `active_for`); see [Restriction of Processing and the Right to Object](#restriction-of-processing-and-the-right-to-object-arts-18-and-21)
+- `PamDsl.rights_store` / `PamDsl.rights_store=` - Where rights are recorded (the store protocol); a `RightsStore::Memory` created on first use by default; `= nil` returns to it
+- `PamDsl.require_durable_rights_store` / `=` - When true, a store that is not durable refuses to record; set by the railtie outside development and test
+- `PamDsl.subject_key_resolver` / `=` - Maps a subject to its rights keys (`call(subject)`); `PamDsl.subject_keys(subject)` applies it
+- `PamDsl.on_rights_event { |event| ... }` - Register a handler called with each recorded `Rights::Event`
+- `PamDsl.reset!` - Clear all policies, the enforcement mode, the violation and rights event handlers, and the default in-memory rights store (not the access recorder, the subject key resolver or an installed rights store)
 
 ### Policy
 
@@ -1315,11 +1577,15 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `enforcement(mode)` - Set this policy's enforcement mode, overriding the global one
 - `enforcement_mode` - The mode this policy enforces with (its own, or the global one)
 - `security_measures(*measures)` - Declare technical and organisational measures (Art. 30(1)(g)); with no arguments, return them
-- `article_30_gaps` - `[purpose_name or nil, clause]` pairs for every Article 30(1) item not declared
+- `article_30_gaps` - `[purpose_name or nil, clause]` pairs for every Article 30(1) item not declared, an undetermined basis, and a missing Art. 9(2) basis or Art. 10 authorisation
+- `purpose_reads?(purpose, predicate)` - True when the purpose reads (lists, or is allowed) a field for which the `Field` predicate (`:special_category?`, `:criminal_data?`) holds
 - `get_field(name)` / `get_purpose(name)` - Look up a field or purpose; raise `InvalidFieldError` / `UndeclaredPurposeError`
 - `allowed?(field, purpose)` - Check if field is allowed for purpose
-- `validate_access!(fields, purpose, subject:)` - Validate access for a data subject. Returns `true` when valid. In strict mode raises the first violation: `UndeclaredPurposeError`, `ConsentRequiredError`, `InvalidFieldError`, `PurposeFieldMismatchError` or `SensitivityViolationError`; in audit mode records every violation and returns `false`. Every call goes to the access recorder, if one is set
+- `validate_access!(fields, purpose, subject:)` - Validate access for a data subject. Returns `true` when valid. In strict mode raises the first violation: `UndeclaredPurposeError`, `ConsentRequiredError`, `InvalidFieldError`, `PurposeFieldMismatchError`, `SpecialCategoryViolationError`, `CriminalDataViolationError`, `ObjectedProcessingError` or `RestrictedProcessingError` (Condition 6); in audit mode records every violation and returns `false`. Every call goes to the access recorder, if one is set
 - `access_violations(fields, purpose, subject:)` - Every violation for the access, as error objects, without raising or recording
+- `validate_fields!(fields, purpose, subject: nil)` - `validate_access!` without the consent step and Condition 6, for a use whose subjects are not known yet (a query before it runs). Enforced and recorded as `validate_access!` is; `subject:` only labels the record
+- `field_violations(fields, purpose)` - Every violation `validate_fields!` would find, without raising or recording
+- `validate_rights!(fields, purpose, subject:)` - Condition 6 alone (from 1.0.0): the subject's restrictions and upheld objections that cover the access; no purpose or consent check. Enforced as `validate_access!` is; only a refusal is recorded. `rights_violations(fields, purpose, subject:)` returns them without enforcing
 - `consent_policy` - Access the `ConsentPolicy` to populate the runtime consent store
 - `lia_compliance_gaps` - Returns purposes with `:legitimate_interests` basis that have not called `lia_documented!`
 - `sensitive_fields` - Get all fields with confidential/restricted sensitivity
@@ -1337,7 +1603,8 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `metadata` - Access field metadata hash
 - `sensitive?` - Check if field is confidential or restricted
 - `restricted?` - Check if field is restricted
-- `special_category?` - True for an Article 9 type (`:health`, `:biometric`)
+- `special_category?` - True for an Article 9 type (`Field::SPECIAL_CATEGORY_TYPES`: `:health`, `:biometric`, `:genetic`, `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief`, `:trade_union_membership`, `:sex_life_orientation`)
+- `criminal_data?` - True for an Article 10 type (`Field::CRIMINAL_DATA_TYPES`: `:criminal_offence`)
 - `allowed_for?(purpose)` - Check if allowed for specific purpose
 - `apply_transformation(context, value)` - Apply defined transformation
 
@@ -1347,7 +1614,8 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `basis(legal_basis)` - Set legal basis (GDPR Art. 6)
 - `lia_documented!(value = true)` - Record that a Legitimate Interests Assessment has been conducted for this `:legitimate_interests` purpose; pass `false` to unset
 - `lia_documented?` - True when LIA has been recorded
-- `art9_basis(*bases)` - Declare one or more Art. 9(2) bases; required when the purpose accesses Article-9 special-category-**type** fields (e.g. `:health`, `:biometric`), independently of the `:restricted` risk level; multiple calls accumulate
+- `art9_basis(*bases)` - Declare one or more Art. 9(2) bases; required when the purpose accesses Article-9 special-category-**type** fields (e.g. `:health`, `:trade_union_membership`), independently of the `:restricted` risk level; multiple calls accumulate
+- `art10_authorisation(*authorisations)` - Name the official authority or the Union or Member State law that authorises processing Art. 10 data (non-blank strings); required when the purpose accesses a `:criminal_offence` field; an Art. 9(2) basis does not stand in for it; multiple calls accumulate
 - `requires(*fields)` - Define required fields
 - `optionally(*fields)` - Define optional fields
 - `data_subjects(*categories)` - Declare categories of data subjects (Art. 30(1)(c)); with no arguments, return them
@@ -1361,9 +1629,27 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `requires_consent?` - Check if purpose requires consent (basis is :consent)
 - `art9_basis?` - True when at least one Art. 9(2) basis is declared
 - `art9_bases` - Array of declared Art. 9(2) bases
+- `art10_authorised?` - True when at least one Art. 10 authorisation is declared
+- `art10_authorisations` - Array of declared Art. 10 authorisations
+- `allowed_when_restricted(*exceptions, reference: nil)` - Declare the Art. 18(2) grounds on which the purpose continues while a subject's processing is restricted (`:consent`, `:legal_claims`, `:protection_of_rights`, `:important_public_interest` with `reference:` naming the law); multiple calls accumulate
+- `restriction_exceptions` / `important_public_interest_reference` / `continues_under_restriction?(exception)` - The declared Art. 18(2) exceptions
+- `direct_marketing!` / `direct_marketing?` - Mark the purpose as direct marketing (Art. 21(2))
+- `research_or_statistics!(public_interest_task:)` / `research_or_statistics?` / `public_interest_task?` - Mark the purpose as research or statistics (Art. 89(1), Art. 21(6))
+- `objectable` - The article that gives the right to object (`"Art. 21(1)"`, `"Art. 21(2)"`, `"Art. 21(6)"`), or nil
 - `all_fields` - Get all fields (required + optional)
 - `requires_field?(field)` - Check if field is required
 - `allows_field?(field)` - Check if field is allowed
+
+### Rights (`PamDsl.rights`)
+
+- `restrict!(subject:, ground:, fields: nil, requested_at: nil, recorded_by: nil)` - Record an Art. 18(1)(a)-(c) restriction; returns a `Rights::Restriction`
+- `notify_lift!(id, at: nil, by: nil)` - Record the Art. 18(3) notice
+- `lift!(id, reason:, at: nil, by: nil)` - Lift; raises `RightsTransitionError` without a recorded notice
+- `object!(subject:, policy:, purpose:, grounds: nil, requested_at: nil, recorded_by: nil)` - Record an objection; returns a `Rights::Objection` (pending, or upheld for direct marketing), or records the rejection and raises `ObjectionNotApplicableError`; returns the objection in force instead of recording a second (same purpose, or any direct-marketing purpose once direct marketing is objected to)
+- `decide!(id, outcome:, grounds: nil, reason: nil, by: nil, at: nil, notified_at: nil)` - `:upheld`, or `:overridden` with grounds, reason and notice
+- `withdraw_objection!(id, at: nil, by: nil)` - The subject withdraws a pending or upheld objection
+- `find(id)`, `state(subject)`, `open_requests`, `active_for(keys)` - Read the requests
+- `export(keys)` - The requests under these keys as the Art. 15 copy gives them: `{ restrictions: [...], objections: [...] }`
 
 ### Retention
 
@@ -1597,6 +1883,13 @@ A declared field's sensitivity is whatever the policy states (default `:internal
 | `identifier` | `:restricted` | National ID | VAT, tax IDs, passports |
 | `health` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
 | `biometric` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `genetic` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `racial_ethnic_origin` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `political_opinion` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `religious_belief` | `:restricted` | Special (Art. 9) | Religious or philosophical beliefs |
+| `trade_union_membership` | `:restricted` | Special (Art. 9) | GDPR explicit prohibition |
+| `sex_life_orientation` | `:restricted` | Special (Art. 9) | Sex life or sexual orientation |
+| `criminal_offence` | `:restricted` | Criminal (Art. 10) | Official authority or Union/Member State law |
 | `credential` | `:restricted` | Regular (Art. 6) | Passwords, password hashes, API keys |
 | `token` | `:restricted` | Regular (Art. 6) | A person's account and session tokens |
 | `payment_token` | `:restricted` | Financial | Payment-provider customer and profile ids |
@@ -1614,7 +1907,9 @@ Login names (`login`, `username`, `nickname`) are detected as `identifier` with 
 | `:confidential` | Contract, Consent, Legal Obligation | Art. 6(1)(a), (b), (c) |
 | `:restricted` | Contract, Legal Obligation, Consent (highest-risk ordinary data, e.g. financial/national-ID) | Art. 6(1)(a), (b), (c) |
 
-**Article 9 special categories** (independent of the table above): a field whose **type** is `:health` or `:biometric` additionally requires an `art9_basis` on every purpose that accesses it — at any sensitivity level — under Art. 9(2)(a)–(j).
+**Article 9 special categories** (independent of the table above): a field whose **type** is one of the eight Art. 9(1) types (`:health`, `:biometric`, `:genetic`, `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief`, `:trade_union_membership`, `:sex_life_orientation`) additionally requires an `art9_basis` on every purpose that accesses it — at any sensitivity level — under Art. 9(2)(a)–(j).
+
+**Article 10 data** (independent of both): a field whose **type** is `:criminal_offence` requires an `art10_authorisation` on every purpose that accesses it, naming the official authority or the Union or Member State law that authorises the processing. An Art. 9(2) basis does not satisfy it.
 
 ### Practical Implementation
 
@@ -1645,7 +1940,7 @@ PamDsl.define_policy :gdpr_compliant do
   purpose :medical_services do
     describe "Health data processing for care provision"
     basis :contract
-    art9_basis :health_care        # Art. 9(2)(h) — mandatory for Art. 9 type fields (:health/:biometric)
+    art9_basis :health_care        # Art. 9(2)(h) — mandatory for Art. 9 type fields (:health, :genetic, ...)
     art9_basis :explicit_consent   # Art. 9(2)(a) — additional basis
     requires :health_status
   end

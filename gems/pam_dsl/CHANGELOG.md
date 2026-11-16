@@ -4,6 +4,156 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **Restriction of processing (Art. 18) and the right to object (Art. 21).**
+  - Declarations on a purpose: `allowed_when_restricted(*exceptions, reference: nil)` with the
+    Art. 18(2) grounds `:consent`, `:legal_claims`, `:protection_of_rights` and
+    `:important_public_interest` (which needs `reference:` naming the law; anything else raises
+    at load); `direct_marketing!`; `research_or_statistics!(public_interest_task:)`; and the
+    derived `objectable` (`"Art. 21(2)"` for direct marketing, `"Art. 21(1)"` for `:public_task`
+    and `:legitimate_interests`, research or not, `"Art. 21(6)"` for research on another basis
+    that is not on a public-interest task, else nil). `Policy#to_h`, the comparator, the Article
+    30 report (`Right to Object:` and `Under Restriction:` lines) and its export (`objectable`,
+    `direct_marketing`, `research_or_statistics`, `allowed_when_restricted`,
+    `important_public_interest_reference`) include them, as does
+    `GDPRCompliance#processing_activities` (`objectable`, `allowed_when_restricted`); neither is
+    an Art. 30(1) gap.
+  - `PamDsl.rights`, per data subject and independent of any policy: `restrict!` (grounds
+    18(1)(a)-(c), optional `fields:` that a registered policy declares, `requested_at:` kept
+    apart from `recorded_at`), `notify_lift!` then `lift!` (`RightsTransitionError` without the
+    Art. 18(3) notice), `object!` (direct marketing upheld at once, and then stopping every
+    `direct_marketing!` purpose of every policy for that subject; Art. 21(1) and 21(6) pending,
+    restricting that purpose only under 18(1)(d); otherwise recorded as rejected and raised as
+    `ObjectionNotApplicableError`; objecting again while an objection is in force returns it),
+    `decide!` (`:upheld`, or for Art. 21(1) `:overridden` with grounds, a reason and the notice),
+    `withdraw_objection!`, `find`, `state`, `open_requests` (a pending objection listed once).
+    Times are `Time` or `DateTime` and run forwards (no request in the future, no lift before its
+    notice, no notice after the decision), else `ArgumentError`. Each step is a `Rights::Event`;
+    `PamDsl.on_rights_event` handlers all receive every event of a transition, then the first
+    handler error is raised.
+  - Condition 6 in `validate_access!` and `access_violations`, after every other condition:
+    `ObjectedProcessingError` for an upheld objection that covers the purpose,
+    `RestrictedProcessingError` for a restriction in force that covers the access when the
+    purpose declares no exception that applies (`:consent` only with a consent granted after the
+    restriction was requested). Not on the subject-less path (`validate_fields!`,
+    `field_violations`). `PamDsl.subject_keys` and `PamDsl.subject_key_resolver` map a subject
+    to its keys; without a resolver a subject is a non-empty String, Symbol or Integer
+    (`ArgumentError` for anything else), and `nil` and `"Model$*"` have none.
+  - The store protocol, `PamDsl.rights_store` (`append(events, expected_version:)`, checked with
+    `Rights.project`, which refuses a transition the rights do not allow; `events_for`, whose
+    times are `Time`; `subject_key_for`; `active`; `RightsStore::Base` adds `active_for`,
+    `any_active?`, `durable?`), and one store, `RightsStore::Memory`, the default. `PamDsl.rights`
+    refuses to record in a store that is not durable (`RightsStoreNotDurableError`) while
+    `PamDsl.require_durable_rights_store` is on, which the railtie sets outside development and
+    test (`config.pam_dsl.require_durable_rights_store` overrides it). A durable store comes from
+    the host. `PamDsl.reset!` replaces the default memory store and keeps an installed one.
+- **A type for every Art. 9(1) special category, and for Art. 10 data.** `:genetic`,
+  `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief` (religious or philosophical
+  beliefs), `:trade_union_membership` and `:sex_life_orientation` join `:health` and `:biometric`
+  in `Field::SPECIAL_CATEGORY_TYPES` (an `art9_basis` is required, else
+  `SpecialCategoryViolationError`). `:criminal_offence` (`Field::CRIMINAL_DATA_TYPES`,
+  `Field#criminal_data?`) holds Art. 10 data and has its own condition: a purpose that reads it
+  declares the official authority or the Union or Member State law that authorises it with
+  `Purpose#art10_authorisation`, else `CriminalDataViolationError`. Neither condition satisfies
+  the other. The Article 30 report and its export show both, `article_30_gaps` lists a missing
+  one, and `PIIDetector` (so the generator) proposes the new types from unambiguous column names.
+  25 field types (18 before).
+- **`Policy#validate_fields!(fields, purpose, subject: nil)` and `Policy#field_violations(fields,
+  purpose)`:** Def. 1 for a use whose subjects are not known yet, such as a query before it runs.
+  Every condition of `validate_access!` is checked except consent, which is decided per subject:
+  the purpose is declared, its basis determined, each field declared and allowed for it, and an
+  Article 9 type has an Art. 9(2) basis. `validate_fields!` is enforced and recorded as
+  `validate_access!` is; `subject:` only labels the record. Lyra checks a record load's query with
+  it before the query runs, then each record returned with `validate_access!`.
+- **The Art. 15 copy.** `GDPRCompliance#data_export` adds five keys to those it returned:
+  `records` (each of the subject's records whole, with its history), `accesses` (the access log),
+  `processing_context` (purposes, bases, recipients, transfers, retention and sources, from the
+  policy of each record's model), `notice` and `gaps` (what the policy does not declare). It takes
+  `history:`, `accesses:` (false only for a narrowed request), `disclose_actors:` (who acted is a
+  role label otherwise), `verified_by:` and `record:` (an explicit call is passed to the
+  `export_recorder`; `record: false`, which `full_report` uses, is a view and is not). New
+  constructor options: `policy_resolver:`,
+  `records_reader:`, `access_reader:`, `export_recorder:`, `actor_label:`. See
+  `PamDsl::SubjectAccess`.
+- **Field options for the copy:** `withheld_from_access: "<basis>"` (the field is named with the
+  controller's stated basis instead of its value; PAM picks no basis), `about: :payer` (another
+  person's data, set aside for review) and `collected_from` (the source, Art. 15(1)(g)), as
+  keywords or in the field's block.
+- **`access_notice`**, a policy-level declaration of the controller's notice: `controller`,
+  `rights`, `complaint`, `automated_decisions`. A missing item is a gap in the copy. An empty or
+  nil item raises `PamDsl::Error`, as an empty or nil `about` or `collected_from` raises
+  `InvalidFieldError`: an empty declaration would read as declared.
+- **`Policy#declared_retention_for(model, field_name:)`** and
+  `RetentionPolicy#declared_duration_for` / `#default_declared?`: the period the policy itself
+  declares, or nil; `retention_for` still falls back to PAM's 7 years. The copy reports the
+  declared period and lists a missing one as "Art. 15(1)(d) retention not declared"; it also
+  lists the columns no declaration covers.
+- `PolicyComparator`'s field details include the three field options.
+
+### Fixed
+- The ActiveSupport-free polyfill lacked `Object#presence`, which the Article 30 report uses, and
+  a reporter test expected "1 months" where the formatter writes "1 month";
+  `rake test:polyfill` passes again.
+
+### Changed
+- **Condition 6 alone, the rights in the Art. 15 copy, and per-purpose declarations in the
+  per-subject register.** `Policy#validate_rights!(fields, purpose, subject:)` checks only the
+  subject's restrictions and upheld objections (no purpose declaration, no consent), records only
+  a refusal and is free when nothing is in force; `Policy#rights_violations` returns the same
+  without enforcing (a host decides with it whom a model-wide query leaves out). `data_export` has
+  `restrictions` and `objections`, the subject's own requests (`PamDsl.rights.export(keys)`; the
+  keys are `"<type>$<id>"` or the new `rights_keys:` option's), without who on the staff recorded
+  them. `processing_activities` gives each activity's `rights_by_purpose` for its declared
+  purposes, read from each model's policy, and `objectable`/`allowed_when_restricted` when there
+  is exactly one; they read only the `policy_name:` policy before, so with a `policy_resolver:`
+  they were always empty.
+- **Condition 6 resolves a subject only when a request in force could cover the access**
+  (`Rights.could_apply?`, `applicable`, `violations_among`): with requests in force that cannot
+  cover this purpose and these fields (an exception the purpose declares, another purpose's
+  objection), the host is not asked for the subject's keys. An undeclared purpose declares no
+  Art. 18(2) exception (`validate_rights!`, `rights_violations`). `Rights.project` refuses a decision
+  on, or withdrawal of, an objection whose Art. 18(1)(d) restriction is not recorded.
+- **A shared consent store (`PamDsl.consent_store`).** When set, every policy's
+  `consent_policy.store` is that store (it answers `request`, `grant`, `withdraw`, `record_for`,
+  `granted?`, `durable?`), so consent is kept once per (purpose, subject) for every policy and
+  survives `PamDsl.reset!`; unset, each policy keeps its own in-memory store, as before. Lyra
+  installs a durable one. `ConsentRecord.restore` rebuilds a record in a recorded state, and
+  `consent_audit` lists the store's records for the subject (`recorded_consents`, from a store that
+  answers `consents_for`), which take precedence in `current_consents`. Under the `:consent`
+  exception of Art. 18(2), a `ConsentRequiredError` the store raises (Lyra's, for a record shared by
+  several people) is reported with the restriction instead of escaping `validate_access!`.
+- **`processing_activities` reads the declared policy** where one governs the events' model
+  (`policy_name:` or `policy_resolver:`): the purpose the source names, else the purposes that
+  admit the declared fields the events carry, with their legal bases, recipients and the model's
+  retention period; the detector's categories are joined by the declared fields' types. Without a
+  policy it guesses as before.
+- **`data_export`'s `pii_inventory` and `data_lineage` leave out the fields the policy declares
+  `withheld_from_access:` or `about:` another person** (the copy's `withheld` and `review` name
+  them), so the old keys no longer give what the copy withholds.
+- **Actor labels:** "you" only when the actor's id and class (`user_type`) are the subject's;
+  "staff or you" for an actor with the subject's id and no recorded class; "staff" otherwise.
+  An `access_reader` may return `{ entries:, gap: }` for a partial log.
+- **`rectification_history` lists an update that changed a declared field,** as well as one whose
+  changed field the detector flags; `corrected_fields` are those fields. Before, the detector
+  alone decided, on the whole event.
+
+### Fixed
+- **A retention period given in plain seconds prints correctly.** Under ActiveSupport an Integer
+  number of seconds (`keep_for 86400`, `default 7 * 365 * 86400`, or an Integer from
+  configuration) was read as years by `Reporter#format_duration`: 86400 printed "0 years" in the
+  Article 30 register, the policy summary and the retention check. `PolicyComparator` printed
+  365 days of seconds as "365 days" and seven years of seconds as "6 years". Plain seconds are
+  now worded by `PamDsl::DurationFormat`, the same in both modes, with the polyfill's
+  fixed-length units (1 month = 30 days, 1 year = 365 days) rounded down to the largest whole
+  unit: 3600 is "1 hour", 86400 "1 day", 30 days "1 month", 365 days "1 year".
+  `ActiveSupport::Duration` values print as before. Enforcement (`RetentionRule#expired?`, the
+  retention checks) already read plain seconds as seconds in both modes.
+- **Works without ActiveSupport again.** With the standard-library polyfill, the Article 30
+  register raised `NoMethodError` on `String#presence`, and JSON export
+  (`Reporter#export_json`, `GDPRCompliance#portable_export`) relied on ActiveSupport having loaded
+  `json`. The polyfill now provides `Object#presence` and treats a whitespace-only string as blank,
+  as ActiveSupport does; both files require `json`. Nothing changes under ActiveSupport.
+
 ## [0.9.3] - 2026-11-04
 
 ### Changed

@@ -42,7 +42,8 @@ namespace :test do
     Rake::Task["test"].invoke
 
     puts "\n=== Running PAM DSL tests ==="
-    Dir.chdir("gems/pam_dsl") { system("rake test") || raise("PAM DSL tests failed") }
+    # Twice: with ActiveSupport, then with the ActiveSupport-free polyfill (test:both).
+    Dir.chdir("gems/pam_dsl") { system("rake test:both") || raise("PAM DSL tests failed") }
 
     puts "\n=== Running PetriFlow tests ==="
     Dir.chdir("gems/petri_flow") { system("rake test") || raise("PetriFlow tests failed") }

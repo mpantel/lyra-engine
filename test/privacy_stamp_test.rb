@@ -128,6 +128,28 @@ class PrivacyStampTest < Minitest::Test
     assert_equal ["display"], email["transformations"]
   end
 
+  # The stamp's purposes are those the policy admits the field for, from
+  # either side: a purpose that lists the field (requires/optionally) as well
+  # as the field's own allow_for. Before 1.0.0 only allow_for counted, so a
+  # policy written purpose-side stamped every field with no purpose at all.
+  def test_purposes_listed_on_the_purpose_side_are_stamped
+    PamDsl.reset!
+    PamDsl.define_policy(:stamp_policy) do
+      field :email, type: :email, sensitivity: :confidential do
+        allow_for :contact
+      end
+      field :name, type: :name
+      purpose(:contact) { basis :contract; requires :email }
+      purpose(:invoicing) { basis :legal_obligation; requires :name, :email }
+      purpose(:newsletter) { basis :consent; optionally :name }
+    end
+    user = StampUser.create!(name: "Ann", email: "ann@example.com")
+
+    fields = privacy_of(stream(user).first)["fields"]
+    assert_equal %w[contact invoicing], fields["email"]["purposes"]
+    assert_equal %w[invoicing newsletter], fields["name"]["purposes"]
+  end
+
   def test_off_by_default_and_without_a_policy_nothing_is_stamped
     refute Lyra::Configuration.new.annotate_privacy
 

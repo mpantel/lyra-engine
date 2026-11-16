@@ -335,11 +335,43 @@ from the event store and evaluated in Ruby. A query the reader cannot answer
 exactly raises instead of returning a wrong answer: SQL fragments other than
 simple `"column OP ?"` terms, string, nested, `:through`, polymorphic or
 scoped joins, conditions on tables not joined, and scopes it cannot reduce to
-conditions.
+conditions. Destroying a parent raises it, and the destroy is refused, when a
+`has_many ... dependent: :delete_all` or `:nullify` association has such a
+scope (an SQL string scope, say), or the child's default scope is one: the
+children it would delete or nullify cannot be found exactly.
+
+Reads go through the model's default scope, as Active Record's do. A message
+naming "the default scope of *Model*" means that scope cannot be evaluated
+(`default_scope { where("deleted_at IS NULL") }`, a join, an ordering by an
+expression such as `order(arel_table[:name].lower)`): every read of that model,
+and of associations to it, raises. A message naming `unscope(...) after other
+query methods` means a scope that takes the default scope off
+(`with_deleted`, `with_discarded`), or a `rewhere`, came after a `limit`,
+`where.not`, an SQL fragment or the like (`Model.limit(5).with_discarded`):
+call it first (`Model.with_discarded.limit(5)`), or after `where`, `order` and
+named scopes only. A message naming a relation method ("`to_sql` on a
+relation", "`invert_where` on a relation", "`merge` of a … relation") means the
+relation cannot do it from the event store; it was refused before anything
+ran.
 
 **Fix**: Rewrite the query with hash conditions, or use ES-Lazy or a projected
-configuration (ES-Sync, ES-Async) for that code. The supported subset is listed
-in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled).
+configuration (ES-Sync, ES-Async) for that code. Write a default scope as hash
+conditions and column orderings (`default_scope { where(deleted_at: nil) }`).
+The supported subset is listed in
+[API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled).
+
+### `Lyra::ModeTransition::Refused`: "ES-NoProj cannot evaluate the default scope of …"
+
+**Cause**: `Lyra::ModeTransition.to!(:event_sourcing, projection_mode:
+:disabled)` checks each monitored model's default scope first. A scope
+ES-NoProj cannot evaluate from the event store (see above) would make every
+read of that model raise `UnsupportedQuery`, so the switch is refused and the
+models are named. Setting `config.projection_mode = :disabled` directly is
+not checked; the reads raise instead.
+
+**Fix**: Write those default scopes as hash conditions and column orderings,
+leave the models unmonitored, or use another projection mode.
+`ModeTransition.to!(..., force: true)` switches anyway.
 
 ### A record just written is not found (ES-Async)
 
@@ -554,7 +586,7 @@ The full list of errors Lyra raises is in
 | Error | Cause | Fix |
 |---|---|---|
 | `Lyra::EventStoreUnavailableError` | An event could not be stored; the write rolled back (Hijack, event sourcing, and Monitor with `monitor_append_failure = :fail_write`). | [Above](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair) |
-| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate. | [Mode Switching Issues](#mode-switching-issues) |
+| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate, or a switch into ES-NoProj found a default scope it cannot evaluate. | [Mode Switching Issues](#mode-switching-issues) |
 | `Lyra::Repair::Refused` | `lyra:repair` outside Monitor/Disabled. | Rebuild the tables instead: `bin/rails lyra:projections:rebuild`. |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. | [Above](#lyraprojectionsunsupportedquery-es-noproj) |
 | `Lyra::PurposeBoundReads::PurposeRequiredError` | A read with no purpose under `reads_without_purpose = :deny`. | [Above](#lyrapurposeboundreadspurposerequirederror-read-of--with-no-declared-purpose) |

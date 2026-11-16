@@ -5,9 +5,12 @@ module Lyra
       subject_id = params[:subject_id]
       subject_type = params[:subject_type]
 
+      subject_model = subject_type && Lyra.config.monitored_model_named(subject_type)
+      refuse_restricted_record!(subject_model, subject_id) if subject_model && subject_id
       flow = EventFlow.new(
         subject_id: subject_id,
-        subject_type: subject_type
+        subject_type: subject_type,
+        event_filter: method(:rights_visible)
       )
 
       @flow_data = flow.flow_data
@@ -41,6 +44,7 @@ module Lyra
     def event_chain
       model_class = monitored_model!(params[:model_class])
       model_id = params[:model_id]
+      refuse_restricted_record!(model_class, model_id)
 
       flow = EventFlow.new
       chain = flow.reconstruct_state_chain(model_class.name, model_id)
@@ -93,6 +97,7 @@ module Lyra
     def visualization
       model_class = monitored_model!(params[:model_class])
       model_id = params[:model_id]
+      refuse_restricted_record!(model_class, model_id)
       format = params[:format] || 'json'
 
       stream_name = "#{model_class.name}$#{model_id}"

@@ -20,8 +20,10 @@ module Lyra
     around_action :with_dashboard_purpose
     READ_REFUSALS = [Lyra::PurposeBoundReads::PurposeRequiredError] +
                     %w[PurposeFieldMismatchError UndeclaredPurposeError ConsentRequiredError UndeterminedBasisError
-                       SensitivityViolationError InvalidFieldError]
-                      .filter_map { |name| PamDsl.const_get(name) if defined?(PamDsl) && PamDsl.const_defined?(name) }
+                       SpecialCategoryViolationError CriminalDataViolationError InvalidFieldError
+                       RestrictedProcessingError ObjectedProcessingError]
+                      .filter_map { |name| PamDsl.const_get(name) if defined?(PamDsl) && PamDsl.const_defined?(name) } +
+                    (defined?(Lyra::Rights::UnresolvedSubjectError) ? [Lyra::Rights::UnresolvedSubjectError] : [])
     rescue_from(*READ_REFUSALS) { |error| refuse_read(error) }
 
     helper_method :pam_dsl_available?, :user_tracking_configured?, :petri_flow_available?
@@ -105,7 +107,65 @@ module Lyra
       max = Lyra.config.dashboard_max_events
       limit = bounded_param(:limit, default: max, max: max)
       events, @window = Lyra::EventWindow.recent(limit)
-      events
+      rights_visible(events)
+    end
+
+    # The subject's rights (Arts. 18 and 21) in the routes that show events
+    # or replayed state, under the dashboard's purpose: a route about one
+    # record is refused (403, as a read of the record is) when a restriction
+    # or upheld objection covers it; a route over many records leaves out
+    # the events of the records they cover, and says how many it left out in
+    # the X-Lyra-Rights-Withheld header. With no purpose, nothing in force, or
+    # the policy in audit mode, every event is shown.
+    def refuse_restricted_record!(model_class, id)
+      return unless rights_checked?
+
+      record = Lyra::Rights::SubjectKeys.find_record(model_class, id)
+      return unless record
+
+      policy = Lyra::Privacy.policy_for(model_class)
+      policy.validate_rights!(policy.declared_fields, Lyra::PurposeBoundReads.current, subject: record)
+    end
+
+    def rights_visible(events)
+      return events unless rights_checked?
+
+      verdicts = {}
+      kept = events.reject do |event|
+        model, id = event_record(event)
+        next false unless model
+
+        verdicts.fetch([model, id]) { verdicts[[model, id]] = restricted_record?(model, id) }
+      end
+      withheld = events.size - kept.size
+      response.headers["X-Lyra-Rights-Withheld"] = withheld.to_s if withheld.positive?
+      kept
+    end
+
+    def rights_checked?
+      defined?(Lyra::Rights::Queries) && Lyra::PurposeBoundReads.current && Lyra::Rights::Queries.in_force?
+    end
+
+    # The monitored model and id an event is about, or nil.
+    def event_record(event)
+      data = event.respond_to?(:data) && event.data.is_a?(Hash) ? event.data : {}
+      name = data[:model_class] || data["model_class"]
+      id = data[:model_id] || data["model_id"]
+      model = name && Lyra.config.monitored_model_named(name.to_s)
+      model && !id.nil? ? [model, id.to_s] : nil
+    end
+
+    def restricted_record?(model, id)
+      policy = Lyra::Privacy.policy_for(model)
+      pam = policy.respond_to?(:pam_policy) ? policy.pam_policy : nil
+      return false unless pam && pam.enforcement_mode == :strict
+
+      record = Lyra::Rights::SubjectKeys.find_record(model, id)
+      return false unless record
+
+      pam.rights_violations(pam.fields.keys, Lyra::PurposeBoundReads.current, subject: record).any?
+    rescue Lyra::Rights::UnresolvedSubjectError
+      true
     end
 
     # Record a dashboard read in the access log (when config.record_access_events

@@ -50,7 +50,7 @@ module Lyra
           return nil unless pam_field
 
           Annotation.new(field: pam_field.name, type: pam_field.type, sensitivity: pam_field.sensitivity,
-                         sensitive: pam_field.sensitive?, purposes: pam_field.purposes, source: :policy,
+                         sensitive: pam_field.sensitive?, purposes: admitting_purposes(pam_field), source: :policy,
                          transformations: pam_field.transformations.keys)
         end
 
@@ -62,8 +62,21 @@ module Lyra
           pam_policy.validate_access!(fields, purpose, subject: subject)
         end
 
+        def validate_fields!(fields, purpose, subject: nil)
+          pam_policy.validate_fields!(fields, purpose, subject: subject)
+        end
+
+        def field_violations(fields, purpose)
+          pam_policy.field_violations(fields, purpose)
+        end
+
+        def validate_rights!(fields, purpose, subject:)
+          pam_policy.validate_rights!(fields, purpose, subject: subject)
+        end
+
         def allowed_purposes(field)
-          find_field(field)&.purposes || []
+          pam_field = find_field(field)
+          pam_field ? admitting_purposes(pam_field) : []
         end
 
         def consent_required?(purpose)
@@ -111,6 +124,16 @@ module Lyra
         end
 
         private
+
+        # The purposes the policy admits +pam_field+ for (Policy#allowed?):
+        # the field's own allow_for and every purpose that lists it in
+        # requires or optionally. Before 1.0.0 the annotation (and so the
+        # privacy stamp) carried allow_for alone, and a policy that lists its
+        # fields on the purpose side stamped every field with no purpose.
+        def admitting_purposes(pam_field)
+          listed = pam_policy.purposes.each_value.select { |purpose| pam_policy.allowed?(pam_field.name, purpose.name) }
+          (pam_field.purposes | listed.map(&:name))
+        end
 
         def find_field(field)
           pam_policy.get_field(field.to_sym)

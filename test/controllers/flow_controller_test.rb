@@ -76,9 +76,9 @@ module Lyra
       flow = mock("flow")
       flow.stubs(:flow_data).returns({})
 
+      # (and the event filter that leaves out restricted subjects' events)
       EventFlow.expects(:new).with(
-        subject_id: "123",
-        subject_type: "User"
+        has_entries(subject_id: "123", subject_type: "User")
       ).returns(flow)
 
       get :timeline, params: { subject_id: "123", subject_type: "User" }, format: :json

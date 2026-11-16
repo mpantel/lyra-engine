@@ -109,6 +109,33 @@ module Lyra
         Thread.current[:lyra_genesis_running] = nil
       end
 
+      # Import the one row +id+ of +model_class+ if it still has no stream, now,
+      # whatever the mode, under the model's Genesis lock (see hold_lock!).
+      # Lyra::Erasure imports a row it erased that had no stream, so that the
+      # Imported event holds the erased values, never the personal ones (from
+      # 1.0.0). Returns whether it imported the row.
+      def import_one(model_class, id)
+        running = Thread.current[:lyra_genesis_running]
+        Thread.current[:lyra_genesis_running] = true
+        model_class.with_connection do |connection|
+          lock!(connection, model_class)
+          row = rows_without_stream(connection, model_class, nil, limit: 1, id: id).first
+          imported = row ? import_row(model_class, row) : nil
+          forget_cached(model_class, [imported].compact)
+          !imported.nil?
+        end
+      ensure
+        Thread.current[:lyra_genesis_running] = running
+      end
+
+      # Take +model_class+'s Genesis lock until the caller's transaction ends: no
+      # Genesis run imports one of its rows meanwhile. Lyra::Erasure takes it
+      # before erasing a row with no stream, so no import elsewhere reads the row
+      # as it was.
+      def hold_lock!(model_class)
+        model_class.with_connection { |connection| lock!(connection, model_class) }
+      end
+
       def imported?(model_class)
         @mutex.synchronize { @imported.key?(model_class.name) }
       end
@@ -125,11 +152,12 @@ module Lyra
         @mutex.synchronize { @imported[model_class.name] = true }
       end
 
-      def rows_without_stream(connection, model_class, after, limit: BATCH)
+      def rows_without_stream(connection, model_class, after, limit: BATCH, id: nil)
         table = connection.quote_table_name(model_class.table_name)
         pk = connection.quote_column_name(model_class.primary_key)
         prefix = connection.quote(Lyra.stream_prefix(model_class))
         keyset = after.nil? ? "" : "AND t.#{pk} > #{connection.quote(after)}"
+        keyset += " AND t.#{pk} = #{connection.quote(id)}" unless id.nil?
 
         connection.select_all(<<~SQL.squish).to_a
           SELECT t.* FROM #{table} t
@@ -174,8 +202,12 @@ module Lyra
         Lyra::Events.const_set(name, Class.new(Lyra::Event))
       end
 
+      # One lock per table, named after its stream owner (the STI base class):
+      # an import through a subclass and one through the base class, or an
+      # erasure of one of its rows (hold_lock!), wait for each other. Before
+      # 1.0.0 it was named after the class given.
       def lock!(connection, model_class)
-        Lyra::AdvisoryLock.xact_lock(connection, "lyra_genesis/#{model_class.name}", purpose: "Genesis")
+        Lyra::AdvisoryLock.xact_lock(connection, "lyra_genesis/#{Lyra.stream_owner_name(model_class)}", purpose: "Genesis")
       end
     end
   end

@@ -429,9 +429,55 @@ module PamDsl
       assert_equal "6 months", reporter.send(:format_duration, 6.months)
       # 30 days sits exactly on the month boundary: with ActiveSupport's calendar
       # month (~30.44 days) this formats as "30 days"; with the fixed-length
-      # polyfill (1 month == 30 days) it formats as "1 months". Both are correct.
-      assert_includes ["30 days", "1 months"], reporter.send(:format_duration, 30.days)
+      # polyfill (1 month == 30 days) it formats as "1 month". Both are correct.
+      assert_includes ["30 days", "1 month"], reporter.send(:format_duration, 30.days)
       assert_equal "N/A", reporter.send(:format_duration, nil)
+    end
+
+    # Singular for one, plural otherwise; the same wording with ActiveSupport
+    # and with the polyfill (the suite runs under both: rake test:both).
+    def test_duration_wording_is_singular_for_one
+      reporter = Reporter.new(:test_policy)
+      wording = ->(d) { reporter.send(:format_duration, d) }
+
+      assert_equal "1 year", wording.(1.year)
+      assert_equal "2 years", wording.(2.years)
+      assert_equal "1 month", wording.(1.month)
+      assert_equal "2 months", wording.(2.months)
+      assert_equal "1 day", wording.(1.day)
+      assert_equal "2 days", wording.(2.days)
+      assert_equal "1 second", wording.(1.second)
+      assert_equal "2 seconds", wording.(2.seconds)
+    end
+
+    # A purpose with no description, or only whitespace, prints N/A under both
+    # ActiveSupport and the polyfill.
+    def test_article_30_prints_na_for_a_blank_description
+      PamDsl.define_policy(:undescribed_policy) do
+        field :email, type: :email
+        purpose :blank_text do
+          describe "   "
+          basis :contract
+          requires :email
+        end
+        purpose :no_text do
+          basis :contract
+          requires :email
+        end
+      end
+      output = capture_output { |out| Reporter.new(:undescribed_policy, output: out).article_30_report }
+
+      assert_equal 2, output.scan("Description:      N/A").size
+    end
+
+    # Loaded on its own (no ActiveSupport, no test helpers), the gem still has
+    # JSON for its exports.
+    def test_standalone_polyfill_load_provides_json
+      lib = File.expand_path("../lib", __dir__)
+      script = 'require "pam_dsl"; exit(defined?(JSON) && {}.respond_to?(:to_json) ? 0 : 1)'
+
+      assert system({ "PAM_DSL_FORCE_POLYFILL" => "1" }, RbConfig.ruby, "-I", lib, "-e", script),
+             "pam_dsl loaded with the polyfill does not provide JSON"
     end
 
     def test_legal_basis_text_formatting

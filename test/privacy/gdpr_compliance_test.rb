@@ -57,6 +57,19 @@ class GDPRComplianceTest < Minitest::Test
     end
   end
 
+  # A policy's retention given as plain seconds (an Integer) was dropped,
+  # and the check applied the configured or default period instead.
+  def test_a_policy_retention_in_plain_seconds_is_kept
+    model = Struct.new(:name).new("RetentionThing")
+    with_store_and_retention(nil) do
+      Lyra.config.stubs(:monitored_models).returns([model])
+      Lyra::Privacy.stubs(:policy_for).with(model).returns(stub(retention_for: 86_400))
+      compliance = Lyra::Privacy::GDPRCompliance.new(subject_id: 7, subject_type: "User")
+
+      assert_equal({ duration: 86_400 }, compliance.send(:retention_policy)["RetentionThing"])
+    end
+  end
+
   def test_an_explicit_subject_must_match_type_and_id
     assert relates?(Event.new({ subject_id: 7, subject_type: "User" }, {}))
     refute relates?(Event.new({ subject_id: 7, subject_type: "Student" }, {}))

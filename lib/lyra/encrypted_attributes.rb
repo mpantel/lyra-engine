@@ -52,6 +52,11 @@ module Lyra
         end
       end
 
+      # +value+ of the encrypted attribute +key+ as the log holds it: its
+      # ciphertext (nil stays nil). For Lyra::Erasure, which replaces a value
+      # in an event it has opened.
+      def seal_value(model_class, key, value) = encrypt(model_class, key, value)
+
       private
 
       def model_for(data)

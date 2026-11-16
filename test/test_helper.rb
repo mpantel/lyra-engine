@@ -148,6 +148,44 @@ if defined?(Lyra)
   Minitest::Test.prepend(LyraConfigIsolation)
 end
 
+# Lyra::Rights keeps restrictions, objections and consent in the database,
+# shared by every policy object: unlike PAM DSL's in-memory consent store,
+# which went with each policy, they outlive PamDsl.reset!. A test in which any
+# store of the process (Lyra::Rights.store, or one made with Store.new)
+# recorded any is followed by a purge of the rights and consent streams and
+# tables, so the next test starts with none.
+module LyraRightsIsolation
+  def self.generations
+    Lyra::Rights.writes
+  end
+
+  def self.purge!
+    ActiveRecord::Base.with_connection do |c|
+      streams = "stream LIKE 'Lyra::Rights%' OR stream LIKE 'Lyra::Consent%'"
+      c.execute("DELETE FROM event_store_events WHERE event_id IN " \
+                "(SELECT event_id FROM event_store_events_in_streams WHERE #{streams})")
+      c.execute("DELETE FROM event_store_events_in_streams WHERE #{streams}")
+      [Lyra::Rights::TABLE, Lyra::Rights::CONSENT_TABLE].each do |table|
+        c.execute("DELETE FROM #{table}") if c.table_exists?(table)
+      end
+    end
+    Lyra::Rights.refresh!
+  end
+
+  def before_setup
+    @lyra_rights_generations = LyraRightsIsolation.generations
+    super
+  end
+
+  def after_teardown
+    super
+  ensure
+    LyraRightsIsolation.purge! if @lyra_rights_generations && LyraRightsIsolation.generations != @lyra_rights_generations
+  end
+end
+
+Minitest::Test.prepend(LyraRightsIsolation) if defined?(Lyra::Rights)
+
 # Lyra::INTERNAL is private: only Lyra's own call sites name it. Tests that stand
 # in for them (a projection, a replay) fetch it here.
 class Minitest::Test

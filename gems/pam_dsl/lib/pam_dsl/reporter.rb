@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "json" # stdlib; ActiveSupport also loads it, the polyfill does not
+
 module PamDsl
   # Privacy Report Generator
   #
@@ -433,12 +435,15 @@ module PamDsl
         puts "\n### #{idx + 1}. #{purpose.name.to_s.titleize}\n"
         puts "  Description:      #{purpose.description.presence || 'N/A'}"
         puts "  Legal Basis:      #{legal_basis_text(purpose.legal_basis)}"
+        print_special_data_permissions(purpose)
         puts "  Data Subjects:    #{declared(purpose.data_subjects, 'c')}"
         puts "  Data Categories:  #{purpose.required_fields.join(', ')}"
         puts "  Optional Data:    #{purpose.optional_fields.join(', ')}" if purpose.optional_fields.any?
         puts "  Consent Required: #{purpose.requires_consent? ? 'Yes' : 'No'}"
         puts "  Recipients:       #{declared(purpose.recipients, 'd')}"
         puts "  Transfers:        #{transfers_text(purpose)}"
+        puts "  Right to Object:  #{objection_text(purpose)}"
+        puts "  Under Restriction: #{restriction_text(purpose)}"
       end
     end
 
@@ -477,8 +482,48 @@ module PamDsl
       end
     end
 
+    # What permits a purpose to process special-category data (its Art. 9(2)
+    # bases) and Art. 10 data (its Art. 10 authorisations). Each line is
+    # printed when the purpose reads such data or declares one.
+    def print_special_data_permissions(purpose)
+      if purpose.art9_basis? || @policy.purpose_reads?(purpose, :special_category?)
+        bases = purpose.art9_bases.map { |b| "#{b} (Art. 9(2)(#{("a".ord + Purpose::ART9_BASES.index(b)).chr}))" }
+        puts "  Art. 9(2) Basis:  #{bases.any? ? bases.join(', ') : 'NOT DECLARED (Art. 9(2))'}"
+      end
+      return unless purpose.art10_authorised? || @policy.purpose_reads?(purpose, :criminal_data?)
+
+      puts "  Art. 10:          #{purpose.art10_authorised? ? purpose.art10_authorisations.join('; ') : 'NOT DECLARED (Art. 10)'}"
+    end
+
     def declared(values, clause)
       values.any? ? values.join(', ') : "NOT DECLARED (Art. 30(1)(#{clause}))"
+    end
+
+    # Which article lets a subject object to the purpose (Art. 21), or why
+    # none does. Not an Art. 30(1) item, so never a gap.
+    def objection_text(purpose)
+      case purpose.objectable
+      when "Art. 21(2)" then "Art. 21(2) (direct marketing: an objection stops it at once)"
+      when "Art. 21(6)" then "Art. 21(6) (research or statistics)"
+      when "Art. 21(1)" then "Art. 21(1)"
+      else
+        reason = if purpose.research_or_statistics? then "Art. 21(6): a task in the public interest"
+                 elsif purpose.basis_undetermined? then "no legal basis yet"
+                 else legal_basis_text(purpose.legal_basis).sub(/\A(.*) \(GDPR (.*)\)\z/, '\2 \1')
+                 end
+        "none (#{reason})"
+      end
+    end
+
+    # The Art. 18(2) exceptions under which the purpose continues while a
+    # subject's processing is restricted.
+    def restriction_text(purpose)
+      return "stops (no Art. 18(2) exception declared)" if purpose.restriction_exceptions.empty?
+
+      purpose.restriction_exceptions.map do |exception|
+        text = exception.to_s.tr("_", " ")
+        exception == :important_public_interest ? "#{text} (#{purpose.important_public_interest_reference})" : text
+      end.join(", ")
     end
 
     def transfers_text(purpose)
@@ -687,8 +732,12 @@ module PamDsl
     # Formatting Helpers
     # ─────────────────────────────────────────────────────────────────────────
 
+    # A plain number of seconds (keep_for 86_400; also every duration under the
+    # polyfill) is worded by DurationFormat, the same in both modes; an
+    # ActiveSupport::Duration keeps its calendar-aware wording.
     def format_duration(duration)
       return "N/A" unless duration
+      return DurationFormat.seconds(duration) if DurationFormat.seconds?(duration)
 
       case duration
       when DURATION_CLASS
@@ -697,8 +746,6 @@ module PamDsl
         elsif duration >= 1.day then count((duration / 1.day).to_i, "day")
         else count(duration.to_i, "second")
         end
-      when Numeric
-        count(duration / 1.year.to_i, "year")
       else
         duration.to_s
       end
@@ -805,11 +852,18 @@ module PamDsl
             name: p.name.to_s,
             description: p.description,
             legal_basis: p.legal_basis.to_s,
+            art9_bases: p.art9_bases.map(&:to_s),
+            art10_authorisations: p.art10_authorisations,
             data_subjects: p.data_subjects,
             data_categories: p.required_fields.map(&:to_s),
             requires_consent: p.requires_consent?,
             recipients: p.recipients,
-            transfers: p.transfers # nil when not declared
+            transfers: p.transfers, # nil when not declared
+            objectable: p.objectable, # the Art. 21 right to object; nil when there is none
+            direct_marketing: p.direct_marketing?,
+            research_or_statistics: p.research_or_statistics, # nil, or { public_interest_task: }
+            allowed_when_restricted: p.restriction_exceptions.map(&:to_s),
+            important_public_interest_reference: p.important_public_interest_reference
           }
         end,
         retention: {

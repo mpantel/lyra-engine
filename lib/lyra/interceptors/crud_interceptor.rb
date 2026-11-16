@@ -170,6 +170,10 @@ module Lyra
           action_id: lyra_current_action_id,
           user_action: lyra_current_user_action
         }
+        # The acting user's class, beside its id (from 1.0.0): an id alone does
+        # not say whose account it is.
+        user_type = lyra_current_user_type
+        base_metadata[:user_type] = user_type if user_type
 
         base_metadata.merge(lyra_custom_metadata(operation))
       end
@@ -210,7 +214,19 @@ module Lyra
           Lyra::Temporal::AsOf.new(self, time)
         end
 
+        # The records the purpose in scope may process: those of subjects
+        # whose restriction or objection (Arts. 18 and 21) covers it left
+        # out, for a batch job that should skip them rather than stop at the
+        # first (a load of one raises). +fields+: the declared fields the job
+        # reads (default: all, so a restriction of any field leaves the record
+        # out). With no purpose in scope, every record. A scope: it chains
+        # with where, order, find_each (Lyra::Rights::Queries.processable).
+        def lyra_processable(fields: nil)
+          Lyra::PurposeBoundReads.processable(all, fields)
+        end
+
         def monitor_with_lyra(options = {})
+          Lyra::ModelSelection.refuse_composite_key!(self)
           self.lyra_monitored = true
           self.lyra_config = Lyra::ModelConfiguration.new(self, options)
           Lyra.config.monitor_model(self, options)
@@ -240,10 +256,14 @@ module Lyra
         # When projection_mode is :disabled, read from event store instead of DB
         # =======================================================================
 
+        # Every read below goes through the model's default scopes, or the
+        # scope an unscoped { ... } block sets, as ActiveRecord's reads do
+        # (Lyra::Projections::DefaultScopes); a model without default scopes
+        # reads as before.
         def find(*args)
           if lyra_read_from_events?
             id = args.first
-            record = Lyra::Projections::EventStoreReader.find(self, id)
+            record = lyra_find_from_events(id)
             raise ActiveRecord::RecordNotFound.new("Couldn't find #{name} with '#{primary_key}'=#{id}", self, primary_key, id) unless record
             lyra_checked_read(record)
           else
@@ -251,26 +271,35 @@ module Lyra
           end
         end
 
+        # The conditions are a use of the attributes they name, checked before
+        # the query (Lyra::PurposeBoundReads.checked_finder): through
+        # ActiveRecord's statement cache this path never reaches the
+        # relation's hooks.
         def find_by(attributes)
-          if lyra_read_from_events?
-            lyra_checked_read(Lyra::Projections::EventStoreReader.find_by(self, attributes))
-          else
-            super
+          Lyra::PurposeBoundReads.checked_finder(self, attributes) do
+            if lyra_read_from_events?
+              lyra_checked_read(lyra_find_by_from_events(attributes))
+            else
+              super
+            end
           end
         end
 
         def find_by!(attributes)
-          if lyra_read_from_events?
-            record = Lyra::Projections::EventStoreReader.find_by(self, attributes)
-            raise ActiveRecord::RecordNotFound.new("Couldn't find #{name}", self) unless record
-            lyra_checked_read(record)
-          else
-            super
+          Lyra::PurposeBoundReads.checked_finder(self, attributes) do
+            if lyra_read_from_events?
+              record = lyra_find_by_from_events(attributes)
+              raise ActiveRecord::RecordNotFound.new("Couldn't find #{name}", self) unless record
+              lyra_checked_read(record)
+            else
+              super
+            end
           end
         end
 
         # A record rebuilt from events is checked when it is returned
-        # (Lyra::PurposeBoundReads), as a loaded row is by after_find.
+        # (Lyra::PurposeBoundReads), as a loaded row is by after_find, with
+        # the attributes its conditions named.
         def lyra_checked_read(record)
           Lyra::PurposeBoundReads.check(record) if record
           record
@@ -278,7 +307,16 @@ module Lyra
 
         def exists?(conditions = :none)
           if lyra_read_from_events? && (conditions.is_a?(Integer) || conditions.is_a?(String))
-            Lyra::Projections::EventStoreReader.exists?(self, conditions)
+            # A record a right in force leaves out of the purpose's queries
+            # does not exist for it, as in Active Record's exists?.
+            exclusion = Lyra::PurposeBoundReads.checking? && Lyra::PurposeBoundReads.rights_exclusion(self)
+            if exclusion
+              record = lyra_find_from_events(conditions)
+              return !record.nil? && exclusion.keeps?(record)
+            end
+
+            scope = lyra_read_scope
+            scope ? !lyra_find_from_events(conditions, scope).nil? : Lyra::Projections::EventStoreReader.exists?(self, conditions)
           else
             super
           end
@@ -292,14 +330,28 @@ module Lyra
             # association) the conditions apply to that relation's records.
             scoped = Lyra::Projections::CachedRelation.scoped_for(self)
             return scoped.where(*args, **kwargs, &block) if scoped
+            # where.not(...), where.missing(...): the chain of every record
+            # the model reads.
+            return lyra_all_from_events.where if args.empty? && kwargs.empty?
 
             # A plain hash of conditions can use the reference links (a
             # foreign-key lookup, as dependent associations make); anything
-            # else is evaluated on every record.
+            # else is evaluated on every record. The default scope narrows
+            # what they select (and orders it), so that an unscope can still
+            # take it off (with_discarded).
             conditions = kwargs if args.empty?
             conditions = args.first if args.size == 1 && args.first.is_a?(Hash) && kwargs.empty?
+            # The plan (for unscope and rewhere) starts from every record:
+            # read then, if ever needed.
             linked = Lyra::Projections::EventStoreReader.linked_where(self, conditions) if block.nil? && conditions.present?
-            linked || Lyra::Projections::EventStoreReader.relation(self).where(*args, **kwargs, &block)
+            every = linked ? -> { Lyra::Projections::EventStoreReader.relation(self) } : Lyra::Projections::EventStoreReader.relation(self)
+            selected = linked || every.where(*args, **kwargs, &block)
+            if conditions.is_a?(Hash) && block.nil?
+              Lyra::Projections::DefaultScopes.narrow(selected, lyra_read_scope, base: every, steps: [[:where, conditions]])
+            else
+              # An SQL fragment: the relation keeps no plan.
+              Lyra::Projections::DefaultScopes.narrow(selected, lyra_read_scope).tap { _1.plan = nil }
+            end
           else
             super
           end
@@ -307,9 +359,9 @@ module Lyra
 
         # Override all to use cached projections in disabled mode
         # Note: Rails 8 passes arguments to all() in internal call chains (e.g., reload)
-        def all(...)
+        def all(*args, **kwargs, &block)
           if lyra_read_from_events?
-            Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.all(self)
+            Lyra::Projections::CachedRelation.scoped_for(self) || lyra_all_from_events(all_queries: kwargs[:all_queries])
           else
             super
           end
@@ -336,13 +388,12 @@ module Lyra
           end
         end
 
-        # Override first/last to properly order by primary key
-        # Rails' Model.first is equivalent to Model.order(pk: :asc).limit(1).first
-        # Rails' Model.last is equivalent to Model.order(pk: :desc).limit(1).first
+        # As ActiveRecord's first and last: in the relation's order (a default
+        # scope's), or else by primary key. last(n) is the last n in that
+        # order, as ActiveRecord returns them.
         def first(limit = nil)
           if lyra_read_from_events?
-            relation = Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.relation(self)
-            relation.order(primary_key => :asc).first(limit)
+            lyra_ordered_from_events.first(limit)
           else
             super
           end
@@ -350,19 +401,58 @@ module Lyra
 
         def last(limit = nil)
           if lyra_read_from_events?
-            relation = Lyra::Projections::CachedRelation.scoped_for(self) || Lyra::Projections::EventStoreReader.relation(self)
-            relation.order(primary_key => :desc).first(limit)
+            lyra_ordered_from_events.last(limit)
           else
             super
           end
         end
 
-        # NOTE: We intentionally do NOT override unscoped here.
-        # Association loading is handled by AssociationInterceptor instead,
-        # which patches AR's BelongsTo/HasOne/HasMany association classes directly.
-        # This avoids compatibility issues with AR's internal scope building machinery.
+        # Model.unscoped in application code reads every record of the model
+        # from the event store, with no default scope (the table is empty or
+        # stale under ES-NoProj). With a block, ActiveRecord's own: it sets
+        # an empty current scope, which the reads above honour. ActiveRecord's
+        # internals (association scopes, uniqueness validation, counter
+        # caches) and Lyra's own code build relations on Model.unscoped or
+        # read the table through it: they keep ActiveRecord's relation. The
+        # caller is told by its file, past a model's own unscoped override
+        # (DefaultScopes.application_caller?). Should a caller still be taken
+        # for the application, what it builds is a CachedRelation, which
+        # raises UnsupportedQuery for what it cannot do exactly (an Arel
+        # where!) rather than act on other records.
+        def unscoped(&block)
+          return super if block || !lyra_read_from_events?
+          return super unless Lyra::Projections::DefaultScopes.application_caller?(caller_locations(1, 6))
+
+          Lyra::Projections::EventStoreReader.relation(self)
+        end
 
         private
+
+        # The ActiveRecord relation reads select through: the current scope
+        # of an unscoped { ... } block, else the default scopes; nil for
+        # every record (Lyra::Projections::DefaultScopes).
+        def lyra_read_scope(all_queries: nil)
+          Lyra::Projections::DefaultScopes.read_scope(self, all_queries: all_queries)
+        end
+
+        def lyra_all_from_events(all_queries: nil)
+          Lyra::Projections::DefaultScopes.narrow(Lyra::Projections::EventStoreReader.all(self), lyra_read_scope(all_queries: all_queries))
+        end
+
+        def lyra_ordered_from_events
+          relation = Lyra::Projections::CachedRelation.scoped_for(self) || lyra_all_from_events
+          relation.ordering.any? ? relation : relation.order(primary_key => :asc)
+        end
+
+        # The record with +id+, if the read scope selects it.
+        def lyra_find_from_events(id, scope = lyra_read_scope)
+          record = Lyra::Projections::EventStoreReader.find(self, id)
+          record if record && Lyra::Projections::DefaultScopes.admits?(self, record, scope)
+        end
+
+        def lyra_find_by_from_events(attributes)
+          Lyra::Projections::DefaultScopes.find_by(self, attributes, lyra_read_scope)
+        end
 
         def lyra_read_from_events?
           return false if Thread.current[:lyra_bypass_read_override]
@@ -383,6 +473,12 @@ module Lyra
       # their after_* callbacks return early via @lyra_hijacked.
       def lyra_events_enabled?
         lyra_monitored? && !Lyra.disabled_mode?
+      end
+
+      # The column a command's result carries the record's key under (the
+      # primary key, Lyra.key_column).
+      def lyra_key_column
+        Lyra.key_column(self.class)
       end
 
       def lyra_check_read_purpose
@@ -451,7 +547,8 @@ module Lyra
           # it. Nothing else changed: assigning every attribute back (as this
           # used to) is redundant and fails on models that guard a writer
           # (Solidus's StockItem#count_on_hand=).
-          self.id = result.attributes[:id] if result.attributes.key?(:id)
+          key = lyra_key_column.to_sym
+          self.id = result.attributes[key] if result.attributes.key?(key)
           true
         else
           errors.add(:base, result.error)
@@ -604,7 +701,7 @@ module Lyra
           # Store result for after callback
           @lyra_event_result = result
           @lyra_event_operation = :create
-          @lyra_assigned_id = result.attributes[:id]
+          @lyra_assigned_id = result.attributes[lyra_key_column.to_sym]
 
           # Assign the pre-generated ID
           self.id = @lyra_assigned_id if @lyra_assigned_id
@@ -809,7 +906,7 @@ module Lyra
       def lyra_warm_cache(operation, result)
         model_id = case operation
         when :create
-          result.attributes[:id] || result.attributes["id"]
+          result.attributes[lyra_key_column.to_sym] || result.attributes[lyra_key_column]
         when :update, :destroy
           event = result.events&.first
           event&.data&.dig(:model_id) || event&.data&.dig("model_id")
@@ -938,6 +1035,15 @@ module Lyra
       # Hook methods for context (can be overridden by the application)
       def lyra_current_user_id
         defined?(Current) && Current.respond_to?(:user) ? Current.user&.id : nil
+      end
+
+      # Current.user's class, when Current.user is the user lyra_current_user_id
+      # names (a model may override that hook with someone else).
+      def lyra_current_user_type
+        return nil unless defined?(Current) && Current.respond_to?(:user)
+
+        user = Current.user
+        user && user.id == lyra_current_user_id ? Lyra::Attribution.actor_type(user) : nil
       end
 
       def lyra_current_request_id

@@ -126,7 +126,7 @@ module Lyra
       end
 
       if @selected_model.present? && @selected_id.present?
-        @record = @model_class.find_by(id: @selected_id)
+        @record = @model_class.find_by(Lyra.key_column(@model_class) => @selected_id)
         @audit_entries = AuditProjection.audit_trail(@model_class, @selected_id)
       end
     end
@@ -135,7 +135,7 @@ module Lyra
     def audit_trail_for_record
       @model_class = monitored_model!(params[:model_class])
       @model_id = params[:id]
-      @record = @model_class.find_by(id: @model_id)
+      @record = @model_class.find_by(Lyra.key_column(@model_class) => @model_id)
       @audit_entries = AuditProjection.audit_trail(@model_class, @model_id)
       @monitored_models = Lyra.config.monitored_models
 
@@ -172,6 +172,7 @@ module Lyra
       model_class = params[:model_class]
       model_id = params[:id]
       depth = bounded_param(:depth, default: 1, max: 3) # How many related entities to include
+      refuse_restricted_record!(monitored_model!(model_class), model_id)
 
       events = fetch_entity_events(model_class, model_id, depth: depth)
       graph = Visualization::EventGraph.new(events)
@@ -191,7 +192,7 @@ module Lyra
       models = model_filter.present? ? [monitored_model!(model_filter)] : Lyra.config.monitored_models
 
       models.each do |model_class|
-        model_class.order(updated_at: :desc).limit(limit).each do |record|
+        model_class.lyra_processable.order(updated_at: :desc).limit(limit).each do |record|
           stream_name = "#{model_class.name}$#{record.id}"
           begin
             event_count = Lyra.config.event_store.read.stream(stream_name).count
@@ -400,7 +401,7 @@ module Lyra
     def collect_events_for_model(model_class)
       # Collect all events for a model class
       events = []
-      model_class.pluck(:id).each do |id|
+      model_class.lyra_processable.pluck(:id).each do |id|
         stream_name = "#{model_class.name}$#{id}"
         begin
           events.concat(Lyra.config.event_store.read.stream(stream_name).to_a)
@@ -417,7 +418,7 @@ module Lyra
         model_class.column_names.include?(field.to_s)
       end
 
-      scope = model_class.order(updated_at: :desc)
+      scope = model_class.lyra_processable.order(updated_at: :desc)
 
       # Apply search if provided
       if search_query.present? && display_fields.any?
@@ -461,7 +462,7 @@ module Lyra
     def fetch_recent_events(limit: 100)
       events = []
       Lyra.config.monitored_models.each do |model_class|
-        model_class.order(updated_at: :desc).limit(limit / Lyra.config.monitored_models.size).each do |record|
+        model_class.lyra_processable.order(updated_at: :desc).limit(limit / Lyra.config.monitored_models.size).each do |record|
           stream_name = "#{model_class.name}$#{record.id}"
           begin
             stream_events = Lyra.config.event_store.read.stream(stream_name).to_a
@@ -471,7 +472,7 @@ module Lyra
           end
         end
       end
-      events.sort_by { |e| event_timestamp(e) }.last(limit)
+      rights_visible(events.sort_by { |e| event_timestamp(e) }.last(limit))
     end
 
     def fetch_filtered_events(model_class: nil, operation: nil, limit: 50)
@@ -479,7 +480,7 @@ module Lyra
       models = model_class.present? ? [monitored_model!(model_class)] : Lyra.config.monitored_models
 
       models.each do |klass|
-        klass.order(updated_at: :desc).limit(limit).each do |record|
+        klass.lyra_processable.order(updated_at: :desc).limit(limit).each do |record|
           stream_name = "#{klass.name}$#{record.id}"
           begin
             stream_events = Lyra.config.event_store.read.stream(stream_name).to_a
@@ -498,7 +499,7 @@ module Lyra
         end
       end
 
-      events.sort_by { |e| event_timestamp(e) }.last(limit)
+      rights_visible(events.sort_by { |e| event_timestamp(e) }.last(limit))
     end
 
     def fetch_entity_events(model_class, model_id, depth: 1)
@@ -517,7 +518,7 @@ module Lyra
           # Find events sharing correlation IDs
           correlation_ids.each do |corr_id|
             Lyra.config.monitored_models.each do |klass|
-              klass.order(updated_at: :desc).limit(20).each do |record|
+              klass.lyra_processable.order(updated_at: :desc).limit(20).each do |record|
                 other_stream = "#{klass.name}$#{record.id}"
                 next if other_stream == stream_name
 
@@ -536,7 +537,7 @@ module Lyra
         # Stream doesn't exist
       end
 
-      events.uniq { |e| e.event_id }.sort_by { |e| event_timestamp(e) }
+      rights_visible(events.uniq { |e| e.event_id }.sort_by { |e| event_timestamp(e) })
     end
 
     def record_display_name(record)
@@ -560,7 +561,7 @@ module Lyra
       events = []
 
       Lyra.config.monitored_models.each do |model_class|
-        model_class.where("updated_at >= ?", cutoff).find_each do |record|
+        model_class.lyra_processable.where("updated_at >= ?", cutoff).find_each do |record|
           stream_name = "#{model_class.name}$#{record.id}"
           begin
             stream_events = Lyra.config.event_store.read.stream(stream_name).to_a
@@ -571,14 +572,14 @@ module Lyra
         end
       end
 
-      events.sort_by { |e| event_timestamp(e) }
+      rights_visible(events.sort_by { |e| event_timestamp(e) })
     end
 
     def fetch_events_for_model(model_class, days: 7)
       cutoff = days.days.ago
       events = []
 
-      model_class.where("updated_at >= ?", cutoff).find_each do |record|
+      model_class.lyra_processable.where("updated_at >= ?", cutoff).find_each do |record|
         stream_name = "#{model_class.name}$#{record.id}"
         begin
           stream_events = Lyra.config.event_store.read.stream(stream_name).to_a
@@ -588,7 +589,7 @@ module Lyra
         end
       end
 
-      events.sort_by { |e| event_timestamp(e) }
+      rights_visible(events.sort_by { |e| event_timestamp(e) })
     end
 
     def event_timestamp(event)

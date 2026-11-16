@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Breaking
+- **A query uses every declared field it names, whatever it returns.** Purpose-bound reads checked
+  record loads and `pluck`; aggregates, filters and `exists?` were not checked, so under a purpose
+  that does not allow `name`, `Registration.group(:name).count`, `maximum(:name)` and
+  `where(name: "Ann").exists?` answered, and `find_by(name: "Ann")` raised for Ann and returned
+  `nil` for anyone else: a membership test. Now the declared fields a query names (its select or
+  pluck list, the aggregated column, `group`, `where`, `having`, `order`, the conditions of
+  `find_by`, class-level too, and `exists?`, a subquery, and the filter of `update_all`,
+  `delete_all`, `touch_all`, `delete_by` and `destroy_by`) are checked before it runs, so such code
+  under a purpose now raises `PamDsl::PurposeFieldMismatchError` (or, with no purpose under
+  `reads_without_purpose :deny`, `PurposeRequiredError`). `count`, `count(:all)` and `size` name
+  nothing and are not checked; `count(:name)` uses `name`. The check is split by what can be known:
+  a record load has its query's fields checked without the consent step (PAM's new
+  `validate_fields!`), then each record returned as before, consent included, for what it holds
+  and what the query named; aggregates, `exists?`, `ids`, `pluck` and bulk writes read everyone at
+  once (subject `Model$*`) and are refused under a purpose whose basis is consent. A joined
+  model's declared fields are checked against its own policy (subject `Other$*`). `find_each` and
+  `in_batches` check and record a query once, not per batch. ES-NoProj gives the same answers:
+  its relations keep what their query named, and it no longer disagrees with Monitor on
+  `exists?(hash)`. Rails' uniqueness validation and an association's `dependent:` handling when a record
+  is destroyed (`:delete_all`, `:nullify`, `:delete`, the restrict options, and the lookup of the
+  dependents `:destroy` destroys) run as part of the write and are not checked; `find_or_create_by`
+  and an application's own `where(author_id: id).delete_all` are. In ES-NoProj a block given to
+  `select` (now returning an Array, as in Active Record), `find` or `many?` sees only checked
+  records; it saw the cached records unchecked. So do its association readers (`belongs_to`,
+  `has_one`), `records`, `each` and `find_each` without a block, and `inspect`, which handed
+  records out unchecked. A subquery or CTE reads other people, so what it names is checked whole
+  (subject `Model$*`), even on the queried model; a `table.column` inside an SQL fragment belongs
+  to that table's model; a column named without its table that the queried model lacks belongs
+  to the joined model that has it; a condition on a `belongs_to` association names its foreign
+  key; `update_all`'s SET expressions read the columns they name (`"email = name"`); the
+  `returning:` columns of `insert_all` and `upsert_all` are read; and `cache_version` and
+  `cache_key_with_version` are aggregates. A refused check is never remembered, and the
+  application's block inside `find_each` or `in_batches` is checked each time it queries; only the
+  loop's own cursor queries are checked once. The purpose and Lyra's internal-read flag are kept
+  in Ruby's fiber storage, tied to their thread, so the fiber an Enumerator runs in
+  (`relation.to_enum.next`) has them and another thread does not; code that read
+  `Thread.current[:lyra_purpose]` uses `Lyra::PurposeBoundReads.current`. With no purpose and `reads_without_purpose :allow` the hooks return before
+  looking at the query. Limits: hand-written SQL, string joins, views, functions, triggers, custom
+  Arel nodes and CTEs are not seen, and an SQL fragment is matched by the queried model's declared
+  names only.
 - **Lyra's escape hatches are Lyra's.** `Lyra.projection_write`, `Lyra::PurposeBoundReads.internal`,
   `Lyra::Projections::ModelProjection.project` and `Lyra::Projections::Rebuild.project_events`
   switch off the checks that keep every write in the log and every read under its purpose. They now
@@ -68,6 +108,210 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifiers of the BPI and Olist examples are updated.
 
 ### Fixed
+- **Retention did nothing in ES-NoProj.** `Lyra::Retention` (and `lyra:retention:apply`) listed
+  the model's ids from its streams but loaded each record from its table, which ES-NoProj leaves
+  empty or stale: no record was found, a dry run listed nothing and no rule was applied, and
+  `:hard_delete` and `:soft_delete` would have failed reloading the record from its table. In
+  ES-NoProj retention now finds the records, their anchor column (`created_at` or
+  `config.retention_anchors`) included, in the event store, with no default scope applied (a
+  soft-deleted record is still due), and acts on them there: `:hard_delete` destroys the record
+  rebuilt from its events (a destroy event) and `:soft_delete` updates it (an update event). The
+  other modes are unchanged.
+- **The Art. 15 copy read a column an association owns as a link to another model too.** The
+  `<type>_id` convention of `Lyra::Privacy::SubjectLinks` also read `owner_id` of
+  `belongs_to :owner, class_name: "Person"` as a link to a model named `Owner`, and a polymorphic
+  `owner_id` as one whatever `owner_type` said, so the export for `Owner` 13 included the note
+  of `Person` 13. A column an association owns now links only to that association's class (a
+  polymorphic one's, only with its type column naming the subject's class), and the convention
+  reads only columns no association owns, for a subject type that is a monitored model or names
+  no model at all.
+- **ES-NoProj reads apply the model's default scope.** Active Record builds every read of a
+  table from the model's `default_scope`; ES-NoProj reads, rebuilt from the event log, left it
+  out, so soft-deleted records (`default_scope { where(deleted_at: nil) }`, as paranoia, discard
+  and Solidus's `Spree::SoftDeletable` use) were found, counted and returned by associations.
+  `find`, `find_by`, `find_by!`, `exists?`, `where`, `all` (and so `count`, `pluck` and the other
+  calculations), `first`, `last` and named scopes now read through the default scope, as do
+  `belongs_to` and `has_one` readers and `has_many` readers, counts, sizes and collection queries
+  (through the target's default scope less what the association's scope unscopes, as Active
+  Record's association scope). A default `order` orders the results; on a `CachedRelation` an
+  `order` now adds to the existing order and `reorder` replaces it, as in Active Record, and
+  `first`/`last` follow the relation's order (`last(n)` returns the last n in that order, no
+  longer reversed). `Model.unscoped` read the table, which ES-NoProj leaves empty or stale; in
+  application code it now returns every record from the event store, and reads inside
+  `Model.unscoped { ... }` (and `reload`) leave the default scope out. Active Record's internals
+  and Lyra's own code keep Active Record's relation from `Model.unscoped`, also through a
+  model's own `def self.unscoped = super`. Scopes that take the default scope off
+  (`with_deleted`, `with_discarded`, `unscope(where: :deleted_at)`) and `rewhere` work after
+  `where`, `order` and named scopes, on the model and on an association, as on Active Record
+  (the relation replays its conditions without what is taken off); **after a `limit`,
+  `where.not` or an SQL fragment they raise `UnsupportedQuery`**, since the records they would
+  bring back are no longer in the relation. **A default scope ES-NoProj cannot evaluate (an SQL
+  string, a join, an ordering by an expression) now raises `UnsupportedQuery` on every read of
+  the model**, rather than answer with the records it leaves out, and
+  `Lyra::ModeTransition.to!` refuses the switch into ES-NoProj while a monitored model has one
+  (`force: true` overrides). An association's scope is evaluated on each read, so one that
+  decides at run time (`-> { Current.admin? ? with_deleted : all }`) is honoured. A find by
+  primary key reads one record even under an ordered default scope. Models without a default
+  scope read as before.
+- **ES-NoProj relations no longer act on records their query did not select.** A
+  `CachedRelation` answers exactly or raises `UnsupportedQuery` before anything is written.
+  `merge` and `merge!` returned the relation unchanged, so `Model.unscoped.merge(Model.where(...))
+  .delete_all` deleted every record; they now evaluate the other relation (its conditions,
+  order and limit, or the records of an event-store relation) and refuse another model's, a
+  joined or a limited one. `where!` with anything but hash conditions kept every record and now
+  raises; `exists?(["title = ?", x])` ignored its condition and now evaluates it as `where`
+  does (or refuses it). Relation methods Lyra did not implement ran on a bare relation of the model, past the
+  relation's conditions: `update` and `update_counters` changed every record, `first_or_create!`
+  and `create_or_find_by!` created records without the conditions, `create_with` was dropped and
+  `to_sql` raised `NoMethodError`. `update`, `update!`, `update_counters` (with `touch:`),
+  `first_or_initialize`, `first_or_create(!)`, `create_or_find_by(!)` (a record is found instead
+  when a unique index of the table would refuse it, as Active Record finds it on the violation)
+  and `create_with` now work on the relation's records and conditions, and `sole` and
+  `find_sole_by` raise `RecordNotFound` or `SoleRecordExceeded` as Active Record does; `lock`, `annotate`,
+  `optimizer_hints` and `strict_loading` are accepted and do nothing (writes take Lyra's
+  aggregate lock); `to_sql` and every other Active Record relation method raise
+  `UnsupportedQuery` before running. A model's own class methods called on a relation run with
+  it as the current scope, as Active Record runs them: their reads and writes act on its
+  records.
+- **PAM DSL prints a retention period given in plain seconds correctly.** With ActiveSupport
+  loaded, as in a Lyra application, an Integer number of seconds (`keep_for 86400`,
+  `default 7 * 365 * 86400`, or an Integer from configuration) was read as years: 86400 printed
+  "0 years" in the Article 30 register, the policy summary and the retention check, and the
+  policy comparator printed 365 days of seconds as "365 days" and seven years of seconds as
+  "6 years". Plain seconds are now worded the same with and without ActiveSupport, with the
+  polyfill's fixed-length units (1 month = 30 days, 1 year = 365 days), rounded down to the
+  largest whole unit: 3600 is "1 hour", 86400 "1 day", 30 days "1 month", 365 days "1 year".
+  `ActiveSupport::Duration` values (`1.day`, `7.years`) print as before. Retention enforcement
+  was not affected: it already read plain seconds as seconds in both modes.
+- **Lyra's GDPR retention check dropped a policy's retention given in plain seconds** and
+  applied the configured or default period (7 years) instead; it now keeps a plain number of
+  seconds as it keeps an `ActiveSupport::Duration`.
+- **An erased record's row kept personal values inside `json`, `jsonb` and array columns that
+  its events had lost,** so it no longer replayed to its events. This happened with or without
+  `everywhere`. The erasure rewrote the events recursively but replaced only top-level string
+  columns in the row. `Lyra::Erasure` now scrubs every column of the row with the rule its events
+  get: the record's own row with the key and value rule, another record's row reached by
+  `everywhere` with the value rule only, so a third party's email under an `email` key there is
+  kept. `json`, `jsonb` and array columns and serialized attributes are recursed into and written
+  back whole in the same `UPDATE`. A `text` column holding JSON is still compared as a string, as
+  in its events. A column declared personal that holds a hash or an array is replaced whole, in
+  the row and in the events alike (each side of a change too): `nil`, or, when it is NOT NULL,
+  its own default as the database stores it (`[]`, `{}`); before, the events kept it, or got its
+  elements replaced one by one. Inside a hash, the strings that are identifying for the field's type (an
+  email for `:email`, a phone number for `:phone`) count as the person's values, and those under a
+  nested personal field; their copies elsewhere in the record, and with `everywhere` in other
+  records, are erased too. Labels such as `"home"` are not. An earlier erasure's `"erased:<id>"`
+  is no one's value, so a second erasure neither reports nor searches for it. The row is scrubbed by
+  the attribute's type, as its events are, so `hstore` columns and attributes cast as json are
+  recursed into too. An
+  encrypted attribute is compared in clear in its events, as in its row, and a replacement is
+  encrypted again; before, its ciphertext stayed in the events and replayed back to the value.
+  The erasure moves the row's optimistic-lock column, as any write does, so a copy loaded before
+  it fails with `StaleObjectError` instead of saving the erased values back; the move is recorded
+  as an ordinary update of that column alone (metadata `source: "lyra_erasure"`), so the row still
+  equals its replay. Before, the lock moved in the row only, and the row no longer replayed to its
+  events. Virtual attributes are no longer written, which made the erasure fail. An
+  event that is not a CRUD event (an application's own, in the record's stream) gets the key rule
+  at its top level, so a personal field's hash there is replaced whole. With `everywhere`, a
+  record is listed in `result.copies` only if its row no longer holds the value anywhere. A value
+  held as a JSON key, or inside a longer string, is not erased, and the record is listed in the
+  new `result.left_behind` as `{ record:, columns: }`, never with the value; `lyra:erase` prints
+  it. Before, such a record was listed as erased. The erased record's own row is checked the same
+  way, with or without `everywhere`, and listed first. A primary or foreign key is never rewritten;
+  one that holds an erased value is reported in `left_behind` as `"Model <key withheld>"` (and
+  `result.key_withheld`), and no result, reason or task output prints it. With `everywhere`, each
+  record found is locked and its stream read again before it is erased, so a copy written during
+  the search is not missed; candidates are found without case, and a `citext` copy differing in
+  case is reported. The new `result.not_searched` names the encrypted columns of monitored
+  models, which a text search of the log cannot read. In ES-Async the lock moves from the version
+  the log last recorded.
+- **`everywhere` erased a third party's own record when the person's data named them.** In the
+  person's own record a value under a personal field's name is the person's (the key rule), so a
+  manager's email nested inside the person's JSON (`{"manager" => {"email" => …}}`), or a friend's
+  email at the top of another event in the person's stream (an invitation), was erased there and
+  then searched for in other records, the third party's own included. Now only the person's own
+  values drive the search: those of the row's personal fields and at the top of a personal field in
+  the record's own CRUD events (an attribute, either side of a change, a payload entry), with the
+  strings inside a structure declared personal taken by its type as before. The others are still
+  erased in the person's record, as its events are, and no longer anywhere else.
+- **`everywhere` missed rows that held a value their events did not.** The search reached rows
+  only through events, so a row given the value by raw SQL, written before monitoring, or changed
+  by a write Lyra could not intercept kept it, and nothing reported it; and a record reached
+  through an event that mentioned the value only inside a longer string kept a whole copy in its
+  row. With `everywhere`, the tables of monitored models with a policy are now searched directly,
+  one query per table that returns keys only (string and text columns by equality, `json`/`jsonb`
+  as text by a `LIKE` on the value as a JSON string, string arrays with `= ANY`, `hstore` values);
+  not in ES-NoProj, where the tables are absent or stale. Every record reached has its row scrubbed
+  by the value rule, whether or not its events held the value whole. When only the row held it,
+  its `ErasureApplied` says `row_only: true` and it is listed in the new
+  `result.rows_without_events` (its row already differed from its replay: `lyra:repair` in Monitor
+  or Disabled, a rebuild of its table in the other modes; the task says which). A row with no
+  stream is erased first and then imported the Genesis way, so its `Imported` event holds the
+  replacement, never the value (an `ErasureApplied` alone would have started a stream Genesis never
+  imports); if a Genesis run imported it first, that stream is rewritten instead. A key column is
+  still never rewritten, and a row holding a value only as a JSON key or in another case in a
+  `citext` column is reported in `left_behind`. The log is searched once for all the values (it
+  was searched again per value to count holders), and candidate events are read in batches.
+- **`everywhere`'s threshold counted streams, not people's records.** A value was taken as shared
+  when more than `max_copies` other streams held it, so one person's many records (and a record's
+  reference links) counted against it. Holders are now counted by record, through events (each
+  confirmed by an exact match) and rows alike, and the person's linked records, found by the rule
+  of the subject-access copy (`Lyra::Privacy::SubjectLinks`: any `belongs_to` to the erased
+  record's model naming it, by id or by its `primary_key:` column, a polymorphic one, a
+  `<model>_id` column), do not count. `max_copies:` must be a positive Integer (`ArgumentError`
+  before anything is written; a String failed half-way before).
+- **`everywhere` rewrote Lyra's own record streams.** An event in a stream that was not a monitored
+  record's was rewritten when it held an erased value, so a consent recorded under an email as its
+  subject key (`Lyra::Consent$<email>`) lost it, and the consent store, rebuilt from those events,
+  lost the consent. Restrictions and objections (`Lyra::Rights`), consent (`Lyra::Consent`), the
+  access log and its erasures and the subject-access exports, with their per-subject streams, are
+  now never rewritten by `everywhere`, nor counted as holders.
+- **Genesis's lock was per class, not per table.** An import through an STI subclass did not wait
+  for one through its base class. The lock is now named after the table's stream owner (the STI
+  base class), which the erasure of a row with no stream also takes.
+- **PAM DSL works without ActiveSupport again.** Loaded on its own, with its standard-library
+  polyfill, the Article 30 register raised `NoMethodError` (`String#presence` is ActiveSupport),
+  and JSON export (`Reporter#export_json`, `GDPRCompliance#portable_export`) relied on
+  ActiveSupport having loaded `json`. The polyfill now provides `presence` and treats a
+  whitespace-only string as blank, as ActiveSupport does, and both files require `json`. Behaviour
+  under ActiveSupport is unchanged. `rake test:all` now runs the PAM DSL suite twice, with
+  ActiveSupport and with the polyfill (`rake test:both`), so CI covers both.
+- **A model whose single primary key is not `id`** (`self.primary_key = "code"`, a string or
+  uuid column, no `id` column) is supported in every mode. `Lyra::DualView` looked the row up
+  with `find_by(id:)`, so `DualView#compare`, `compare_all`, `find_discrepancies`,
+  `Lyra::ModeTransition.discrepancy`, the mode gate's check and `lyra:repair` raised on such a
+  model; sync projection and rebuild updated and deleted rows `where(id:)`. Hijack and event
+  sourcing ignored the key the application gave, reserved another (a uuid), and put an `id`
+  attribute the table does not have into the `Created` event. ES-NoProj's and `as_of`'s
+  reconstructed records, the dashboard's record pages and `event_aware_belongs_to` also used
+  `id`. All now use the model's primary key. A composite primary key is still not supported, and
+  is now refused clearly: `monitor_with_lyra` and `config.models` raise `ArgumentError` naming
+  the key, and `verify_mapping!` reports it.
+- **ES-NoProj: `has_many ... dependent: :delete_all` left the children alive.** Rails deletes
+  them through the association's table scope, which matches no row in the events-only store, so
+  no `Destroyed` event was written and the children were still read back after their parent was
+  destroyed. A `dependent: :nullify` found its children by foreign key alone, so it also cleared
+  those outside a scoped association (`has_many :x, -> { where(...) }`), and a polymorphic one
+  (`as:`) wrote no events at all. Both now find the children the association selects in the event
+  store, as Active Record's association scope does: the owner's records, narrowed by the child's
+  default scopes (less what the association's scope unscopes, so a soft-deleted child is left
+  alone) and by the association's scope. Each gets the event `delete_all` or `update_all` writes
+  there (`delete_all`, `dependent_association` or `update_all`, as in Monitor); strict mode
+  refuses `delete_all` as it does in Monitor. **A dependent association whose scope, or whose
+  child's default scope, cannot be evaluated against the event store (an SQL string scope such
+  as `-> { where("status = 'x'") }`) now raises `UnsupportedQuery` and the parent's destroy is
+  refused**, rather than delete or nullify children the association might not select. The same
+  applies to `delete_all`, `delete(record)` and assigning a new set on such an association;
+  `delete(record)` and assignment raised `TypeError` before (a condition on a record's query
+  constraints, `where(["id"] => [[1]])`, which `CachedRelation` now evaluates). The owner's
+  in-memory counter cache is no longer lowered (it went negative): ES-NoProj does not maintain
+  counter caches. `has_one` `:delete` and `:nullify` were not affected. Monitor, Hijack and
+  ES-Sync are unchanged.
+- **ES-NoProj answers `delete_by` and `destroy_by`,** as `where(...).delete_all` and
+  `where(...).destroy_all`; they raised `UnsupportedQuery`. The partners of an in-memory join are
+  read as Lyra's own read: under a purpose, a join on a model with a policy was refused for the
+  partners' fields though no partner is returned; so are the children a `dependent: :nullify`
+  rewrites, read for their events.
 - **Monitor appended `Updated` after `Destroyed`** when a stale copy was saved after another
   process had destroyed the record. Its UPDATE reached no row, or, when nothing had changed, no
   UPDATE ran; Active Record still ran `after_update`, and the stream became
@@ -102,6 +346,240 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record whose event attributes had string keys, as Monitor's do.
 
 ### Changed
+- **`config.erasure_max_copies`** (default 10) sets `everywhere`'s threshold for the application;
+  `erase!(max_copies:)` and `lyra:erase MAX_COPIES=` still override it per call. Each value left
+  as shared is reported in the new `result.shared` as `{ field:, type:, holders: }` (never the
+  value); `result.shared_values` stays an Integer, their count. **`erase!(dry_run: true)`**
+  (`lyra:erase DRY_RUN=1`) runs the erasure and rolls it back, reporting what it would do, the
+  shared values and their holders included, and writing nothing: once a person's values are
+  erased, a later run cannot find the copies left as shared, so the threshold is chosen with a dry
+  run first, and the task's hint says so. `ErasureApplied` gains `row_only` and `imported`
+  (above). The documentation now gives the operator's `VACUUM` step after an erasure (old row and
+  event versions stay on disk, in WAL and in backups until reclaimed or expired), states that a
+  database error logged by a failed bypass publish can contain the failing row, and describes a
+  narrow wait between an erasure and a model's first use in another transaction.
+- **PAM DSL: restriction of processing (Art. 18) and the right to object (Art. 21).** PAM had no
+  construct for either: a restriction could only be approximated by narrowing a purpose for
+  everyone or withdrawing a consent, and a purpose on contract or legal obligation could not be
+  stopped for one person. A purpose now declares the Art. 18(2) grounds on which it continues
+  while a subject's processing is restricted (`allowed_when_restricted :consent`, `:legal_claims`,
+  `:protection_of_rights`, or `:important_public_interest, reference: "<the law>"`), and whether
+  it is direct marketing (`direct_marketing!`, Art. 21(2)) or research or statistics
+  (`research_or_statistics! public_interest_task: true|false`, Art. 21(6)); `Purpose#objectable`
+  derives the article that lets a subject object (Art. 21(1) for public task and legitimate
+  interests, research or not), or none. `PamDsl.rights` records, per subject and independent of any policy,
+  restrictions (`restrict!`, then `notify_lift!` and `lift!`, which raises without the Art. 18(3)
+  notice) and objections (`object!`: upheld at once for direct marketing, pending and restricting
+  that purpose for Art. 21(1) and 21(6) until `decide!`, recorded as rejected and raised as
+  `ObjectionNotApplicableError` for a purpose with no right to object; `withdraw_objection!`), as
+  events in `PamDsl.rights_store`, with an `on_rights_event` hook. An upheld objection to direct
+  marketing stops every direct-marketing purpose for that subject; objecting again while an
+  objection is in force returns it; times must be `Time` values that run forwards. `validate_access!` gains
+  Condition 6, checked after every other condition: `RestrictedProcessingError` for a restriction
+  that covers the access when the purpose declares no exception that applies, and
+  `ObjectedProcessingError` for an upheld objection. The Article 30 report prints each purpose's
+  right to object and its exceptions. PAM DSL ships the store protocol and an in-memory store
+  only; the in-memory store refuses to record outside development and test
+  (`RightsStoreNotDurableError`). Lyra's durable store and its enforcement on reads, erasure and
+  retention are not in this change, and writes are not checked under a restriction in 1.0.0.
+- **Lyra keeps the data subject's restrictions, objections and consent durably, shared by every
+  process.** With PAM DSL loaded, Lyra installs `Lyra::Rights` into it. `PamDsl.rights_store`
+  becomes Lyra's: each request, notice, decision and lift is an event in
+  `Lyra::Rights$<subject key>` (linked to `Lyra::Rights`), appended with RubyEventStore's expected
+  version so that two processes cannot both lift or decide one request (the second gets
+  `PamDsl::RightsConcurrencyError` and nothing is stored), and an append that does not replay is
+  refused before anything is written. The new table `lyra_rights` (one row per restriction or
+  objection: subject key, kind, policy, purpose, fields, ground, state, times) is written in the
+  same transaction and created on first use; `bin/rails lyra:rights:rebuild` rebuilds it.
+  Condition 6 answers from a per-process snapshot of the committed requests in force, refreshed at
+  most every `config.rights_refresh_interval` seconds (default 1, new) and on
+  `Lyra::Rights.refresh!`, so a check costs a clock read when nothing is in force; a transaction
+  that records a right sees it at once and other threads only after it commits, and a rebuild
+  locks the table against transitions. `PamDsl.subject_key_resolver` maps a record to its own key
+  and to the keys of the people it names, by the subject-access copy's selection rule (link
+  columns a record was loaded without are read from its row, or the access fails with
+  `Lyra::Rights::UnresolvedSubjectError`), so a restriction recorded against a person
+  (`"Person$7"`) refuses a read of their invoice under a purpose with no Art. 18(2) exception.
+  Lyra installs its stores when it loads, and at boot only where the application has not
+  installed its own. Consent moves to the same store: PAM DSL's new `PamDsl.consent_store`, when set, is
+  the store of every policy's `consent_policy`, and Lyra's keeps each request, grant and withdrawal
+  as an event in `Lyra::Consent$<subject key>` with the table `lyra_consents` as its projection.
+  Before, consent was held in memory, per process and per policy object: lost on restart, not seen
+  by other processes or by another policy, and gone when a policy was defined again. A person's
+  consent now covers the records that name them; a grant that repeats a granted consent records
+  nothing. Limit: a consent check on a record that names more than one person (a payer and a
+  payee) is refused with `Lyra::Rights::ConsentStore::SharedRecordConsentError`, a
+  `PamDsl::ConsentRequiredError`, whatever each consented to; whose consent such a record needs
+  is future work. Condition 4 and the `:consent` exception of Art. 18(2) read the same record (a
+  consent store's refusal under that exception is now reported with the restriction rather than
+  raised), and `consent_audit` lists the store's records (`recorded_consents`). Without Lyra, PAM
+  DSL keeps consent in memory as before. Neither stream
+  is erased by `Lyra::Erasure` or with the access log: they hold names, grounds and reasons, never
+  values. Model-wide filtering of restricted subjects, `lyra_processable`, and restriction-aware
+  erasure and retention are not in this change.
+- **Lyra enforces restriction and objection where it checks reads, in erasure and in retention,
+  and reports them.** Under a purpose (or `reads_without_purpose` `:audit`/`:deny`):
+  - A record load that names no declared field (`select(:id, :payer_id)`) is checked too, for a
+    restriction of all of its subjects' data, a pending objection's restriction of the purpose and
+    an upheld objection (PAM DSL's new `validate_rights!`); before, such a load was never checked.
+    A loaded restricted record raises, as a non-consenting one does.
+  - Aggregates, `pluck`, `pick`, `ids`, `exists?` and `cache_version` (subject `Model$*`) leave the
+    restricted subjects out: the record's own key `NOT IN` the restricted records and each link
+    column `IS NULL OR NOT IN` the restricted people, so rows that name no one are kept; ES-NoProj
+    filters its in-memory records by their keys, and fails closed
+    (`Lyra::Rights::UnresolvedSubjectError`) when a record's links cannot be read. A field-scoped
+    restriction applies only to queries naming one of its fields. Audit mode leaves no one out and
+    logs it. With nothing in force for the query, its SQL is unchanged. Before, these queries
+    included the restricted people.
+  - A join, subquery or CTE that reaches a model with such a subject raises
+    `PamDsl::RestrictedProcessingError` rather than include or silently drop them.
+  - `Model.lyra_processable(fields: nil)`, a scope without the records the purpose in scope may not
+    process, for batch jobs (Active Record and ES-NoProj).
+  - The rights and consent are read afresh at the first check of each checking scope: a
+    `Lyra.with_purpose` block, a web request (`Lyra::Rights::Middleware`, installed by the
+    engine), an Active Job (`Lyra::Rights::Job`) and each batch of `in_batches`, `find_each` and
+    `find_in_batches` (`Lyra::Rights.scope`). A right recorded in another process applies from the
+    next scope; before, up to `rights_refresh_interval` later, mid-request included. The first
+    check in a scope makes one indexed query; code that checks nothing (no purpose, `:allow`) makes
+    none.
+    `config.rights_refresh = :interval` (new; the default is `:scope`) keeps scopes but drops the
+    forced read: rights and consent are read again only after `rights_refresh_interval`, as before.
+  - `Lyra::Erasure.erase!` refuses a record that a restriction in force covers (its own, a person's
+    it names, of all the data or of a field being erased) with `PamDsl::RestrictedProcessingError`;
+    `lifting: restriction_id`, after the Art. 18(3) notice, lifts it and erases in one transaction.
+    A dry run (`dry_run: true`) is refused the same way and, with `lifting:`, lifts nothing and
+    lists in `Result#lifting` what it would lift (a real erasure lists what it lifted).
+    `Lyra::Retention` skips restricted records with outcome `:restricted` (`Result#restricted`,
+    printed by `lyra:retention:apply`). Before, both acted on data the subject had asked to be kept.
+  - The subject-access copy (`data_export`) has `restrictions` and `objections`: the subject's own
+    requests, never another person's. The per-subject `processing_activities` gives each declared
+    purpose's right to object and Art. 18(2) exceptions (`rights_by_purpose`); with Lyra's
+    per-model policies it gave none. A dashboard page, `privacy/rights`, lists the open requests
+    with their age against the month of Art. 12(3); the policy page shows each purpose's
+    declarations; `RestrictedProcessingError` and `ObjectedProcessingError` in a dashboard read
+    answer 403.
+  - `Lyra::Verification::DataLifecycleWorkflow` (the data lifecycle with a Restricted place,
+    restrict, notice and lift) and `ObjectionWorkflow`, PetriFlow nets whose tests check that
+    PAM DSL's transitions are exactly theirs and that Deleted is unreachable from Restricted
+    without the lift.
+  - After review: SQL strings are read for the tables they reach (`FROM`/`JOIN`, with aliases), so a
+    string join or subquery reaching a restricted model is refused, and a subquery's words are
+    checked against the policy of the table they belong to (a change to the purpose check too); a
+    `FROM`/`JOIN` Lyra cannot name is refused while a right is in force (fail closed). A polymorphic
+    filter covers STI subclass names. A subject's people are resolved only when a request in force
+    could cover the access, and aggregate rows are not subjects (a grouped `select` or `find_by_sql`
+    no longer raises `UnresolvedSubjectError` because of an unrelated right); ES-NoProj reads a
+    narrowed record's people from the whole record. ES-NoProj's `Model.exists?(id)` and an undeclared
+    purpose follow the rights. Erasure reads a record's people from its events when it has no row
+    (ES-NoProj), refuses one it cannot resolve, lifts with `lifting:` only a restriction of the record
+    erased, and with `everywhere:` leaves another record's restricted copy unmodified
+    (`Result#restricted_copies`, printed by `lyra:erase`, which takes `LIFTING=`). The subject-access copy
+    lists record restrictions under ES-NoProj too. The dashboard's event routes refuse (403) or leave
+    out restricted records (`X-Lyra-Rights-Withheld`). The rights page gives a deadline only to an
+    objection awaiting a decision. The excluded subjects are computed once per snapshot (one pass over
+    the requests in force), the condition compiled once, and a scope whose rights did not change costs
+    one single-row query: a count with 300 restrictions in force went from about 13 ms to about 1 ms.
+  Writes (`update`, `destroy`, bulk writes) are not checked under a restriction in 1.0.0.
+- **PAM DSL: a type for every Art. 9(1) special category, and for Art. 10 data.** Only `:health`
+  and `:biometric` were special-category types, so a column of any other Art. 9(1) category had
+  to be declared under another type (`:custom`), and a purpose with only an Art. 6 basis could
+  read, say, trade-union membership without PAM raising anything. The new types `:genetic`,
+  `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief` (religious or philosophical
+  beliefs), `:trade_union_membership` and `:sex_life_orientation` are special categories: a purpose
+  that reads one needs an `art9_basis`, else `PamDsl::SpecialCategoryViolationError`. Art. 10 data
+  (criminal convictions and offences) gets the type `:criminal_offence` and a condition of its own,
+  since Art. 10 permits processing only under official authority or when Union or Member State law
+  authorises it, not on an Art. 9(2) ground: a purpose that reads such a field names that
+  authorisation with `art10_authorisation "<the authority or the law>"`, else
+  `PamDsl::CriminalDataViolationError` (strict raises it, audit records it, in `validate_access!`
+  and `validate_fields!`). An Art. 9(2) basis does not satisfy Art. 10, nor an Art. 10
+  authorisation Art. 9. The Article 30 report prints a purpose's Art. 9(2) bases and Art. 10
+  authorisations where it reads such data, the export carries them, and `article_30_gaps` lists
+  a purpose that reads such data without them. The detector, and so the policy generator,
+  proposes the new types from names that say what a column holds (`ethnicity`, `political_party`,
+  `religion`, `trade_union_member`, `sexual_orientation`, `criminal_record`), never from a bare
+  `party`, `union`, `orientation` or `offence`, and the generator marks such fields with the
+  condition a purpose reading them must meet. The dashboard refuses a read that raises the new
+  error as it refuses the others. PAM now has 25 field types (18 before). No field of the Aegean
+  testbed changes type.
+- **The Art. 15 export is a copy of the data.** `Lyra::Privacy::GDPRCompliance#data_export` keeps
+  its keys and adds five. `records` holds each of the subject's records whole: every attribute (not
+  only those a detector flags; encrypted columns in plaintext) and its stored history, `from`/`to`
+  per change. A record is the subject's by what it is: the subject's own row, the rows of monitored
+  models whose `<type>_id` names them (indexed queries), and the records the subject's events touch,
+  so a row that pre-dates monitoring, a destroyed record and an ES-NoProj record are all in it
+  (`state` `:current`, `:destroyed`, `:replayed`); a record whose foreign key moved is the
+  subject's only for the periods it named them (`:reassigned`, `periods`). `accesses` is the access
+  log for those records (`nil` when `record_access_events` is off). `processing_context` takes each
+  record's purposes, bases, recipients, transfers, retention (field periods included) and sources
+  from its own model's policy; `notice` is the policy's `access_notice`; `gaps` lists what the
+  policy does not declare. Who acted is a role label (`"you"`, `"staff"`, `"system"`) unless
+  `disclose_actors: true`. History and the access log are included by default; `history: false`
+  and `accesses: false` are for a request the subject narrowed. A field the policy declares
+  `withheld_from_access: "<basis>"` is named with that basis instead of its value, and one declared
+  `about:` another person goes to `review`; Lyra picks no basis. See
+  [PRIVACY_COMPLIANCE.md](docs/PRIVACY_COMPLIANCE.md#the-copy-of-the-data-from-100).
+  - *Links.* A record refers to the subject through any `belongs_to` whose class is the subject's
+    model (`belongs_to :owner, class_name: "Person"`), a polymorphic `belongs_to` whose type
+    column names it, or the `<type>_id` column; the subject's own model is not linked to itself.
+  - *Moved records.* An event that moves a record between people gives each only their side: the
+    previous subject sees the old values and the link's new value as "moved to another person",
+    the new one only the new values. A record whose links no longer name the subject is
+    `:reassigned` with its state just before the move, whatever comes after. A value last set
+    while the record was another person's is not given: the field is listed under `withheld` with
+    the basis "set while the record was another person's". Accesses to a moved record are the
+    subject's only within their periods.
+  - *The old keys follow the copy's rules* (their content changes): `pii_inventory` and
+    `data_lineage` leave out fields declared `withheld_from_access:` or `about:` another person,
+    give encrypted values in plaintext, and, like `events`, see a moving event with the subject's
+    side only.
+  - *Retention* is what the policy declares: with no rule and no `default`, the period is `nil`
+    and `gaps` lists "Art. 15(1)(d) retention not declared", rather than PAM's silent 7 years.
+    Columns the policy does not declare (no purpose, basis or retention) are listed in `gaps`.
+  - *Accesses* include those recorded under the bare subject id (`access_log_subjects:` on
+    `GDPRCompliance.new` names others, or `[]` for none) and, with the access log off, the
+    subject's earlier exports, with a gap saying the log is off.
+- **Events record the acting user's class** (`user_type` in the metadata, beside `user_id`, from
+  `Current.user`: the table's owner class for an Active Record user), in the write path, bulk
+  writes and the access log. The copy's role labels compare id and class: "you" only when both
+  are the subject's; "staff or you" when an event records an id equal to the subject's but no
+  class (written before 1.0.0, or by a `metadata_proc` that sets none); "staff" otherwise.
+- **Each explicit export is recorded,** as `Lyra::Events::SubjectAccessExported` in a stream of
+  its own, `Lyra::SubjectAccessExports$<Type>$<id>`: when, which sections, how many records,
+  `verified_by:` and who exported, never values. Erasing the subject's access log
+  (`AccessLog.erase!`, or `Lyra::Erasure` with `access_log:`) leaves it, so the evidence that a
+  request was answered outlives the log; the copy's `accesses` still lists earlier exports. Only an
+  explicit `data_export` call is recorded: `data_export(record: false)`, `full_report` and the
+  dashboard's subject and GDPR routes are views of the data and record nothing. On by default;
+  `config.record_subject_access_exports = false` turns it off. Nothing is recorded in disabled mode.
+- **The GDPR reports read each model's policy.** The wrapper passes PAM the policy of each record's
+  model (its `privacy_policy`, else `config.privacy_policy`). `processing_activities` takes the
+  purpose, legal basis, categories, recipients and retention from it, where it printed "Not
+  specified" and guessed the purpose from `metadata[:source]`; `rectification_history` lists an
+  update that changed a declared field as well as one the detector flags.
+- **The privacy stamp's purposes are those the policy admits the field for,** from either side:
+  the field's `allow_for` and every purpose that lists it in `requires` or `optionally`, as
+  `Policy#allowed?` decides. A policy that lists its fields on the purpose side stamped every field
+  with `"purposes" => []`. `allowed_purposes` on the PAM adapter follows.
+- **PAM DSL field options and the notice declaration:** `withheld_from_access:`, `about:` and
+  `collected_from` on `field`, and `access_notice` on the policy (see the PAM DSL changelog).
+- **ES-Lazy reads cost less, with the same consistency.** The check before every read reads the
+  checkpoint and the newest event id in one query instead of two. A reader that finds the log
+  ahead of the tables tries the catch-up lock (`pg_try_advisory_xact_lock`); if another reader holds
+  it, it waits for that catch-up to end, without holding the lock, and reads the checkpoint again.
+  It is done if the checkpoint has reached the newest event it saw and no event the checkpoint
+  lists as missing is visible to it; otherwise it catches up itself, as before. Before, it queued
+  for the lock to repeat a catch-up that, under a write-heavy mix, had mostly been done already. A
+  catch-up that applies nothing no longer rewrites the checkpoint. The three rules hold: only the
+  lock's holder applies events or moves the checkpoint, in the log's order and in its own
+  transaction, and a read sees every event it saw before (a late commit below the checkpoint
+  still within `GAP_RECHECK` on the fast path). In a local profile (30% writes, 70% reads by id,
+  one process) the mean read took about 45% less time at 16 threads and 30% less at 4.
+- **PAM DSL: a Condition 5 failure raises `PamDsl::SpecialCategoryViolationError`,** where it
+  raised `PamDsl::SensitivityViolationError`. The condition is about special categories (Art. 9,
+  decided by the field's type); sensitivity is a separate Art. 32 risk tier that gates nothing,
+  and the old name mixed the two. `SensitivityViolationError` stays as a deprecated alias of the
+  new class until 2.0, so `rescue PamDsl::SensitivityViolationError` still catches it.
 - **ModeSync adopts an escalation only if a gated switch recorded it.** It adopted the newest
   `applied` row of `lyra_mode_transitions` and checked nothing, so one `INSERT` moved every process
   from Monitor to ES-NoProj. A switch now records where it came from (`from_config`), whether the

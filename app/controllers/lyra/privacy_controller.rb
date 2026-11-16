@@ -12,9 +12,11 @@ module Lyra
         subject_type: subject_type
       )
 
+      # A view of the data, not an answered Art. 15 request: not recorded as an
+      # export (the application's explicit data_export call is).
       render json: {
         subject: { type: subject_type, id: subject_id },
-        data_export: compliance.data_export,
+        data_export: compliance.data_export(record: false),
         generated_at: Time.current
       }
     end
@@ -31,7 +33,7 @@ module Lyra
 
       render json: {
         subject: { type: subject_type, id: subject_id },
-        right_to_access: compliance.data_export,
+        right_to_access: compliance.data_export(record: false), # a view, not recorded as an export
         right_to_be_forgotten: compliance.right_to_be_forgotten_report,
         rectification_history: compliance.rectification_history,
         processing_activities: compliance.processing_activities,
@@ -70,7 +72,9 @@ module Lyra
       subject_type = params[:subject_type]
       subject_id = params[:subject_id]
 
-      flow = EventFlow.new(subject_id: subject_id, subject_type: subject_type)
+      subject_model = Lyra.config.monitored_model_named(subject_type.to_s)
+      refuse_restricted_record!(subject_model, subject_id) if subject_model
+      flow = EventFlow.new(subject_id: subject_id, subject_type: subject_type, event_filter: method(:rights_visible))
       data = flow.privacy_impact_analysis
 
       render json: data
@@ -81,7 +85,7 @@ module Lyra
       field_name = params[:field_name]
       model_class = params[:model_class]
 
-      flow = EventFlow.new
+      flow = EventFlow.new(event_filter: method(:rights_visible))
       lineage = flow.data_lineage(field_name, model_class)
 
       render json: lineage
@@ -93,6 +97,26 @@ module Lyra
       @policies = @pam_dsl_available && PamDsl.respond_to?(:registry) ? PamDsl.registry.policies : {}
       @default_policy_name = Rails.application.config.respond_to?(:pam_dsl) ?
         Rails.application.config.pam_dsl.default_policy : nil
+    end
+
+    # GET /lyra/privacy/rights
+    # The data subjects' requests still open (PamDsl.rights.open_requests):
+    # restrictions not yet lifted (Art. 18) and objections not yet decided
+    # (Art. 21), oldest first, each with its age against the month Art. 12(3)
+    # gives the controller to act on a request. It reads Lyra's rights table,
+    # not a monitored model's records, under the dashboard's purpose rules,
+    # and is logged as a dashboard read. Names, grounds and states only:
+    # never a value of the subject's data.
+    def rights
+      now = Time.current
+      requests = PamDsl.rights.open_requests
+      log_dashboard_read("privacy/rights", {}, returned: requests.size)
+      @requests = requests.map { |request| open_request_row(request, now) }
+
+      respond_to do |format|
+        format.html
+        format.json { render json: { open_requests: @requests, generated_at: now } }
+      end
     end
 
     # GET /lyra/privacy/pii_detection
@@ -130,6 +154,26 @@ module Lyra
     end
 
     private
+
+    # One open request, for the rights page. Only an objection still awaiting
+    # the controller's decision has a deadline: one month from its receipt
+    # (Art. 12(3); an extension under its second sentence is the
+    # controller's to record and tell the subject of). A restriction in
+    # force is the controller's action on the request already (Lyra records
+    # it when it is applied), so it is listed with its age and no deadline:
+    # it lasts until it is lifted, with the Art. 18(3) notice.
+    def open_request_row(request, now)
+      restriction = request.kind == :restriction
+      deadline = restriction ? nil : (request.requested_at.to_datetime >> 1).to_time
+      {
+        id: request.id, kind: request.kind, subject: request.subject_key, article: request.article,
+        ground: restriction ? request.ground : nil, fields: restriction ? request.fields : [],
+        policy: restriction ? nil : request.policy, purpose: restriction ? nil : request.purpose,
+        state: request.state, requested_at: request.requested_at,
+        age_days: ((now - request.requested_at) / 86_400).floor, deadline: deadline,
+        overdue: deadline ? now > deadline : false
+      }
+    end
 
     def require_pam_dsl
       unless defined?(PAM_DSL_AVAILABLE) && PAM_DSL_AVAILABLE

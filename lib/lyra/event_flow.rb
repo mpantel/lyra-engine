@@ -3,7 +3,10 @@ module Lyra
   class EventFlow
     attr_reader :subject_id, :subject_type, :time_range, :window
 
-    def initialize(subject_id: nil, subject_type: nil, time_range: nil)
+    # +event_filter+: a callable given the events read, returning those to
+    # show (the dashboard leaves out restricted subjects' events).
+    def initialize(subject_id: nil, subject_type: nil, time_range: nil, event_filter: nil)
+      @event_filter = event_filter
       @subject_id = subject_id
       @subject_type = subject_type
       @time_range = time_range || (30.days.ago..Time.current)
@@ -239,7 +242,7 @@ module Lyra
       # Filter by time range
       events = events.select { |e| time_range.cover?(parse_timestamp(event_timestamp(e))) }
 
-      events
+      @event_filter ? @event_filter.call(events) : events
     end
 
     def subject_stream_events(max)

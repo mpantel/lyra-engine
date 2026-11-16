@@ -59,6 +59,26 @@ module Lyra
       }, format: :json
     end
 
+    # A dashboard view of a subject's data is not an answered Art. 15 request:
+    # the routes call data_export with record: false, so nothing is recorded,
+    # while an explicit export records once.
+    def test_the_dashboard_routes_do_not_record_an_export
+      count = -> { ActiveRecord::Base.connection.select_value("SELECT count(*) FROM event_store_events").to_i }
+      before = count.call
+
+      %i[subject_data gdpr_report].each do |route|
+        get route, params: { subject_type: @subject_type, subject_id: @subject_id }, format: :json
+        assert_response :success
+      end
+      assert_equal before, count.call, "a dashboard view is not recorded as an export"
+
+      Privacy::GDPRCompliance.new(subject_id: @subject_id, subject_type: @subject_type).data_export
+      assert_equal before + 1, count.call
+    ensure
+      ActiveRecord::Base.connection.execute("DELETE FROM event_store_events_in_streams WHERE stream LIKE 'Lyra::SubjectAccessExports$%'")
+      ActiveRecord::Base.connection.execute("DELETE FROM event_store_events WHERE event_type = 'Lyra::Events::SubjectAccessExported'")
+    end
+
     # Tests for gdpr_report action
     def test_gdpr_report_returns_comprehensive_data
       compliance = mock("compliance")
@@ -212,9 +232,9 @@ module Lyra
       flow = mock("flow")
       flow.stubs(:privacy_impact_analysis).returns({})
 
+      # (and the event filter that leaves out restricted subjects' events)
       EventFlow.expects(:new).with(
-        subject_id: @subject_id,
-        subject_type: @subject_type
+        has_entries(subject_id: @subject_id, subject_type: @subject_type)
       ).returns(flow)
 
       get :pii_inventory, params: {

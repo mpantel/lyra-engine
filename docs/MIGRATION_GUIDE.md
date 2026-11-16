@@ -751,6 +751,14 @@ when you accept that the stores may disagree.
   stream before comparing, whether or not the check passes.
 - **Per-model modes.** There are none; a `mode:` option to
   `monitor_with_lyra` is ignored.
+- **Primary keys.** A monitored model needs a single-column primary key. It may
+  have any name and type (`self.primary_key = "code"`, a string or uuid
+  column, no `id` column): a record's stream is named by its key, and every
+  lookup by key uses that column. Composite primary keys
+  (`self.primary_key = [:a, :b]`, or one the table declares) are not
+  supported: `monitor_with_lyra` and `config.models` refuse such a model with
+  an `ArgumentError`, `:all` and patterns skip it, and `verify_mapping!`
+  reports it.
 - **Regenerating a reviewed policy.** `FORCE=1` on
   `pam_dsl:generate:from_models` replaces `config/initializers/pam_dsl_policy.rb`,
   review and all; generate to a scratch app or compare by hand instead.

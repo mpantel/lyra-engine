@@ -138,6 +138,37 @@ module PamDsl
         pattern: /\A(fingerprint|face_id|biometric|biometric_data|retina_scan|retina|face)\z/i,
         sensitivity: :restricted
       },
+      # The other Art. 9(1) categories and Art. 10 data, from names that say
+      # what the column holds; never from a bare word that often means
+      # something else (party, union, orientation, denomination, offence).
+      genetic: {
+        pattern: /\A(genetic|genetic_data|genetic_test|genetic_test_result|genome|genomic_data|genotype|dna|dna_sample|dna_profile)\z/i,
+        sensitivity: :restricted
+      },
+      racial_ethnic_origin: {
+        pattern: /\A(race|racial_origin|ethnicity|ethnic_origin|ethnic_group|ethnic_background)\z/i,
+        sensitivity: :restricted
+      },
+      political_opinion: {
+        pattern: /\A(political_opinions?|political_views?|political_affiliation|political_party|party_affiliation|party_membership)\z/i,
+        sensitivity: :restricted
+      },
+      religious_belief: {
+        pattern: /\A(religion|religious_beliefs?|religious_affiliation|religious_denomination|philosophical_beliefs?)\z/i,
+        sensitivity: :restricted
+      },
+      trade_union_membership: {
+        pattern: /\A(trade_union|trade_union_member|trade_union_membership|union_member|union_membership|labou?r_union)\z/i,
+        sensitivity: :restricted
+      },
+      sex_life_orientation: {
+        pattern: /\A(sexual_orientation|sexual_preference|sex_life|sexual_life)\z/i,
+        sensitivity: :restricted
+      },
+      criminal_offence: {
+        pattern: /\A(criminal_records?|criminal_convictions?|criminal_offen[cs]es?|criminal_history|criminal_background|criminal_background_check|convictions?)\z/i,
+        sensitivity: :restricted
+      },
       location: {
         pattern: /\A(latitude|longitude|lat|lng|geo_location|gps_coordinates|gps|location)\z/i,
         sensitivity: :confidential
@@ -224,6 +255,39 @@ module PamDsl
         pattern: /#{START_BOUNDARY}([Ff]ingerprint|[Ff]ace|[Rr]etina|[Bb]iometric)#{END_BOUNDARY}/,
         sensitivity: :restricted
       },
+      # The other Art. 9(1) categories and Art. 10 data. Conservative: a word
+      # that often means something else is matched only with the word that
+      # makes it personal (political_party, not party; trade_union, not union;
+      # sexual_orientation, not orientation; criminal_offence, not offence),
+      # and "race" only as a whole name or its end (applicant_race).
+      genetic: {
+        pattern: /#{START_BOUNDARY}([Gg]enetic|[Gg]enom(?:e|ic)|[Gg]enotype|[Dd]na)#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
+      racial_ethnic_origin: {
+        pattern: /#{START_BOUNDARY}([Ee]thnicity|[Ee]thnic_?(?:[Oo]rigin|[Gg]roup|[Bb]ackground)|[Rr]acial_?[Oo]rigin)#{END_BOUNDARY}|#{START_BOUNDARY}[Rr]ace\z/,
+        sensitivity: :restricted
+      },
+      political_opinion: {
+        pattern: /#{START_BOUNDARY}([Pp]olitical_?(?:[Oo]pinions?|[Vv]iews?|[Aa]ffiliation|[Pp]arty)|[Pp]arty_?(?:[Aa]ffiliation|[Mm]embership))#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
+      religious_belief: {
+        pattern: /#{START_BOUNDARY}([Rr]eligion|[Rr]eligious_?(?:[Bb]eliefs?|[Aa]ffiliation|[Dd]enomination)|[Pp]hilosophical_?[Bb]eliefs?)#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
+      trade_union_membership: {
+        pattern: /#{START_BOUNDARY}((?:[Tt]rade|[Ll]abou?r)_?[Uu]nion(?:_?[Mm]ember(?:ship)?)?|[Uu]nion_?[Mm]ember(?:ship)?)#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
+      sex_life_orientation: {
+        pattern: /#{START_BOUNDARY}([Ss]exual_?(?:[Oo]rientation|[Pp]reference|[Ll]ife)|[Ss]ex_?[Ll]ife)#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
+      criminal_offence: {
+        pattern: /#{START_BOUNDARY}([Cc]riminal_?(?:[Rr]ecords?|[Cc]onvictions?|[Oo]ffen[cs]es?|[Hh]istory|[Bb]ackground(?:_?[Cc]heck)?)|[Cc]onvictions?)#{END_BOUNDARY}/,
+        sensitivity: :restricted
+      },
       location: {
         pattern: /#{START_BOUNDARY}([Ll]atitude|[Ll]ongitude|[Ll]ocation|[Gg]ps)#{END_BOUNDARY}/,
         sensitivity: :confidential
@@ -245,7 +309,11 @@ module PamDsl
     }.freeze
 
     # Sensitive PII types that require extra protection
-    SENSITIVE_TYPES = %i[ssn credit_card financial health biometric identifier credential token payment_token].freeze
+    SENSITIVE_TYPES = %i[
+      ssn credit_card financial health biometric identifier credential token payment_token
+      genetic racial_ethnic_origin political_opinion religious_belief trade_union_membership
+      sex_life_orientation criminal_offence
+    ].freeze
 
     class << self
       # Enable or disable partial matching (default: true)

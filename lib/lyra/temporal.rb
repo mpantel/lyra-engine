@@ -46,7 +46,7 @@ module Lyra
       return nil if replayed.empty? || Lyra::Event.operation_of(replayed.last) == :destroyed
 
       state = Lyra::StateProjection.new.rebuild_from_events(replayed).transform_keys(&:to_s)
-      state.merge("id" => id.to_s.match?(/\A\d+\z/) ? id.to_i : id)
+      state.merge(Lyra.key_column(model_class) => Lyra.key_value(model_class, id))
     end
 
     def event_time(event)

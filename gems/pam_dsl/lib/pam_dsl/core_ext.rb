@@ -52,8 +52,14 @@ class String
   end
 end unless "".respond_to?(:underscore)
 
-# Object#blank?/present? — same truth table as ActiveSupport for the values
-# pam_dsl checks (nil, false, "", [], and "present" objects).
+# Object#blank?/present?/presence — same truth table as ActiveSupport for the
+# values pam_dsl checks (nil, false, "", whitespace-only strings, [], and
+# "present" objects).
+class String
+  # As ActiveSupport: a string of only whitespace is blank.
+  def blank? = match?(/\A[[:space:]]*\z/)
+end unless "".respond_to?(:blank?)
+
 class Object
   def blank?
     respond_to?(:empty?) ? !!empty? : !self
@@ -61,6 +67,11 @@ class Object
 
   def present? = !blank?
 end unless Object.new.respond_to?(:present?)
+
+class Object
+  # The receiver if present, otherwise nil (e.g. `description.presence || "N/A"`).
+  def presence = (self if present?)
+end unless Object.new.respond_to?(:presence)
 
 class NilClass
   def blank? = true

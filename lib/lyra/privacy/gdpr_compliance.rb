@@ -22,10 +22,16 @@ module Lyra
       #
       # @param subject_id [Object] The data subject's identifier
       # @param subject_type [String] The type/class of the subject (default: 'User')
+      # @param actor_label [Proc] ->(actor, subject) { label }: how the copy names who acted
+      #   (default "you", "staff", "staff or you" or "system"; PamDsl::SubjectAccess::DEFAULT_ACTOR_LABEL)
+      # @param access_log_subjects [Array] the keys the application passed as this subject to the
+      #   access log besides its records (validate_access!(..., subject: 7) writes Lyra::DataAccess$7);
+      #   default: the bare subject id. [] reads none, where bare ids of several types share the log.
       #
-      def initialize(subject_id:, subject_type: 'User')
+      def initialize(subject_id:, subject_type: 'User', actor_label: nil, access_log_subjects: nil)
         @subject_id = subject_id
         @subject_type = subject_type
+        @access_log_subjects = access_log_subjects.nil? ? [subject_id.to_s] : Array(access_log_subjects).map(&:to_s)
 
         @pam_compliance = PamDsl::GDPRCompliance.new(
           subject_id: subject_id,
@@ -37,15 +43,45 @@ module Lyra
           model_class_extractor: method(:extract_model_class),
           model_id_extractor: method(:extract_model_id),
           changes_extractor: method(:extract_changes),
-          retention_policy: retention_policy
+          retention_policy: retention_policy,
+          policy_resolver: method(:policy_for_model),
+          records_reader: method(:read_subject_records),
+          access_reader: method(:read_access_log),
+          export_recorder: Lyra::AccessLog.method(:record_export),
+          actor_label: actor_label,
+          rights_keys: method(:rights_keys)
         )
       end
 
       # Delegate all GDPR methods to the PAM DSL implementation
 
-      # Right to Access (Article 15)
-      def data_export
-        pam_compliance.data_export
+      # Right to Access (Article 15): the subject's copy. Beside the event
+      # summaries it always gave, +records+ (each of the subject's records
+      # whole, with its history), +accesses+ (the access log; nil when
+      # config.record_access_events is off), +processing_context+, +notice+
+      # (the policy's access_notice) and +gaps+. See PamDsl::SubjectAccess
+      # and Lyra::Privacy::SubjectRecords. From 1.0.0 +restrictions+ and
+      # +objections+ list the subject's requests of Arts. 18 and 21: those
+      # recorded under the subject's key (EnfAuthor$7), and under the key of
+      # one of the subject's records that names no other person (a contested
+      # invoice). A record shared with another person is left out: its
+      # restriction may be the other person's request.
+      #
+      # An explicit call answers a request and is recorded, in the stream
+      # Lyra::SubjectAccessExports$<Type>$<id> (Lyra::AccessLog.record_export),
+      # unless config.record_subject_access_exports is false. record: false is
+      # for a view of the data that answers no request: full_report and the
+      # dashboard's subject and GDPR routes pass it, so a view is not on record
+      # as an answered request.
+      #
+      # history: false and accesses: false are for a request the subject
+      # has narrowed (recital 63); disclose_actors: true adds who acted (ids,
+      # IP addresses) to the role labels, after the controller has weighed
+      # the staff's rights; verified_by: names who verified the subject's
+      # identity, for the record of the export.
+      def data_export(history: true, accesses: true, disclose_actors: false, verified_by: nil, record: true)
+        pam_compliance.data_export(history: history, accesses: accesses, disclose_actors: disclose_actors,
+                                   verified_by: verified_by, record: record)
       end
 
       # Right to be Forgotten (Article 17)
@@ -78,42 +114,170 @@ module Lyra
         pam_compliance.consent_audit
       end
 
-      # Full GDPR Compliance Report
+      # Full GDPR Compliance Report. Its data_export is not recorded as an
+      # answered request (see data_export).
       def full_report
         pam_compliance.full_report
       end
 
       private
 
+      # The PAM policy that governs +model_name+'s model (its privacy_policy,
+      # else config.privacy_policy), or nil. A subject's records span models
+      # with different policies; before 1.0.0 the wrapper passed none, and the
+      # register's legal basis read "Not specified".
+      def policy_for_model(model_name)
+        model = Lyra.config.monitored_model_named(model_name) || model_name.to_s.safe_constantize
+        policy = model.is_a?(Class) ? Lyra::Privacy.policy_for(model) : Lyra::Privacy.policy(Lyra.config.privacy_policy)
+        policy.respond_to?(:pam_policy) ? policy.pam_policy : nil
+      rescue StandardError
+        nil
+      end
+
+      # The keys the subject's rights are recorded under (see data_export):
+      # the subject's own, and those of their records that have requests
+      # (one lookup in lyra_rights) and name this subject alone.
+      def rights_keys(records)
+        model = Lyra.config.monitored_model_named(@subject_type.to_s) || @subject_type.to_s.safe_constantize
+        person = active_record_model?(model) ? Lyra.stream_name(model, @subject_id) : "#{@subject_type}$#{@subject_id}"
+        candidates = records.filter_map do |raw|
+          record_model = Lyra.config.monitored_model_named(raw[:model].to_s) || raw[:model].to_s.safe_constantize
+          next unless active_record_model?(record_model) && !raw[:id].nil?
+
+          key = Lyra.stream_name(record_model, raw[:id])
+          [key, record_model, raw[:id]] unless key == person
+        end
+        store = PamDsl.rights_store
+        keys = candidates.map(&:first)
+        with_requests = store.respond_to?(:keys_with_requests) ? store.keys_with_requests(keys) : keys
+        own = candidates.select { |key, _, _| with_requests.include?(key) }.filter_map do |key, record_model, id|
+          # Its row, or under ES-NoProj its state from its events.
+          row = Lyra::Rights::SubjectKeys.find_record(record_model, id)
+          key if row && Lyra::Rights::SubjectKeys.person_keys(row) == [person]
+        end
+        [person, *own]
+      end
+
+      def active_record_model?(model)
+        model.is_a?(Class) && model < ActiveRecord::Base
+      end
+
+      def read_subject_records(subject_id, subject_type, events, history: true)
+        SubjectRecords.new(subject_id, subject_type, events, history: history).call
+      end
+
+      ACCESS_LOG_OFF = "access log not enabled (accesses lists earlier exports only)"
+
+      # The access log's entries, oldest first: for each of the subject's
+      # records, those within the periods the record was the subject's (a
+      # moved record's accesses while it was another person's are theirs);
+      # for the subject's own key and the keys the application passed as the
+      # subject (access_log_subjects:, the bare id by default); and the
+      # subject's earlier exports, which have a stream of their own. With
+      # the log off, only the exports, and the gap that says so.
+      def read_access_log(subject_id, subject_type, records)
+        subject = Lyra::AccessLog.subject_key_for(subject_type, subject_id)
+        exports = Lyra::AccessLog.exports_for(subject).map { |event| access_entry(subject, event) }
+        return { entries: exports, gap: ACCESS_LOG_OFF } unless Lyra.config.record_access_events
+
+        periods = records.to_h { |record| ["#{record[:model]}$#{record[:id]}", record[:periods]] }
+        ([subject] + @access_log_subjects).each { |key| periods[key] = nil unless periods.key?(key) }
+        entries = periods.flat_map do |key, record_periods|
+          Lyra::AccessLog.for(key).map { |event| access_entry(key, event) }
+                         .select { |entry| within?(record_periods, entry[:at]) }
+        end
+        (entries + exports).sort_by { |entry| entry[:at] || Time.at(0) }
+      end
+
+      # Whether +at+ falls in one of +periods+ (nil: the whole record).
+      def within?(periods, at)
+        return true if periods.nil? || at.nil?
+
+        periods.any? { |period| (period[:from].nil? || at >= period[:from]) && (period[:to].nil? || at <= period[:to]) }
+      end
+
+      def access_entry(key, event)
+        data = event.data.to_h.transform_keys(&:to_sym)
+        metadata = event.metadata.to_h.transform_keys(&:to_sym)
+        exported = event.event_type.to_s.end_with?("SubjectAccessExported")
+        {
+          at: data[:accessed_at] || data[:exported_at] || metadata[:timestamp],
+          record: key,
+          policy: data[:policy],
+          purpose: exported ? nil : data[:purpose],
+          legal_basis: data[:legal_basis],
+          fields: data[:fields],
+          outcome: exported ? "exported" : data[:outcome],
+          sections: data[:sections],
+          actor: metadata.slice(:user_id, :ip_address, :user_type).compact
+        }
+      end
+
       # Read all events related to the subject from Lyra's event store
       # Every event of the subject's own record and of the records that refer
-      # to them, in log order. A related record is followed through its stream:
-      # its foreign key is tracked from event to event, and an event belongs to
-      # the subject when the record pointed at them before or after it. An event
+      # to them (SubjectLinks: a belongs_to to the subject's class, or
+      # <type>_id), in log order. A related record is followed through its
+      # stream: its links are tracked from event to event, and an event belongs
+      # to the subject when the record named them before or after it. An event
       # carries only what it changed (Lyra::EventData, 1.0.0), so matching the
       # foreign key in each event alone kept a related record's create and lost
       # its later updates and its destroy.
+      #
+      # The event that moves a record between people is given with the
+      # subject's side only: moving in, its new values; moving away, the
+      # links' old values and nothing of the new owner's (from 1.0.0; the
+      # reports built on these events gave both sides).
       def read_subject_events(subject_id, subject_type)
-        fk = subject_foreign_key(subject_type)
-        id = subject_id.to_s
-        pointed_at = {} # [model class, model id] => the foreign key's last known value
+        links = SubjectLinks.new(subject_type)
+        own = links.subject_model ? Lyra.stream_owner_name(links.subject_model) : subject_type.to_s
+        values = {} # stream => the link columns' last known values
         matching = []
         each_event do |event|
           relates = event_relates_to_subject?(event, subject_id, subject_type)
           model_id = extract_model_id(event)
-          if model_id.nil?
+          model = linked_model(extract_model_class(event))
+          name = model.is_a?(Class) ? Lyra.stream_owner_name(model) : model.to_s
+          if model_id.nil? || (name == own && model_id.to_s == subject_id.to_s) || links.for(model).empty?
             matching << event if relates
             next
           end
 
-          key = [extract_model_class(event).to_s, model_id.to_s]
-          fields = extract_attributes(event)
-          before = pointed_at[key]
-          after = fields.key?(fk) ? fields[fk] : fields.fetch(fk.to_sym, before)
-          pointed_at[key] = after
-          matching << event if relates || [before, after].any? { |value| !value.nil? && value.to_s == id }
+          key = "#{name}$#{model_id}"
+          classified, values[key] = SubjectRecords.classify([event], links: links, model: model, subject_id: subject_id,
+                                                                     initial: values[key] || {})
+          case classified.first.last
+          when :inside then matching << event
+          when :in, :away then matching << subject_side(event, classified.first.last, links.columns(model))
+          else matching << event if relates
+          end
         end
         matching
+      end
+
+      def linked_model(name)
+        model = Lyra.config.monitored_model_named(name) || name.to_s.safe_constantize
+        model.is_a?(Class) && model < ActiveRecord::Base ? model : name.to_s
+      rescue StandardError
+        name.to_s
+      end
+
+      # A transition event with the subject's side only: an update moving the
+      # record in keeps its new values, one moving it away the links' old
+      # values. A create or import moving it in is the subject's whole.
+      def subject_side(event, kind, link_columns)
+        data = event.data.to_h
+        changes = data[:changes] || data["changes"]
+        return event unless changes.is_a?(Hash) && Lyra::Event.operation_of(event) == :updated
+
+        side =
+          if kind == :in
+            changes.to_h { |field, change| [field, [nil, change.is_a?(Array) ? change.last : change]] }
+          else
+            changes.select { |field, _| link_columns.include?(field.to_s) }
+                   .to_h { |field, change| [field, [change.is_a?(Array) ? change.first : nil, nil]] }
+          end
+        event.class.new(event_id: event.event_id, metadata: event.metadata.to_h,
+                        data: data.except(:changes, "changes").merge(changes: side))
       end
 
       EVENT_BATCH = 1_000
@@ -158,10 +322,33 @@ module Lyra
 
       # The fields the event gives or changes (Lyra::Event.fields_of): an
       # update holds its changes only, in every mode.
+      # Encrypted attributes are opened (the log holds their ciphertext), so
+      # the export's inventory and lineage give the values, as its records do.
       def extract_attributes(event)
-        return Lyra::Event.fields_of(event) if event.respond_to?(:data)
+        return opened(event, Lyra::Event.fields_of(event)) if event.respond_to?(:data)
         return event.attributes if event.respond_to?(:attributes) && !event.attributes.is_a?(Method)
         {}
+      end
+
+      # The model whose encrypted attributes +event+ may hold, or nil.
+      def encrypted_model(event)
+        model = linked_model(extract_model_class(event))
+        model.is_a?(Class) && Lyra::EncryptedAttributes.names(model).any? ? model : nil
+      end
+
+      def opened(event, values)
+        model = encrypted_model(event)
+        model && values.is_a?(Hash) ? Lyra::EncryptedAttributes.open(model, values) : values
+      end
+
+      def opened_changes(event, changes)
+        model = encrypted_model(event)
+        return changes unless model && changes.is_a?(Hash)
+
+        changes.to_h do |field, change|
+          opened_change = Array(change).map { |value| Lyra::EncryptedAttributes.open(model, { field => value })[field] }
+          [field, change.is_a?(Array) ? opened_change : opened_change.first]
+        end
       end
 
       def extract_timestamp(event)
@@ -191,12 +378,12 @@ module Lyra
       def extract_changes(event)
         if event.respond_to?(:changes) && !event.changes.is_a?(Method)
           begin
-            return event.changes unless event.method(:changes).owner.to_s.include?('ActiveRecord')
+            return opened_changes(event, event.changes) unless event.method(:changes).owner.to_s.include?('ActiveRecord')
           rescue
             return event.changes
           end
         end
-        return event.data[:changes] || event.data["changes"] || {} if event.respond_to?(:data)
+        return opened_changes(event, event.data[:changes] || event.data["changes"] || {}) if event.respond_to?(:data)
         {}
       end
 
@@ -221,7 +408,9 @@ module Lyra
 
         Lyra.config.monitored_models.each do |model|
           duration = Lyra::Privacy.policy_for(model).retention_for(model)
-          policy[model.name] = { duration: duration } if duration.is_a?(ActiveSupport::Duration)
+          # A Duration, or a plain number of seconds (Numeric; a Duration also
+          # answers is_a?(Numeric) for its value).
+          policy[model.name] = { duration: duration } if duration.is_a?(ActiveSupport::Duration) || duration.is_a?(Numeric)
         rescue StandardError
           next
         end

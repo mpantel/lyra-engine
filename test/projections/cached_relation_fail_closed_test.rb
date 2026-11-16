@@ -27,6 +27,7 @@ class CachedRelationFailClosedTest < Minitest::Test
       scope :grouped, -> { group(:name) }
       scope :failing, -> { raise "scope failed" }
       def self.revenue_total = 42
+      def self.names = pluck(:name)
     end)
     @alice = FailClosedUser.new(id: 1, name: "Alice", email: "a@example.com")
     @bob = FailClosedUser.new(id: 2, name: "Bob", email: "b@example.com")
@@ -127,8 +128,21 @@ class CachedRelationFailClosedTest < Minitest::Test
     assert_equal "scope failed", error.cause&.message
   end
 
+  # A class method that is not a scope runs with the relation as the current
+  # scope only where the model's reads answer from that scope (a monitored
+  # model under ES-NoProj; es_noproj_default_scope_test). Here they would read
+  # the table, so it is refused, before it runs.
   def test_a_class_method_that_is_not_a_scope_raises
     assert_raises(UnsupportedQuery) { @relation.revenue_total }
+    assert_raises(UnsupportedQuery) { @relation.where(name: "Bob").names }
+  end
+
+  # ActiveRecord's own relation methods that are not evaluated here are
+  # refused before they run.
+  def test_an_active_record_method_it_does_not_evaluate_raises
+    assert_raises(UnsupportedQuery) { @relation.invert_where }
+    assert_raises(UnsupportedQuery) { @relation.to_sql }
+    assert_raises(UnsupportedQuery) { @relation.where!("name = 'Bob'") }
   end
 
   def test_the_error_says_what_to_do_instead

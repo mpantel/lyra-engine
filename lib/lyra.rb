@@ -74,6 +74,7 @@ require "lyra/projections/reference_links"
 require "lyra/projections/cached_joins"
 require "lyra/projections/cached_relation"
 require "lyra/projections/deferred_relation"
+require "lyra/projections/default_scopes"
 require "lyra/projections/association_conditions"
 require "lyra/projections/event_store_reader"
 require "lyra/projections/lazy_projection"
@@ -100,7 +101,10 @@ if PAM_DSL_AVAILABLE
   require "lyra/privacy/adapters/pam"
   require "lyra/privacy/pii_masker"
   require "lyra/privacy/gdpr_compliance"
+  require "lyra/privacy/subject_links"
+  require "lyra/privacy/subject_records"
   require "lyra/access_log"
+  require "lyra/rights"
 end
 
 # Schema validation
@@ -121,6 +125,7 @@ if PETRI_FLOW_AVAILABLE
   require "lyra/verification/crud_lifecycle_workflow"
   require "lyra/verification/workflow_generator"
   require "lyra/verification/bypass_workflow"
+  require "lyra/verification/rights_workflows"
 end
 
 module Lyra
@@ -168,6 +173,29 @@ module Lyra
     owner.name
   rescue StandardError
     model_class.name
+  end
+
+  # The column that holds a record's key: the model's single primary key,
+  # whatever it is called ("id" unless the model names another). Composite
+  # primary keys are refused at enrolment (Lyra::ModelSelection).
+  def self.key_column(model_class)
+    key = model_class.primary_key if model_class.respond_to?(:primary_key)
+    key.is_a?(String) && !key.empty? ? key : "id"
+  end
+
+  # A record's key as its row holds it: +id+ (from a stream name, a string)
+  # as an integer when the key column is an integer one.
+  def self.key_value(model_class, id)
+    return id unless id.to_s.match?(/\A\d+\z/)
+
+    key = key_column(model_class)
+    type = begin
+      model_class.columns_hash[key]&.type if model_class.respond_to?(:columns_hash)
+    rescue StandardError
+      nil # no table to read the column from: an "id" is taken to be an integer, as before 1.0.0
+    end
+    integer = type ? %i[integer bigint].include?(type) : key == "id"
+    integer ? id.to_i : id
   end
 
   # Delegate event_store to configuration
@@ -232,6 +260,7 @@ module Lyra
         next
       end
       failures << "#{model.name}: no primary key" if model.primary_key.blank?
+      failures << "#{model.name}: composite primary key (not supported)" if model.primary_key.is_a?(Array)
     end
 
     raise MappingVerificationError, "Lyra mapping verification failed: #{failures.join('; ')}" if failures.any?

@@ -66,8 +66,9 @@ module Lyra
           # time).
           attributes = Lyra::EncryptedAttributes.open(model_class, result.attributes.dup).stringify_keys
 
-          # Ensure we have an ID
-          raise "Cannot project create without ID" unless attributes["id"]
+          # Ensure we have the record's key (the primary key column, whatever
+          # its name)
+          raise "Cannot project create without ID" unless attributes[Lyra.key_column(model_class)]
 
           # No default timestamps: a create's event carries created_at and
           # updated_at like any other column (from 1.0.0), and a value made up
@@ -109,7 +110,7 @@ module Lyra
 
           # Use update_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write(INTERNAL) { model_class.where(id: model_id).update_all(updates) }
+          Lyra.projection_write(INTERNAL) { model_class.where(Lyra.key_column(model_class) => model_id).update_all(updates) }
         end
 
         # Delete a record from the model table
@@ -123,7 +124,7 @@ module Lyra
 
           # Use delete_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write(INTERNAL) { model_class.where(id: model_id).delete_all }
+          Lyra.projection_write(INTERNAL) { model_class.where(Lyra.key_column(model_class) => model_id).delete_all }
         end
 
         private :project_create, :project_update, :project_destroy

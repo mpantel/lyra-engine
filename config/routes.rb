@@ -20,6 +20,7 @@ Lyra::Engine.routes.draw do
   get 'privacy/data_lineage/:field_name', to: 'privacy#data_lineage', as: :data_lineage
   get 'privacy/pii_detection', to: 'privacy#pii_detection', as: :pii_detection
   get 'privacy/policy', to: 'privacy#policy', as: :privacy_policy
+  get 'privacy/rights', to: 'privacy#rights', as: :privacy_rights
 
   # Configuration and projections routes
   get 'config/projections', to: 'dashboard#projections', as: :projections

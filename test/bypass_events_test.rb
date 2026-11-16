@@ -270,7 +270,9 @@ module Lyra
 
       assert_equal({ "status" => %w[draft published] }, value(only_event(a).data, :changes))
       assert_equal "destroyed", value(only_event(b).data, :operation).to_s
-      refute BypassTestArticle.unscoped.exists?(b.id), "stale table row left behind"
+      # The table itself (Model.unscoped reads the event store in ES-NoProj).
+      table_row = Lyra::ModeTransition.send(:bypass) { BypassTestArticle.unscoped.exists?(b.id) }
+      refute table_row, "stale table row left behind"
     end
 
     # In the events-only store there is no row: the UPDATE matched nothing,

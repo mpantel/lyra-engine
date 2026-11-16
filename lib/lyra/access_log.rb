@@ -52,6 +52,9 @@ module Lyra
   module AccessLog
     STREAM = "Lyra::DataAccess"
     ERASURES = "Lyra::AccessLogErasures"
+    # Each Art. 15 export, per subject (record_export); not part of the
+    # access log, so erasing the log leaves it.
+    EXPORTS = "Lyra::SubjectAccessExports"
     DELETE_BATCH = 1000
 
     class ModelWideSubject < ArgumentError; end
@@ -82,6 +85,58 @@ module Lyra
         event = Lyra::Events::DashboardRead.new(data: data, metadata: metadata_for_dashboard)
         # On its own connection, as every access entry (call).
         Lyra::OwnConnection.run { Lyra.append_events(event, stream_name: stream_for("Dashboard")) }
+      end
+
+      # Records that a data subject's Art. 15 copy was made
+      # (GDPRCompliance#data_export, an explicit call): a SubjectAccessExported
+      # event with which sections it gave, how many records, who verified the
+      # subject and who exported (the metadata, as for any access). Never a
+      # value. On unless config.record_subject_access_exports is false;
+      # nothing in disabled mode. Written on its own connection, as every
+      # access entry.
+      #
+      # It goes to a stream of its own, Lyra::SubjectAccessExports$<subject>,
+      # not to the subject's access stream: erasing the access log (erase!,
+      # Lyra::Erasure with access_log:) deletes that stream, and the evidence
+      # that a request was answered must outlive it, as the record of an
+      # erasure does (Lyra::AccessLogErasures).
+      def record_export(export)
+        return if !Lyra.config.record_subject_access_exports || Lyra.config.disabled_mode?
+
+        subject = subject_key_for(export[:subject_type], export[:subject_id])
+        data = {
+          subject: subject,
+          sections: Array(export[:sections]).map(&:to_s),
+          records: export[:records],
+          gaps: export[:gaps],
+          disclose_actors: export[:disclose_actors] ? true : false,
+          verified_by: export[:verified_by]&.to_s,
+          exported_at: export[:generated_at] || Time.current
+        }.compact
+        event = Lyra::Events::SubjectAccessExported.new(data: data, metadata: metadata_for_export)
+        Lyra::OwnConnection.run { Lyra.append_events(event, stream_name: exports_stream_for(subject)) }
+      end
+
+      # The recorded exports of +subject+ (a key such as "Registration$5"),
+      # oldest first.
+      def exports_for(subject)
+        Lyra.config.event_store.read.stream(exports_stream_for(subject)).to_a
+      end
+
+      def exports_stream_for(subject)
+        "#{EXPORTS}$#{subject}"
+      end
+
+      # The access-log key of a subject given by type and id: the record's
+      # ("Registration$5", the STI base class's name) when the type is a
+      # model, "<type>$<id>" otherwise.
+      def subject_key_for(subject_type, subject_id)
+        model = subject_type.to_s.safe_constantize
+        if model.is_a?(Class) && model < ActiveRecord::Base
+          Lyra.stream_name(model, subject_id)
+        else
+          "#{subject_type}$#{subject_id}"
+        end
       end
 
       def stream_for(subject)
@@ -176,6 +231,7 @@ module Lyra
       def metadata(access)
         {
           user_id: current(:user)&.id,
+          user_type: Lyra::Attribution.actor_type(current(:user)),
           ip_address: current(:ip_address),
           request_id: current(:request_id),
           correlation_id: Lyra::Correlation.current_id,
@@ -183,9 +239,21 @@ module Lyra
         }.merge(custom_metadata(access)).merge(source: "lyra_access_log").compact
       end
 
+      def metadata_for_export
+        {
+          user_id: current(:user)&.id,
+          user_type: Lyra::Attribution.actor_type(current(:user)),
+          ip_address: current(:ip_address),
+          request_id: current(:request_id),
+          correlation_id: Lyra::Correlation.current_id,
+          source: "lyra_subject_access"
+        }.compact
+      end
+
       def metadata_for_dashboard
         {
           user_id: current(:user)&.id,
+          user_type: Lyra::Attribution.actor_type(current(:user)),
           ip_address: current(:ip_address),
           request_id: current(:request_id),
           correlation_id: Lyra::Correlation.current_id,
@@ -216,6 +284,8 @@ module Lyra
     class DataAccessed < Lyra::Event; end
     class DataAccessDenied < Lyra::Event; end
     class DashboardRead < Lyra::Event; end
+    # A data subject's Art. 15 copy was made (AccessLog.record_export).
+    class SubjectAccessExported < Lyra::Event; end
     # A subject's access log was deleted (AccessLog.erase!).
     class AccessLogErased < Lyra::Event; end
   end

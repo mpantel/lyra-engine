@@ -30,5 +30,19 @@ module Lyra
     def host
       Socket.gethostname
     end
+
+    # The class of the user who acted (Current.user), as events record it
+    # beside user_id from 1.0.0 (user_type): the table's owner class for an
+    # Active Record user (the STI base class), the class name otherwise, nil
+    # for an anonymous class. An id alone cannot tell a staff User 7 from the
+    # data subject Person 7; the Art. 15 copy compares both.
+    def actor_type(user)
+      return nil if user.nil?
+
+      klass = user.class
+      klass.respond_to?(:base_class) ? Lyra.stream_owner_name(klass) : klass.name
+    rescue StandardError
+      nil
+    end
   end
 end

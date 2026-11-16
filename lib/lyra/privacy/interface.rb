@@ -57,6 +57,23 @@ module Lyra
         true
       end
 
+      # Def. 1 without its consent step, for a use whose subjects are not
+      # known yet (a query before it runs). +subject+ only labels the record.
+      def validate_fields!(_fields, _purpose, subject: nil)
+        true
+      end
+
+      # The violations validate_fields! would find, without enforcing them.
+      def field_violations(_fields, _purpose)
+        []
+      end
+
+      # Condition 6 alone (the subject's restrictions and objections, Arts.
+      # 18 and 21), for a read that names none of the declared fields.
+      def validate_rights!(_fields, _purpose, subject:)
+        true
+      end
+
       def allowed_purposes(_field)
         []
       end

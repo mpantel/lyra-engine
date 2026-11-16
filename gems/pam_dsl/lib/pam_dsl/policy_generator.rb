@@ -355,6 +355,12 @@ module PamDsl
           models_comment += "\n# Ignored by #{config[:ignored_in].join(', ')} (ignored_columns): the application cannot " \
                             "see or erase what this column holds; empty it by migration"
         end
+        if Field::SPECIAL_CATEGORY_TYPES.include?(config[:type])
+          models_comment += "\n# Art. 9 special category: a purpose that reads it needs an art9_basis (Art. 9(2))"
+        elsif Field::CRIMINAL_DATA_TYPES.include?(config[:type])
+          models_comment += "\n# Art. 10 data: a purpose that reads it needs an art10_authorisation " \
+                            "(official authority, or the Union or Member State law that authorises it)"
+        end
         field_def = "  field :#{name}, type: :#{config[:type]}, sensitivity: :#{config[:sensitivity]}"
 
         # Add masking transforms for sensitive fields

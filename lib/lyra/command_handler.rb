@@ -57,7 +57,13 @@ module Lyra
       # table's PostgreSQL sequence). Elsewhere hijack falls back to the
       # "pending-<hex>" placeholder, with a one-time warning, rather than risk
       # a duplicate key.
-      explicit_id = (command.attributes["id"] || command.attributes[:id]).presence
+      #
+      # The key is the model's primary key column, whatever its name ("code",
+      # a uuid column): the value the application gave it is kept, and the
+      # event and the result carry the key under that column, never under an
+      # "id" the table may not have.
+      key = Lyra.key_column(model_class)
+      explicit_id = (command.attributes[key] || command.attributes[key.to_sym]).presence
       id = explicit_id ||
            (IdGenerator.next_id(model_class) if Lyra.event_sourcing_mode? || IdGenerator.reserves_safely?(model_class))
       unless id
@@ -71,7 +77,7 @@ module Lyra
 
       # Create event with pre-generated ID
       # Use symbolize_keys for consistent key types in event data
-      event_attrs = command.attributes.symbolize_keys.merge(id: id)
+      event_attrs = command.attributes.symbolize_keys.merge(key.to_sym => id)
       events = create_events(:created, id, event_attrs)
       event = events.first
 
@@ -89,10 +95,10 @@ module Lyra
       # Return result with the ID, so the caller inserts the row under the same
       # ID the event already carries.
       attributes = command.attributes.dup
-      # Remove string "id" key to prevent conflict with symbol :id
+      # Remove the string key to prevent conflict with the symbol one
       # (AR attributes have string keys, but we add symbol keys)
-      attributes.delete("id")
-      attributes[:id] = id unless id.to_s.start_with?("pending-")
+      attributes.delete(key)
+      attributes[key.to_sym] = id unless id.to_s.start_with?("pending-")
       CommandResult.success(attributes: attributes, events: events)
     end
 

@@ -1,0 +1,78 @@
+<style>
+  .lyra-rights { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; }
+  .lyra-rights h1 { color: #1a1a2e; border-bottom: 2px solid #4a4e69; padding-bottom: 10px; }
+  .lyra-rights .back-link { display: inline-block; margin-bottom: 20px; color: #4a4e69; text-decoration: none; }
+  .lyra-rights .back-link:hover { text-decoration: underline; }
+  .lyra-rights .note { color: #6c757d; font-size: 13px; margin-bottom: 20px; }
+  .lyra-rights table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #dee2e6; border-radius: 8px; }
+  .lyra-rights th { background: #f8f9fa; padding: 10px 12px; text-align: left; border-bottom: 1px solid #dee2e6; font-weight: 600; font-size: 13px; }
+  .lyra-rights td { padding: 10px 12px; border-bottom: 1px solid #eee; font-size: 13px; vertical-align: top; }
+  .lyra-rights tr:last-child td { border-bottom: none; }
+  .lyra-rights .overdue { color: #721c24; background: #f8d7da; padding: 2px 8px; border-radius: 3px; font-weight: 600; }
+  .lyra-rights .due { color: #155724; background: #d4edda; padding: 2px 8px; border-radius: 3px; }
+  .lyra-rights .empty-state { text-align: center; padding: 40px; color: #6c757d; background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; }
+</style>
+
+<div class="lyra-rights">
+  <%= link_to "&larr; Back to Dashboard".html_safe, dashboard_path, class: "back-link" %>
+
+  <h1>Open rights requests</h1>
+  <p class="note">
+    Restrictions of processing not yet lifted (Art. 18) and objections not yet decided (Art. 21), oldest first.
+    An objection awaiting a decision is to be answered within one month of its receipt (Art. 12(3)): that is
+    its deadline, without an extension, which the controller records and tells the subject of. A restriction
+    listed here is in force: recording it was the controller's action on the request, so it has no deadline;
+    it lasts until it is lifted, after the subject is told (Art. 18(3)).
+  </p>
+
+  <% if @requests.empty? %>
+    <div class="empty-state">No open requests.</div>
+  <% else %>
+    <table>
+      <thead>
+        <tr>
+          <th>Request</th>
+          <th>Subject</th>
+          <th>Article</th>
+          <th>What</th>
+          <th>State</th>
+          <th>Received</th>
+          <th>Age</th>
+          <th>Deadline</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% @requests.each do |request| %>
+          <tr>
+            <td><%= request[:kind] %><br><code><%= request[:id] %></code></td>
+            <td><%= request[:subject] %></td>
+            <td><%= request[:article] %></td>
+            <td>
+              <% if request[:kind] == :restriction %>
+                <%= request[:ground].to_s.tr("_", " ") %>:
+                <%= request[:fields].any? ? request[:fields].join(", ") : "all of the subject's data" %>
+              <% else %>
+                purpose <%= request[:purpose] %> of policy <%= request[:policy] %>
+              <% end %>
+            </td>
+            <td><%= request[:state].to_s.tr("_", " ") %></td>
+            <td><%= request[:requested_at].strftime("%Y-%m-%d %H:%M") %></td>
+            <td><%= request[:age_days] %> days</td>
+            <td>
+              <% if request[:deadline] %>
+                <%= request[:deadline].strftime("%Y-%m-%d") %>
+                <% if request[:overdue] %>
+                  <span class="overdue">overdue</span>
+                <% else %>
+                  <span class="due">due</span>
+                <% end %>
+              <% else %>
+                in force (no deadline)
+              <% end %>
+            </td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+  <% end %>
+</div>

@@ -201,6 +201,13 @@ Details are in [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md) and
   `bin/rails lyra:erase`.
 - Purpose-bound reads: `Lyra.with_purpose(:enrollment) { Student.find(id) }`
   checks the declared attributes read against the policy.
+- Restriction and objection (Arts. 18 and 21, from 1.0.0): a record a
+  restriction or upheld objection covers is refused on load; model-wide
+  queries leave the restricted subjects out (`Lyra::Rights::Queries`), and
+  `Model.lyra_processable` gives batch jobs the records they may process;
+  erasure refuses a restricted record unless it lifts a notified restriction,
+  and retention skips and reports it. The rights are read afresh per checking
+  scope (purpose block, request, job, batch).
 - Consent as a Petri net guard:
   `PetriFlow::Colored::Guards.has_consent(:email_marketing)`.
 - Opt-in: privacy stamps on events (`config.annotate_privacy`), the access log
@@ -213,6 +220,7 @@ Details are in [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md) and
 |---|---|
 | Does every CRUD operation produce an event? | `Lyra.verify_mapping!` runs PetriFlow nets for the CRUD lifecycle and for create, update and destroy across the modes, and checks that their terminal places are reachable, that they are safe (1-bounded), and that they are deadlock-free except at terminal places. See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
 | Can a write change the store without an event? | `Lyra::Verification::BypassWorkflow` models `update_column(s)`, `delete`, `touch`, `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify`; `BypassWorkflow.coverage` checks that every reachable end state is a rejection or a store change with an event logged. |
+| Does the code's restriction and objection lifecycle match its net? | `Lyra::Verification::DataLifecycleWorkflow` (the data lifecycle with its Restricted place D_R of Art. 18: restrict, the Art. 18(3) notice, lift back to the origin; Deleted and Anonymized unreachable from D_R without the lift) and `ObjectionWorkflow` (pending, then upheld, overridden, rejected or withdrawn). Their tests explore them with PetriFlow (safe, terminating) and check that the transitions PAM DSL's `PamDsl::Rights.project` accepts are exactly the nets'. |
 | Does replaying the events produce the row? | `Lyra::DualView.new(Student, id).compare[:differences].empty?`; `config.dual_view_sample_rate` checks a share of committed writes as they happen (opt-in). |
 | Can every change to a field be traced, and a record's state at any time be recovered? | `Lyra::EventFlow#data_lineage`, `Lyra.state_at` and `Model.as_of` (see [Analysis Projections](#analysis-projections)). |
 
@@ -477,6 +485,15 @@ write path records are listed under [Metadata](API_REFERENCE.md#metadata).
 - Events appended in order
 - Access events go to separate streams, `"Lyra::DataAccess$<subject>"` (see
   [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md#the-access-log))
+- The data subject's rights (from 1.0.0, with PAM DSL): restrictions and
+  objections (Arts. 18 and 21) in `"Lyra::Rights$<subject key>"`, linked to
+  the index stream `"Lyra::Rights"`, and consent in
+  `"Lyra::Consent$<subject key>"`, linked to `"Lyra::Consent"`. Each subject's
+  stream is appended with an expected version, so two processes cannot both
+  record a transition of the same request. These streams are never erased
+  (not by `Lyra::Erasure`, nor with the access log): they hold names, grounds
+  and reasons, never values, and are the evidence that a right was handled.
+  See `Lyra::Rights` and [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md#restriction-of-processing-article-18-and-the-right-to-object-article-21)
 
 ### Layer 5: Query Layer
 
@@ -772,7 +789,11 @@ projected configuration for such queries.
 way, `:through` associations (read through the intermediate records),
 association scopes and calculations on associations included; a `has_many`
 returns a `CachedRelation`, and a polymorphic `belongs_to` resolves its class
-from the type column.
+from the type column. A `has_many`'s `dependent: :delete_all` or `:nullify`
+finds the children the association selects (with the child's default scopes,
+as Active Record applies them to an association) in the event store and writes
+each one's event through `CachedRelation`'s `delete_all`/`update_all`; a scope
+it cannot evaluate refuses the parent's destroy with `UnsupportedQuery`.
 
 **Genesis.** In ES-NoProj a model's first read in a process, as well as its
 first write, imports rows that predate Lyra, so they have streams to read.
@@ -1002,8 +1023,18 @@ CREATE TABLE event_store_events_in_streams (
 );
 ```
 
-Lyra's own tables, such as ES-Lazy's `lyra_projection_checkpoints`, are
-created on first use and need no migration.
+Lyra's own tables are created on first use and need no migration:
+
+| Table | Holds | Written by |
+|---|---|---|
+| `lyra_projection_checkpoints` | ES-Lazy's projection checkpoints | `Lyra::Projections::LazyProjection` |
+| `lyra_async_checkpoints` | ES-Async's checkpoint | `Lyra::Projections::AsyncCheckpoint` |
+| `lyra_mode_transitions` | applied mode switches and check certificates | `Lyra::ModeTransition` |
+| `lyra_rights` | one row per restriction or objection: subject key, kind, policy, purpose, fields, ground, article, state, in force, times, the subject stream's version (from 1.0.0) | `Lyra::Rights::Store`, in the transaction that appends to `Lyra::Rights$<subject key>` |
+| `lyra_consents` | one row per subject key and purpose: consent state, requested, granted, expiry and withdrawal times (from 1.0.0) | `Lyra::Rights::ConsentStore`, in the transaction that appends to `Lyra::Consent$<subject key>` |
+
+`lyra_rights` and `lyra_consents` are projections of their streams:
+`bin/rails lyra:rights:rebuild` rebuilds them by replay.
 
 ### Application Tables (Example: Aegean E-Pay Testbed)
 
