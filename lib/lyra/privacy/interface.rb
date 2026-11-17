@@ -211,9 +211,10 @@ module Lyra
       # the data was written, so reclassifying a field later does not rewrite
       # the history, and it can be read without the policy or PAM.
       #
-      # A create (or import, or destroy) annotates the attributes it carries;
-      # an update only the ones it changed. An event with no declared
-      # attribute, or a model without a loaded policy, is left unstamped.
+      # A create (or import) annotates the attributes it carries; an update
+      # only the ones it changed. A destroy carries none, so it, an event with
+      # no declared attribute, and a model without a loaded policy are left
+      # unstamped.
       #
       # @return [Hash] the metadata, with metadata[:privacy] added when there
       #   is something to annotate
@@ -225,10 +226,12 @@ module Lyra
 
         attributes = data[:attributes] || data["attributes"] || {}
         changes = data[:changes] || data["changes"] || {}
-        # Every declared attribute the event carries: an update's own changes
-        # and, in Monitor, the whole row it also carries. Stamping only the
-        # changes left 28,374 of the Olist replay's events carrying personal
-        # data unannotated, against Theorem 3's premise.
+        # Every declared attribute the event carries: a create's (or import's)
+        # attributes and an update's changes. Every mode now builds the same
+        # shape (Lyra::EventData), so a Monitor update carries only its changes,
+        # not the whole row as before 1.0.0, when stamping only the changes left
+        # 28,374 of the Olist replay's events carrying personal data
+        # unannotated, against Theorem 3's premise.
         touched = attributes.keys | changes.keys
 
         fields = touched.each_with_object({}) do |field, acc|

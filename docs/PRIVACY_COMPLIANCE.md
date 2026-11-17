@@ -71,6 +71,13 @@ class Student < ApplicationRecord
 end
 ```
 
+A field may be used for a purpose when the field's `allow_for` names the purpose
+**or** the purpose's `requires`/`optionally` names the field: `allow_for` widens
+the purposes a field is allowed for, it does not restrict them. Above, `:email`
+is allowed for `:enrollment` from both sides, and for `:authentication` from
+its `allow_for` alone, whatever that purpose lists; to keep a field from a
+purpose, leave it out of both.
+
 A model's policy is its `privacy_policy` option, else `config.privacy_policy`
 (`Lyra::Privacy.policy_for(Student)`). The DSL is summarised in
 [API_REFERENCE.md](API_REFERENCE.md#pam-dsl-essentials) and documented in
@@ -167,7 +174,7 @@ compliance = Lyra::Privacy::GDPRCompliance.new(
 
 export = compliance.data_export
 # Returns, as before 1.0.0:
-# - events, pii_inventory, data_lineage, processing_activities (event summaries and detected PII)
+# - events, pii_inventory, data_lineage (event summaries and detected PII)
 # and, from 1.0.0, the copy of the data (Art. 15(3)) and the information of Art. 15(1)-(2):
 # - records, accesses, processing_context, notice, gaps
 ```
@@ -265,12 +272,14 @@ records may span models with different policies): one entry per purpose that adm
 declared fields, with its legal basis, data categories (the fields' types), `recipients`,
 `transfers`, `retention` (the model's period and the fields' own periods, as the policy declares
 them: `nil` where it declares none, rather than PAM's 7-year fallback) and `sources`
-(`collected_from`, Art. 15(1)(g)).
+(`collected_from`, Art. 15(1)(g)). It is the copy's only statement of purposes: the per-event
+`processing_activities` key, whose purposes were guessed from keywords in the event's source, was
+removed in 1.0.0 (the Art. 30 method `processing_activities` is unchanged).
 
-**The older keys** (`events`, `pii_inventory`, `data_lineage`, `processing_activities`) follow the
-same rules from 1.0.0: fields declared `withheld_from_access:` or `about:` another person are left
-out (the copy's `withheld` and `review` name them), encrypted values are opened, and an event that
-moves a record between people carries the subject's side only.
+**The older keys** (`events`, `pii_inventory`, `data_lineage`) follow the same rules from 1.0.0:
+fields declared `withheld_from_access:` or `about:` another person are left out (the copy's
+`withheld` and `review` name them), encrypted values are opened, and an event that moves a record
+between people carries the subject's side only.
 
 **`notice`** is the controller's notice, declared once in the policy (`access_notice`):
 `controller`, `rights`, `complaint` and `automated_decisions`.
@@ -500,8 +509,8 @@ bin/rails lyra:erase_access_log SUBJECT=user-7 REASON="Art. 17 request #12" OPER
   that id has a log of its own: name it in `access_log_subjects:` (`ACCESS_LOG_SUBJECTS=`) and it is
   erased, or kept and counted, with the record's; `ErasureApplied` records how many (never which).
   `Lyra::AccessLog.erase!(subject, reason:)` (`lyra:erase_access_log`) deletes one subject's log on
-  its own, and records an `AccessLogErased` event (subject, entries, reason, who) in
-  `Lyra::AccessLogErasures`.
+  its own, and records an `AccessLogErased` event (subject, entries, reason, who: the label, and
+  the OS user, host and pid beside it) in `Lyra::AccessLogErasures`.
   A model-wide entry (`Lyra::DataAccess$<Model>$*`, written by a `pluck`) names no subject: it is
   the record of a read of everyone's data, and both calls refuse it. Access logs of other records
   reached by `everywhere` are not touched. The access log has no retention period of its own.
@@ -591,6 +600,14 @@ passes. Rule conditions (`when { |record| ... }`) get the record. Already-erased
 not erased again, so runs are idempotent; erasures are recorded with `erased_by: "lyra_retention"`.
 It works in every mode: in ES-NoProj the records and their anchor column are read from the event
 store (no default scope applied, so a soft-deleted record is still due), and a deletion is an event.
+
+Only models with a rule of their own are acted on: the policy's `default` period is not
+executed. A rule that names no `on_expiry` gets `:soft_delete`, which keeps the data and needs a
+`deleted_at` or `discarded_at` column; on a table without one, nothing past the period is touched.
+Lyra warns about such a rule (`Rails.logger.warn`), naming the model, its policy and rule, and
+the fix (add the column, or `on_expiry :anonymize` or `:hard_delete`): at boot for the models
+enrolled by then (`Lyra::Retention.check_rules!`), and in each run that skips records for it,
+once per model.
 
 #### Right to Data Portability (Article 20)
 
@@ -1289,8 +1306,8 @@ integration.mask_pii(:email, "john@example.com", :display)   # => "j***@example.
 ```ruby
 gdpr = Lyra::Privacy::GDPRCompliance.new(subject_type: "Student", subject_id: student.id)
 gdpr.data_export.keys
-# => [:subject, :generated_at, :events, :pii_inventory, :data_lineage, :processing_activities,
-#     :records, :accesses, :processing_context, :notice, :gaps]
+# => [:subject, :generated_at, :events, :pii_inventory, :data_lineage,
+#     :records, :accesses, :processing_context, :notice, :gaps, :restrictions, :objections]
 ```
 
 ## Integration Patterns

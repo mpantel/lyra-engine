@@ -104,7 +104,9 @@ module Lyra
       private
 
       def build(attributes)
-        record = model_class.instantiate(attributes.slice(*model_class.column_names))
+        record = model_class.instantiate(
+          Lyra::Projections::TypedValues.database_attributes(model_class, attributes.slice(*model_class.column_names))
+        )
         record.readonly!
         record
       end

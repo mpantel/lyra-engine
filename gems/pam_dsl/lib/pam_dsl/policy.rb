@@ -167,6 +167,9 @@ module PamDsl
     # entry points to the same constraint. When the field carries an explicit allow_for
     # declaration, either side is sufficient. When the field has no allow_for declarations
     # it imposes no restriction and the purpose-side declaration is authoritative.
+    # Either way the result is the union of the two sides: allow_for widens the purposes
+    # a field is allowed for, it never narrows what a purpose's requires/optionally grant.
+    # Both need the field and the purpose to be declared.
     def allowed?(field_name, purpose_name)
       field = @fields[field_name.to_sym]
       purpose = @purposes[purpose_name.to_sym]

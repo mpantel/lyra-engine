@@ -56,7 +56,10 @@ class AccessLogTest < Minitest::Test
     record = Lyra.config.event_store.read.stream(Lyra::AccessLog::ERASURES).to_a.sole
     assert_kind_of Lyra::Events::AccessLogErased, record
     assert_equal ["user-7", 2, "Art. 17 request"], record.data.values_at(:subject, :entries, :reason)
-    assert_equal "dpo", record.metadata[:erased_by]
+    assert_equal "dpo", record.metadata[:erased_by], "the label is what was claimed"
+    assert_equal Etc.getpwuid(Process.uid).name, record.metadata[:os_user], "beside it, what the OS says"
+    assert_equal Socket.gethostname, record.metadata[:host]
+    assert_equal Process.pid, record.metadata[:pid]
 
     assert_equal 1, Lyra::AccessLog.erase!(@user, reason: "r"), "a record as the subject"
   end

@@ -71,7 +71,9 @@ data_export = compliance.data_export
 #      events: [...],  # All events related to the student
 #      pii_inventory: {...},  # All PII fields
 #      data_lineage: {...},  # How PII has changed over time
-#      processing_activities: [...]  # What processing has been done
+#      records: [...],  # Each of the student's records whole, with its history
+#      processing_context: [...],  # Per purpose: basis, recipients, retention (from the policy)
+#      notice: {...}, gaps: [...]  # ... see docs/PRIVACY_COMPLIANCE.md
 #    }
 
 # ============================================

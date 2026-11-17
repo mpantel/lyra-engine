@@ -188,7 +188,13 @@ module Lyra
             next unless keys.include?(key.to_s)
 
             value = value.id if value.is_a?(ActiveRecord::Base)
-            [key.to_s, value] if value.is_a?(Integer) || value.is_a?(String)
+            next unless value.is_a?(Integer) || value.is_a?(String)
+
+            # As the key's type casts it ("5" and 5 name one stream); a value
+            # the type binds as NULL ("abc" on an integer key) names none, and
+            # is left to the conditions.
+            bound = TypedValues.query_value(model_class.type_for_attribute(key.to_s), value)
+            [key.to_s, bound] if bound.is_a?(Integer) || bound.is_a?(String)
           end
         end
 

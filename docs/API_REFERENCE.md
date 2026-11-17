@@ -299,7 +299,7 @@ Lyra::ModeTransition.to!(:hijack, force: true)      # no check
 
 | Method | Description |
 |---|---|
-| `to!(mode, projection_mode: nil, force: false, rebuild: false)` | Switch, gated. Runs a check when the switch changes the authoritative store (escalation from Disabled/Monitor, or leaving ES-NoProj/ES-Lazy/ES-Async for a table-reading mode), unless a fresh certificate covers it. Raises `ModeTransition::Refused` (with `#report`) on discrepancies, and, entering ES-NoProj, when a monitored model has a default scope ES-NoProj cannot evaluate. Records the switch so other processes adopt it. Returns the check's `Report`, or `nil`. |
+| `to!(mode, projection_mode: nil, force: false, rebuild: false)` | Switch, gated. Runs a check when the switch changes the authoritative store (escalation from Disabled/Monitor, or leaving ES-NoProj/ES-Lazy/ES-Async for a table-reading mode), unless a fresh certificate covers it. Raises `ModeTransition::Refused` (with `#report`) on discrepancies, and, entering ES-NoProj, when a monitored model has a default scope ES-NoProj cannot evaluate or an unmonitored table has a database foreign key into a monitored one. Records the switch so other processes adopt it. Returns the check's `Report`, or `nil`. |
 | `check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)` | Compare every row with its stream; imports pre-Lyra rows first on escalation; stores a certificate when clean. Returns a `Report`. |
 | `current` | This process's configuration as a label: `"monitor"`, `"event_sourcing/lazy"`. |
 | `label(mode, projection_mode = nil)` | Build such a label. |
@@ -588,6 +588,23 @@ uniqueness validation, counter caches) keep Active Record's relation; which
 caller is which is told by the calling file (Active Record's, Lyra's, or any
 other), passing over a model's own `unscoped` override.
 
+The tables of monitored models get no rows, so a database foreign key from a
+table no monitored model writes into one of them would refuse every write
+there that sets the column. `ModeTransition.to!` refuses the switch into
+ES-NoProj while one exists, naming the referencing table and column, the
+referenced table and the constraint (`force: true` overrides); drop the
+constraint (`remove_foreign_key :table, name: "..."`) and keep the reference
+in the model (`belongs_to` validates it), or monitor the referencing model.
+Foreign keys between monitored tables, or from a monitored table into an
+unmonitored one, never fire and pass.
+`Lyra::Projections::ForeignKeys.blocking(models)` lists them (structs with
+`from_table`, `column`, `to_table`, `name` and `referencing_models`). ES-NoProj
+set by configuration (`config.projection_mode = :disabled` in an initializer)
+passes no switch; at boot `Lyra::ModeTransition.check_es_noproj!` warns
+(`Rails.logger.warn`) of each such constraint and each default scope ES-NoProj
+cannot evaluate, for the models enrolled by then, and returns the warnings.
+The boot goes on.
+
 Collections are `Lyra::Projections::CachedRelation` objects, evaluated in
 Ruby:
 
@@ -633,6 +650,60 @@ write raises `UnsupportedQuery` and the parent's destroy is refused, rather
 than delete or nullify children the association might not select. Counter
 caches are not maintained in ES-NoProj; such a write leaves the owner's
 counter as the log holds it.
+
+Rails' uniqueness validation (`validates :x, uniqueness: ...`) keeps the
+relation Rails builds for it (`Model.unscoped`, the value compared as the
+connection compares it, `scope:`, `conditions:`, and on update the record
+itself left out by its primary key), and its `exists?` is answered from the
+event-sourced records (`Lyra::Projections::Uniqueness`): a soft-delete default
+scope is not applied, as in Rails, and under STI the type condition is that of
+the class that declared the validation. Its where clause is evaluated as the
+database evaluates it: equality, `IS NULL`, `IN`, `NOT IN`, ranges, `where.not`,
+`or` and named scopes made of those, each value bound through the attribute's
+type (a hash condition's list leaves out the values the type binds as NULL, as
+Active Record's `IN` does; a `character(n)` value compares without its trailing
+spaces; a serialized attribute compares as the text it is stored as);
+`case_sensitive: false` (`LOWER(column) = LOWER(value)`) and a `citext`
+column's equality by the database's own `LOWER`, applied to the values the
+records hold (texts lowered once are remembered per database in the process,
+so a check sends only new ones, in one query). An SQL fragment or a subquery in
+`conditions:`, a join, `LIKE`, a comparison with another column, a string
+column with a collation of its own, or a string comparison on an adapter other
+than PostgreSQL or SQLite raises `UnsupportedQuery`.
+
+Cost: each check reads the last event of every stream of the model (one query,
+which grows with the model's events) and tests every record in Ruby; the
+records are kept, stamped as the projection cache's entries are, in a
+per-process copy, so only the streams written since the last check are read
+from the cache or rebuilt. On the development VM a check of the testbed's
+`BankPayment#remittance_info` took 1.6 ms at 331 records and 4.7 ms at 1,531
+(24 ms when every record was read from the cache); in the test suite's
+environment, at 3,000 records, 24 ms (41 ms under `case_sensitive: false`)
+against 94 ms. A model's bulk creates in ES-NoProj therefore cost time that
+grows with the records already there (quadratic in total). Each check answers
+from the copy's entries as it read them, so another thread's uncommitted
+record is never used. The copies of all models are kept under 32 MB (beside
+the projection cache's own 32 MB), the least recently used dropped first; a
+model with more than 20,000 streams is read through the projection cache
+instead; a copy expires after an hour, as the cache's memory entries do, and
+is rebuilt when its model's columns change (`reset_column_information`).
+
+Race: on PostgreSQL, inside a transaction (`save`, `create`, `update`), a
+check that claims a value (a new record, a changed attribute or scope column,
+or any check with `conditions:`) first takes a transaction-level advisory lock
+on the model, attribute and value as the column holds it (under
+`case_sensitive: false` or on a `citext` column, on `LOWER(value)` as the
+database computes it), so that a second writer of the value waits for the
+first's commit and then finds its record: the table modes have the unique index
+for that race, ES-NoProj has no row for an index to refuse. A save that keeps
+its value takes no lock, though the check still runs. The key leaves `scope:`
+and `conditions:` out and is hashed to 32 bits, so it is coarser than a unique
+index on the scoped columns: two writers of one value in two scopes wait for
+each other. Not covered: `valid?` and then `save(validate: false)`; a
+REPEATABLE READ or SERIALIZABLE transaction whose snapshot predates the other
+writer's commit; adapters other than PostgreSQL. Two transactions that each
+claim the same two values in opposite orders deadlock, as inserting them into a
+unique index does, and PostgreSQL fails one of them (`ActiveRecord::Deadlocked`).
 
 `EventStoreReader` class methods: `find(model, id)`, `find_by(model, attrs)`,
 `exists?(model, id)`, `relation(model)`, `all(model)`, `where(model,
@@ -1033,7 +1104,7 @@ was erased (from 1.0.0).
 `Lyra::AccessLog.erase!(subject, reason:, erased_by: nil)` deletes one subject's
 access log on its own (a record or a bare id) and returns how many entries it
 deleted; it records `Lyra::Events::AccessLogErased` (subject, entries, reason,
-`erased_by`) in the stream `Lyra::AccessLogErasures`. Rake: `lyra:erase_access_log
+`erased_by`, and beside that label the OS user, host and pid) in the stream `Lyra::AccessLogErasures`. Rake: `lyra:erase_access_log
 SUBJECT=… REASON=… [OPERATOR=…]`. The replacement is `nil` where the column allows it,
 `"erased:<id>"` for a NOT NULL string column, else the column default; a NOT
 NULL column with neither raises `Lyra::Erasure::Unsupported`, as does a record
@@ -1075,6 +1146,16 @@ restrictions in `detail`; `Result#restricted` lists them, and
 `lyra:retention:apply` prints them. It is acted on at the first run after the
 restriction is lifted.
 
+Only a model with a rule of its own (`for_model`) is acted on; the policy's
+`default` period is not executed. `:soft_delete` is also the strategy of a rule
+that names none, and on a table with neither `deleted_at` nor `discarded_at` it
+can never act. From 1.0.0 Lyra warns about such a rule (`Rails.logger.warn`,
+else `Kernel#warn`), naming the model, its policy and rule, and the fix (add the
+column, or `on_expiry :anonymize` or `:hard_delete`): at boot for the models
+enrolled by then, and in each run that skips records for it, once per model.
+`Lyra::Retention.check_rules!(models: Lyra.config.monitored_models)` makes the
+boot check on demand and returns the names of the models it warned about.
+
 ### GDPR reports (needs pam_dsl)
 
 `Lyra::Privacy::GDPRCompliance.new(subject_id:, subject_type: "User", actor_label: nil, access_log_subjects: nil)` wraps
@@ -1104,6 +1185,8 @@ class, `"staff or you"` for the subject's id with no class, `"staff"`,
 `"system"`); from 1.0.0 events record the acting user's class as `user_type`
 beside `user_id`. The older keys of `data_export` follow the copy's rules
 (withheld and other people's fields left out, encrypted values opened).
+The per-event `processing_activities` key, whose purposes were guessed from
+keywords, is gone from 1.0.0: the copy's purposes are `processing_context`.
 `disclose_actors: true`
 adds `actor: { user_id:, ip_address: }`. `history: false` and `accesses: false`
 are for a request the subject narrowed. Each explicit export is recorded as
@@ -1202,7 +1285,7 @@ end
 | `PamDsl.define_policy(name) { ... }` | Define and register a policy. |
 | `PamDsl.policy(name)` | Look one up; raises `PamDsl::PolicyNotFoundError`. |
 | `policy.get_field(name)` / `get_purpose(name)` | Raise `InvalidFieldError` / `UndeclaredPurposeError` if undeclared. |
-| `policy.allowed?(field, purpose)` | |
+| `policy.allowed?(field, purpose)` | True when the field's `allow_for` names the purpose or the purpose's `requires`/`optionally` names the field: `allow_for` widens, it does not restrict. |
 | `policy.validate_access!(field_names, purpose, subject:)` | Def. 1 check: `true`, or raises the first violation (strict) / returns `false` (audit). |
 | `policy.retention_for(model_class, field_name: nil)` | Duration, falling back to the default. |
 | `policy.consent_policy.grant_consent(purpose:, subject:)` | Record consent at run time (also `withdraw_consent`, `request_consent`). |

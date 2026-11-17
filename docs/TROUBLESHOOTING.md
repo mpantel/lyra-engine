@@ -59,9 +59,9 @@ and finds none.
 **Fix**: Name the file to require in the Gemfile:
 
 ```ruby
-gem "orfeas_lyra", "~> 0.9", require: "lyra"
-gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional
-gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional
+gem "orfeas_lyra", "~> 1.0", require: "lyra"
+gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional
+gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional
 ```
 
 See [GETTING_STARTED.md](GETTING_STARTED.md#1-install) for installing from
@@ -352,7 +352,12 @@ call it first (`Model.with_discarded.limit(5)`), or after `where`, `order` and
 named scopes only. A message naming a relation method ("`to_sql` on a
 relation", "`invert_where` on a relation", "`merge` of a … relation") means the
 relation cannot do it from the event store; it was refused before anything
-ran.
+ran. A message naming "a uniqueness check" comes from a `validates ...,
+uniqueness:` whose `conditions:` (an SQL fragment such as
+`-> { where("archived = ?", false) }`, a subquery, `LIKE`) or column (a
+collation of its own) ES-NoProj cannot evaluate: the save is refused rather
+than the value passed or refused on a guess. Write the conditions as hash
+conditions (`-> { where(archived: false) }`).
 
 **Fix**: Rewrite the query with hash conditions, or use ES-Lazy or a projected
 configuration (ES-Sync, ES-Async) for that code. Write a default scope as hash
@@ -367,11 +372,33 @@ The supported subset is listed in
 ES-NoProj cannot evaluate from the event store (see above) would make every
 read of that model raise `UnsupportedQuery`, so the switch is refused and the
 models are named. Setting `config.projection_mode = :disabled` directly is
-not checked; the reads raise instead.
+not gated: the boot logs a warning per model, and the reads raise.
 
 **Fix**: Write those default scopes as hash conditions and column orderings,
 leave the models unmonitored, or use another projection mode.
 `ModeTransition.to!(..., force: true)` switches anyway.
+
+### `Lyra::ModeTransition::Refused`: "… a database foreign key into one of those tables from a table no monitored model writes …"
+
+**Cause**: ES-NoProj keeps the records of monitored models in the event store
+and writes no rows to their tables. A database foreign key from a table no
+monitored model writes into one of those tables (an unmonitored `Match` with
+`add_foreign_key :matches, :registrations`, `Registration` monitored) would
+make every insert or update there that sets the column fail with
+`ActiveRecord::InvalidForeignKey`, so the switch into ES-NoProj names each
+such constraint (`matches.registration_id -> registrations (constraint
+fk_rails_…)`) and is refused. Foreign keys between monitored tables, or from
+a monitored table into an unmonitored one, never fire in ES-NoProj and are
+not reported. Setting `config.projection_mode = :disabled` directly is not
+gated: the boot logs a warning per constraint ("Lyra: in ES-NoProj every
+write to matches that sets registration_id will fail"), and the writes fail.
+
+**Fix**: Monitor the referencing model too (its records then live in the
+event log beside the ones they reference), or drop the constraint
+(`remove_foreign_key :matches, name: "fk_rails_…"`) and keep the reference in
+the model: `belongs_to` validates that the record exists, and Lyra answers
+that lookup from the event store. `ModeTransition.to!(..., force: true)`
+switches anyway.
 
 ### A record just written is not found (ES-Async)
 
@@ -586,7 +613,7 @@ The full list of errors Lyra raises is in
 | Error | Cause | Fix |
 |---|---|---|
 | `Lyra::EventStoreUnavailableError` | An event could not be stored; the write rolled back (Hijack, event sourcing, and Monitor with `monitor_append_failure = :fail_write`). | [Above](#error-lyraeventstoreunavailableerror-or-log-line-lyra-failed-to-publish-event--run-binrails-lyrarepair) |
-| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate, or a switch into ES-NoProj found a default scope it cannot evaluate. | [Mode Switching Issues](#mode-switching-issues) |
+| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate, or a switch into ES-NoProj found a default scope it cannot evaluate or a database foreign key from an unmonitored table into a monitored one. | [Mode Switching Issues](#mode-switching-issues) |
 | `Lyra::Repair::Refused` | `lyra:repair` outside Monitor/Disabled. | Rebuild the tables instead: `bin/rails lyra:projections:rebuild`. |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. | [Above](#lyraprojectionsunsupportedquery-es-noproj) |
 | `Lyra::PurposeBoundReads::PurposeRequiredError` | A read with no purpose under `reads_without_purpose = :deny`. | [Above](#lyrapurposeboundreadspurposerequirederror-read-of--with-no-declared-purpose) |

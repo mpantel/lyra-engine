@@ -87,9 +87,8 @@ module PamDsl
     # Right to Access (GDPR Article 15)
     # Export all data about the subject
     #
-    # The event summaries, PII inventory, lineage and per-event activities
-    # are the keys it has always returned. Beside them, the copy of the data
-    # (PamDsl::SubjectAccess):
+    # The event summaries, PII inventory and lineage are the keys it has
+    # always returned. Beside them, the copy of the data (PamDsl::SubjectAccess):
     #
     # - records: each of the subject's records whole, every attribute, with
     #   its history (from/to per change). A field the policy declares
@@ -127,8 +126,7 @@ module PamDsl
         generated_at: generated_at,
         events: events.map { |e| event_summary(e) },
         pii_inventory: collect_pii_inventory(events),
-        data_lineage: trace_data_lineage(events),
-        processing_activities: collect_processing_activities(events)
+        data_lineage: trace_data_lineage(events)
       }
 
       access = SubjectAccess.new(subject: subject, policy_for: method(:policy_for),
@@ -677,19 +675,6 @@ module PamDsl
       end
 
       lineage
-    end
-
-    def collect_processing_activities(events)
-      events.map do |event|
-        metadata = event.respond_to?(:metadata) ? event.metadata : {}
-        {
-          timestamp: extract_timestamp(event),
-          activity: extract_operation(event),
-          model: extract_model_class(event),
-          purpose: infer_purpose(metadata[:source], [event]),
-          data_processed: PIIDetector.detect(extract_fields(event)).keys
-        }
-      end
     end
 
     def affected_streams(events)

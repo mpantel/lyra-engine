@@ -122,6 +122,20 @@ PamDsl.define_policy :my_policy do
 end
 ```
 
+**`allow_for` widens, it does not restrict.** A field may be used for a declared purpose when the field lists that purpose in `allow_for` *or* the purpose lists the field in `requires`/`optionally`; either side suffices (`Policy#allowed?` takes the union). So a field listed in `allow_for(:contact)` is allowed for `:contact` even if `:contact`'s own field lists do not name it, and a purpose that lists the field may use it even if the field's `allow_for` does not name that purpose. `allow_for` is not a whitelist that keeps other purposes out: to keep a field from a purpose, leave it out of both.
+
+```ruby
+field :phone, type: :phone do
+  allow_for :contact
+end
+purpose(:contact)   { basis :contract }                  # no field lists
+purpose(:shipping)  { basis :contract; requires :phone }  # not in allow_for
+
+policy.allowed?(:phone, :contact)   # => true (field side)
+policy.allowed?(:phone, :shipping)  # => true (purpose side)
+policy.allowed?(:phone, :marketing) # => false (neither side; or :marketing undeclared)
+```
+
 **Sensitivity Levels:**
 - `:public` - Publicly accessible
 - `:internal` - Internal use only
@@ -401,7 +415,7 @@ PamDsl.define_policy :my_policy do
 end
 ```
 
-The default retention is 7 years and the default deletion strategy `:soft_delete`. Conditions given with `self.when` are stored on the rule and evaluated by `RetentionRule#applies_to?(context)` (true when every condition holds, or there are none); `retention_for` returns the rule's duration without evaluating them.
+The default retention is 7 years and the default deletion strategy `:soft_delete`, which keeps the data: a rule that should remove it names `:anonymize` or `:hard_delete`. PAM only declares the rules; Lyra's retention executor carries them out for the models with a `for_model` rule (it does not execute `default`), and warns about a `:soft_delete` rule on a table with no `deleted_at` or `discarded_at` column, where it can never act. Conditions given with `self.when` are stored on the rule and evaluated by `RetentionRule#applies_to?(context)` (true when every condition holds, or there are none); `retention_for` returns the rule's duration without evaluating them.
 
 **Deletion Strategies:**
 - `:hard_delete` - Permanently delete data
@@ -1368,6 +1382,7 @@ report = compliance.data_export   # history: true, accesses: true, disclose_acto
 report[:records]             # each record whole: attributes (every field), withheld, review, history (from/to per change)
 report[:accesses]            # the access log's entries; nil when the store keeps none
 report[:processing_context]  # per purpose admitting the records' declared fields: basis, recipients, transfers, retention, sources
+                             # (the copy's purposes; the per-event processing_activities, guessed from keywords, is gone from 1.0.0)
 report[:notice]              # the policy's access_notice
 report[:gaps]                # [purpose or nil, item] for what the policy does not declare
 ```
@@ -1580,7 +1595,7 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `article_30_gaps` - `[purpose_name or nil, clause]` pairs for every Article 30(1) item not declared, an undetermined basis, and a missing Art. 9(2) basis or Art. 10 authorisation
 - `purpose_reads?(purpose, predicate)` - True when the purpose reads (lists, or is allowed) a field for which the `Field` predicate (`:special_category?`, `:criminal_data?`) holds
 - `get_field(name)` / `get_purpose(name)` - Look up a field or purpose; raise `InvalidFieldError` / `UndeclaredPurposeError`
-- `allowed?(field, purpose)` - Check if field is allowed for purpose
+- `allowed?(field, purpose)` - Check if field is allowed for purpose: true when the field's `allow_for` names the purpose or the purpose's `requires`/`optionally` names the field (the union; see [Defining Fields](#defining-fields))
 - `validate_access!(fields, purpose, subject:)` - Validate access for a data subject. Returns `true` when valid. In strict mode raises the first violation: `UndeclaredPurposeError`, `ConsentRequiredError`, `InvalidFieldError`, `PurposeFieldMismatchError`, `SpecialCategoryViolationError`, `CriminalDataViolationError`, `ObjectedProcessingError` or `RestrictedProcessingError` (Condition 6); in audit mode records every violation and returns `false`. Every call goes to the access recorder, if one is set
 - `access_violations(fields, purpose, subject:)` - Every violation for the access, as error objects, without raising or recording
 - `validate_fields!(fields, purpose, subject: nil)` - `validate_access!` without the consent step and Condition 6, for a use whose subjects are not known yet (a query before it runs). Enforced and recorded as `validate_access!` is; `subject:` only labels the record
@@ -1597,7 +1612,7 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 
 ### Field
 
-- `allow_for(*purposes)` - Allow field for purposes
+- `allow_for(*purposes)` - Allow field for purposes. Widens, does not restrict: the field is allowed for these purposes in addition to every purpose that lists it in `requires`/`optionally`
 - `transform(context, &block)` - Define transformation
 - `meta(key, value)` - Add custom metadata
 - `metadata` - Access field metadata hash
@@ -1605,7 +1620,7 @@ Lyra reaches PAM through its privacy provider interface, with PAM as the adapter
 - `restricted?` - Check if field is restricted
 - `special_category?` - True for an Article 9 type (`Field::SPECIAL_CATEGORY_TYPES`: `:health`, `:biometric`, `:genetic`, `:racial_ethnic_origin`, `:political_opinion`, `:religious_belief`, `:trade_union_membership`, `:sex_life_orientation`)
 - `criminal_data?` - True for an Article 10 type (`Field::CRIMINAL_DATA_TYPES`: `:criminal_offence`)
-- `allowed_for?(purpose)` - Check if allowed for specific purpose
+- `allowed_for?(purpose)` - Whether the field's own `allow_for` list admits the purpose (true when the list is empty); `Policy#allowed?` is the full check
 - `apply_transformation(context, value)` - Apply defined transformation
 
 ### Purpose

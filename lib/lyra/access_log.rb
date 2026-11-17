@@ -165,9 +165,13 @@ module Lyra
         Lyra::PurposeBoundReads.internal(INTERNAL) do
           ActiveRecord::Base.transaction do
             entries = delete_stream!(stream_for(key))
+            # Beside the claimed label, what the operating system says
+            # (Lyra::Attribution), as for an ErasureApplied.
+            who = { os_user: Lyra::Attribution.os_user, host: Lyra::Attribution.host, pid: Process.pid }
             erasure = Lyra::Events::AccessLogErased.new(
               data: { subject: key, entries: entries, reason: reason.to_s, erased_at: Time.current },
-              metadata: { source: "lyra_access_log", erased_by: erased_by&.to_s, correlation_id: Lyra::Correlation.current_id }.compact
+              metadata: { source: "lyra_access_log", erased_by: erased_by&.to_s, os_user: who[:os_user],
+                          host: who[:host], pid: who[:pid], correlation_id: Lyra::Correlation.current_id }.compact
             )
             Lyra.append_events(erasure, stream_name: ERASURES)
             entries

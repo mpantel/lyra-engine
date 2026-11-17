@@ -572,7 +572,26 @@ module PamDsl
       output = capture_output { generator.send(:print_summary, detected) }
 
       assert_includes output, "Detected PII fields: 3"
-      assert_includes output, "Models scanned: 2"
+      assert_includes output, "Models with PII fields: 2"
+    end
+
+    # The count is of the models with personal data; after a scan, the
+    # header and summary also say of how many scanned (both used to call
+    # the first "Models scanned").
+    def test_models_with_pii_are_counted_of_those_scanned
+      generator = PolicyGenerator.new(:test, output_path: tmp_output_path)
+      generator.instance_variable_set(:@models_scanned, 5)
+      detected = {
+        email: { type: :email, sensitivity: :confidential, models: ["User"] },
+        iban: { type: :financial, sensitivity: :restricted, models: ["Account"] }
+      }
+
+      content = generator.send(:generate_policy_from_fields, detected)
+      output = capture_output { generator.send(:print_summary, detected) }
+
+      assert_includes content, "# Models with PII fields: 2 (of 5 scanned)"
+      assert_includes output, "Models with PII fields: 2 (of 5 scanned)"
+      refute_includes content + output, "Models scanned:"
     end
 
     def test_print_summary_shows_sensitivity_breakdown

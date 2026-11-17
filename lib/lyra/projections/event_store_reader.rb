@@ -129,6 +129,7 @@ module Lyra
 
           # Filter to only known columns
           column_names = model_class.column_names
+          # (CachedProjection's entries hold them as the table does.)
           filtered_attrs = attrs.slice(*column_names)
 
           # Use AR's instantiate method - proper way to build from DB-style attributes
@@ -141,8 +142,11 @@ module Lyra
 
           record
         rescue => e
-          Rails.logger.warn("Lyra::EventStoreReader: Failed to build instance - #{e.message}")
-          nil
+          # Fail closed: a record that cannot be built from its events (a
+          # value its type cannot read) is an error, not a row left out of
+          # the answer, which it used to be.
+          Rails.logger.error("Lyra::EventStoreReader: cannot build #{model_class.name} from its events - #{e.class}: #{e.message}")
+          raise
         end
       end
     end

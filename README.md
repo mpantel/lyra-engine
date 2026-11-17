@@ -40,7 +40,9 @@ seven configurations:
   `touch` and the `dependent: :nullify` updates).
 - Each record has its own stream, named `"Model$id"` (for example `"Order$42"`).
 - **ES-NoProj** writes no rows; it answers a query exactly from the events or
-  raises `Lyra::Projections::UnsupportedQuery`.
+  raises `Lyra::Projections::UnsupportedQuery`. Since it writes no rows to
+  monitored tables, the switch into it is refused while an unmonitored table
+  has a database foreign key into a monitored one.
 - **Switching modes after boot is gated**: `Lyra::ModeTransition.to!` (and
   `config.enable_hijack!`, `enable_monitor!`, `enable_event_sourcing!`) checks
   that rows and events agree before a switch that changes the authoritative
@@ -54,14 +56,14 @@ seven configurations:
 - PostgreSQL. Lyra depends on the `pg` gem; the advisory locks behind Genesis
   and ES-Lazy, and id reservation in Hijack mode, need PostgreSQL.
 
-The gems are on RubyGems, all three at 0.9.3 (4 November 2026, a security update):
+The gems are on RubyGems, all three at 1.0.0 (17 November 2026):
 `orfeas_lyra`, `orfeas_pam_dsl` and `orfeas_petri_flow`. Their names differ from the files to require:
 
 ```ruby
 # Gemfile
-gem "orfeas_lyra", "~> 0.9", require: "lyra"
-gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional, privacy features
-gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional, verification
+gem "orfeas_lyra", "~> 1.0", require: "lyra"
+gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional, privacy features
+gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional, verification
 ```
 
 Create the event store tables with the RailsEventStore 3 generator

@@ -143,9 +143,9 @@ file to require:
 
 ```ruby
 # Gemfile
-gem "orfeas_lyra", "~> 0.9", require: "lyra"
-gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional
-gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional
+gem "orfeas_lyra", "~> 1.0", require: "lyra"
+gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional
+gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional
 ```
 
 **2. Create the event store tables** with the RailsEventStore 3 generator:
@@ -527,18 +527,22 @@ rows and the events agree, for every monitored record.
   request, each background job and each `save`, `update` or `destroy` of a
   monitored model (which covers consoles and scripts), and never inside an
   open transaction, so a mode cannot change half-way through a write.
-  Since 1.0.0 it adopts an escalation only if the row says so: it names the
-  certificate of the clean check that cleared it (`certificate_id`: a certificate
-  for the same `from -> to`, recorded before the row and named by no earlier
-  switch), or the operator overrode the gate (`force: true` or
-  `LYRA_FORCE_MODE_TRANSITION`), which the row records in `forced`. Whether a
-  switch is an escalation is judged from the row's `from` and from where the
-  previous switch left the application, so a row cannot claim a `from` that
-  avoids the gate. A row nobody gated, one `INSERT` into `lyra_mode_transitions`,
-  is not adopted: the process stays in its mode and logs why. Leaving a mode
-  needs no certificate, and with the gate off every switch is adopted. A row a
-  0.9.x process wrote names no certificate, so an escalation it records is not
-  adopted. An error while deciding leaves the row to be tried again.
+  Since 1.0.0 it adopts a switch the gate checks (see
+  [Which switches are checked](#which-switches-are-checked): an escalation, or
+  leaving ES-NoProj, ES-Lazy or ES-Async for a mode that reads the tables) only
+  if the row says so: it names the certificate of the clean check that cleared
+  it (`certificate_id`: a certificate for the same `from -> to`, recorded before
+  the row and named by no earlier switch), or the operator overrode the gate
+  (`force: true` or `LYRA_FORCE_MODE_TRANSITION`), which the row records in
+  `forced`. Whether the gate checks a switch is judged from the row's `from` and
+  from where the previous switch left the application, so a row cannot claim a
+  `from` that avoids the gate. A row nobody gated, one `INSERT` into
+  `lyra_mode_transitions`, is not adopted: the process stays in its mode and logs
+  why. A switch the gate does not check (Monitor to Disabled, ES-Sync to
+  ES-NoProj) needs no certificate, and with the gate off every switch is
+  adopted. A row a 0.9.x process wrote names no certificate, so a checked switch
+  it records is not adopted. An error while deciding leaves the row to be tried
+  again.
   This guards against mistakes and naive writes, not against anyone who can
   write the table: such a writer can write the certificate as well. (0.9.3 and
   earlier adopted any row.)
@@ -738,6 +742,12 @@ when you accept that the stores may disagree.
   `lyra:repair`. If losing events is unacceptable, move on to Hijack.
 - **ES-NoProj raises `UnsupportedQuery`** on SQL fragments, merged relations
   and joins it cannot evaluate exactly. Use ES-Lazy for that code.
+- **Database foreign keys into monitored tables in ES-NoProj.** ES-NoProj
+  writes no rows to the tables of monitored models, so a foreign key from an
+  unmonitored table into one of them makes every write there fail; the switch
+  into ES-NoProj is refused while one exists. Monitor the referencing model
+  too, or drop the constraint and keep the reference in the model
+  (`belongs_to`).
 - **ES-Async read-after-write.** A redirect to a record just created can find
   nothing. Use ES-Sync or ES-Lazy for flows that read their own writes.
 - **ES-Lazy and long transactions.** Event ids are assigned before commit, so

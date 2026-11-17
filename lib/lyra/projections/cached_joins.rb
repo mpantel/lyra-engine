@@ -146,7 +146,9 @@ module Lyra
         own = {}
         joined = {}
         conditions.each do |key, value|
-          if value.is_a?(Hash)
+          # A Hash on a column of the model is a value (a serialized
+          # attribute's), as Active Record reads it (table.has_column?).
+          if value.is_a?(Hash) && !model_class.column_names.include?(TypedValues.attribute_name(model_class, key))
             joined[joined_name_for(key)] = value
           else
             own[key] = value
@@ -168,22 +170,29 @@ module Lyra
       # Whether a row's partners match the joined conditions, as SQL would
       # decide it: true, false, or nil (unknown, a missing partner under a
       # condition that is not IS NULL).
+      # +joined_conditions+ is what compile_joined made of the conditions on
+      # joined tables.
       def joined_match(joins, joined_conditions)
-        joined_conditions.reduce(true) do |result, (name, conditions)|
+        joined_conditions.reduce(true) do |result, (name, tests, null_partner)|
           partner = joins[name]
+          outcome = partner.nil? ? null_partner : matches_all?(partner, tests)
+          combine_and(result, outcome)
+        end
+      end
+
+      # The conditions on joined tables, compiled once per query: for each
+      # association, its tests on the partner, and the outcome for a missing
+      # partner (true when every condition is IS NULL, else unknown).
+      def compile_joined(joined_conditions)
+        joined_conditions.map do |name, conditions|
           klass = joined_associations[name].reflection.klass
           rewritten = AssociationConditions.rewrite(klass, conditions)
           if rewritten.values.any? { _1.is_a?(Hash) }
             raise UnsupportedQuery.new(model_class, "conditions nested more than one level on #{name}")
           end
 
-          outcome =
-            if partner.nil?
-              rewritten.values.all? { |v| v.nil? || (v.is_a?(Array) && v.include?(nil)) } ? true : nil
-            else
-              rewritten.all? { |column, v| matches_value?(partner, column, v) }
-            end
-          combine_and(result, outcome)
+          null_partner = rewritten.values.all? { |v| v.nil? || (v.is_a?(Array) && v.include?(nil)) } ? true : nil
+          [name, condition_tests(klass, rewritten), null_partner]
         end
       end
 

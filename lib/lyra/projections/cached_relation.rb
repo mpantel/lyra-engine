@@ -605,9 +605,8 @@ module Lyra
       end
 
       def find_by(attributes)
-        @records.find do |record|
-          attributes.all? { |key, value| matches_value?(record, key, value) }
-        end
+        tests = condition_tests(model_class, attributes)
+        @records.find { |record| true.equal?(matches_all?(record, tests)) }
       end
 
       def find_by!(attributes)
@@ -668,8 +667,10 @@ module Lyra
 
         own, joined = split_joined_conditions(conditions)
         own = AssociationConditions.rewrite(model_class, own)
+        tests = condition_tests(model_class, own)
+        joined = compile_joined(joined)
         relation = filter_rows do |record, joins|
-          own.all? { |key, value| matches_value?(record, key, value) } && joined_match(joins, joined) == true
+          true.equal?(matches_all?(record, tests)) && (joined.empty? || true.equal?(joined_match(joins, joined)))
         end
         scalars = own.select { |key, value| model_class.column_names.include?(key.to_s) && !value.is_a?(Array) && !value.is_a?(Range) && !value.is_a?(Hash) }
         relation.create_attributes = create_attributes.merge(scalars.transform_keys(&:to_s)) if scalars.any?
@@ -711,16 +712,18 @@ module Lyra
       # A predicate on one record. NULL on either side is unknown, so false.
       def fragment_test(column, op, value)
         if op.end_with?("like")
+          TypedValues.fragment_value(model_class, column, nil) # refuses a pattern on a ciphertext
           regexp = like_regexp(value.to_s, case_insensitive: op == "ilike")
           return ->(record) { (v = record.read_attribute(column)) && regexp.match?(v.to_s) }
         end
 
-        bound = model_class.type_for_attribute(column).cast(value)
+        bound = TypedValues.fragment_value(model_class, column, value)
+        read = TypedValues.comparable_reader(model_class, column)
         lambda do |record|
-          v = record.read_attribute(column)
+          v = read.call(record)
           next false if v.nil? || bound.nil?
 
-          cmp = v <=> bound
+          cmp = TypedValues.compare(v, bound)
           next false if cmp.nil?
 
           case op
@@ -753,9 +756,10 @@ module Lyra
         check_hash_conditions!(conditions, "where.not(#{conditions.inspect[0, 60]})")
         own, joined = split_joined_conditions(conditions)
         own = AssociationConditions.rewrite(model_class, own)
+        tests = condition_tests(model_class, own)
+        joined = compile_joined(joined)
         filter_rows do |record, joins|
-          own_match = own.all? { |key, value| matches_value?(record, key, value) }
-          combine_and(own_match, joined_match(joins, joined)) == false
+          false.equal?(combine_and(matches_all?(record, tests), joined.empty? ? true : joined_match(joins, joined)))
         end
       end
 
@@ -780,11 +784,7 @@ module Lyra
       end
 
       def sorted_by(keys)
-        sorted = @records.sort do |a, b|
-          compare_for_order(a, b, keys)
-        end
-
-        relation = spawn_records(sorted)
+        relation = spawn_records(sort_records(@records, keys))
         relation.ordering = keys
         relation
       end
@@ -1383,7 +1383,7 @@ module Lyra
         # In-place order modification
         return self if args.empty?
         keys = ordering + order_keys(args)
-        @records = @records.sort { |a, b| compare_for_order(a, b, keys) }
+        @records = sort_records(@records, keys)
         @ordering = keys
         self
       end
@@ -2011,94 +2011,56 @@ module Lyra
         @records.size
       end
 
-      def matches_value?(record, key, value)
-        # A tuple condition, where([:a, :b] => [[1, 2], ...]), as ActiveRecord
-        # builds for a record's query constraints (an association's
-        # delete(record)): the record matches one of the tuples.
-        if key.is_a?(Array)
-          return Array(value).any? do |tuple|
-            tuple = Array(tuple)
-            tuple.size == key.size && key.zip(tuple).all? { |column, v| matches_value?(record, column, v) }
+      # The conditions of a hash on +klass+'s records, compiled once: each
+      # value bound as Active Record binds it (Lyra::Projections::TypedValues).
+      def condition_tests(klass, conditions)
+        conditions.map { |key, value| TypedValues.condition(klass, key, value) }
+      end
+
+      # Whether +record+ satisfies every one of +tests+ (condition_tests), as
+      # SQL decides it on the table: true, false or nil (unknown, a NULL
+      # compared).
+      def matches_all?(record, tests)
+        TypedValues.all_hold(tests, TypedValues::RecordReader, record)
+      rescue ActiveModel::MissingAttributeError => e
+        # A record narrowed by select lacks the column a condition reads.
+        raise UnsupportedQuery.new(model_class, "a condition on a column not selected (#{e.message[0, 80]})")
+      end
+
+      # +records+ in the order +keys+ ({ column => :asc/:desc }, or a
+      # column) gives, ties in the order they had. Each record's sort values
+      # are read once, not on every comparison.
+      def sort_records(records, keys)
+        plan = keys.flat_map do |key|
+          pairs = key.is_a?(Hash) ? key.to_a : [[key, :asc]]
+          pairs.map { |column, direction| [TypedValues.sort_reader(model_class, column), direction.to_s.downcase == "desc"] }
+        end
+        return records.dup if plan.empty?
+
+        readers = plan.map(&:first)
+        descending = plan.map(&:last)
+        decorated = records.each_with_index.map { |record, index| [readers.map { _1.call(record) }, index, record] }
+        decorated.sort! do |(a, index_a, _), (b, index_b, _)|
+          result = index_a <=> index_b
+          a.each_index do |i|
+            compared = compare_values(a[i], b[i])
+            next if compared.zero?
+
+            result = descending[i] ? -compared : compared
+            break
           end
+          result
         end
-
-        record_value = record.send(key)
-        # A record, or a relation of records, stands for its primary key, as in
-        # ActiveRecord: where(variant_id: [variant]) matched nothing, and
-        # Solidus's stock check found no stock under ES-NoProj.
-        value = value.to_a if value.is_a?(CachedRelation) || value.is_a?(ActiveRecord::Relation)
-        value = value.id if value.is_a?(ActiveRecord::Base)
-        value = value.map { |v| v.is_a?(ActiveRecord::Base) ? v.id : v } if value.is_a?(Array)
-
-        case value
-        when Array
-          # Handle type coercion for arrays (e.g., array of string IDs vs integer column)
-          value.any? { |v| values_match?(record_value, v) }
-        when Range
-          value.cover?(record_value)
-        when nil
-          record_value.nil?
-        when Regexp
-          record_value.to_s.match?(value)
-        else
-          values_match?(record_value, value)
-        end
-      rescue NoMethodError
-        # ActiveRecord would reject a condition on an unknown column; treating
-        # it as "no match" (as this used to) silently empties the answer.
-        raise UnsupportedQuery.new(model_class, "a condition on unknown attribute #{key}")
+        decorated.map(&:last)
       end
 
-      # Compare values with type coercion for common AR patterns
-      def values_match?(record_value, query_value)
-        return true if record_value == query_value
-
-        # Handle string/integer coercion (common with params)
-        if record_value.is_a?(Integer) && query_value.is_a?(String)
-          record_value == query_value.to_i
-        elsif record_value.is_a?(String) && query_value.is_a?(Integer)
-          record_value.to_i == query_value
-        # Handle boolean string coercion
-        elsif record_value.in?([true, false]) && query_value.is_a?(String)
-          record_value == ActiveModel::Type::Boolean.new.cast(query_value)
-        else
-          false
-        end
-      end
-
-      def compare_for_order(a, b, order_args)
-        order_args.each do |arg|
-          result = compare_single_order(a, b, arg)
-          return result unless result == 0
-        end
-        0
-      end
-
-      def compare_single_order(a, b, arg)
-        case arg
-        when Symbol
-          compare_values(a.send(arg), b.send(arg))
-        when Hash
-          arg.each do |column, direction|
-            val_a = a.send(column)
-            val_b = b.send(column)
-            result = compare_values(val_a, val_b)
-            result = -result if direction.to_s.downcase == "desc"
-            return result unless result == 0
-          end
-          0
-        else
-          0
-        end
-      rescue NoMethodError
-        0
-      end
-
+      # NULLs last ascending (first descending), as PostgreSQL orders them;
+      # booleans false before true.
       def compare_values(a, b)
         return 0 if a.nil? && b.nil?
         return 1 if a.nil?
         return -1 if b.nil?
-        a <=> b || 0
+        TypedValues.compare(a, b) || 0
       end
 
       # =========================================================================

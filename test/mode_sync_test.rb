@@ -234,11 +234,29 @@ class ModeSyncTest < Minitest::Test
     assert_equal "hijack", Sync.maybe_sync!
   end
 
-  def test_leaving_a_mode_needs_no_certificate
+  # A switch the gate does not check needs no certificate: leaving a mode that
+  # reads the tables (Hijack) for Monitor.
+  def test_leaving_a_mode_that_reads_the_tables_for_monitor_needs_no_certificate
     Lyra.config.mode = :hijack
     Lyra.config.hijack_enabled = true
     MT.send(:record_applied, "monitor", from: "hijack")
 
+    assert_equal "monitor", Sync.maybe_sync!
+  end
+
+  # The rule covers every switch the gate checks, not only escalations: leaving
+  # a lagging mode (ES-Async) for one that reads the tables needs the certificate.
+  def test_leaving_a_lagging_mode_for_one_that_reads_the_tables_needs_a_certificate
+    Lyra.config.mode = :event_sourcing
+    Lyra.config.projection_mode = :async
+    Sync.seen!(MT.send(:record_applied, "event_sourcing/async", from: "monitor", forced: true))
+    MT.send(:record_applied, "monitor", from: "event_sourcing/async")
+
+    assert_nil Sync.maybe_sync!, "a bare row is not adopted"
+    assert_equal :event_sourcing, Lyra.config.mode
+
+    id = certify("event_sourcing/async", "monitor")
+    MT.send(:record_applied, "monitor", from: "event_sourcing/async", certificate_id: id)
     assert_equal "monitor", Sync.maybe_sync!
   end
 

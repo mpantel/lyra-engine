@@ -274,11 +274,13 @@ module PamDsl
       return detected unless defined?(ActiveRecord::Base)
 
       Rails.application.eager_load! if defined?(Rails) && Rails.application
+      @models_scanned = 0
       ActiveRecord::Base.descendants.each do |model|
         next if model.abstract_class?
         next if model.name.nil? || model.name.start_with?("ActiveRecord::")
         next unless model.table_exists?
 
+        @models_scanned += 1
         scan_model(model).each do |column, config|
           entry = detected[column.to_sym] ||= config.slice(:type, :sensitivity).merge(models: [], ignored_in: [])
           entry[:models] |= [model.name]
@@ -317,7 +319,7 @@ module PamDsl
         # Generated: #{Time.current.strftime('%Y-%m-%d %H:%M:%S')}
         #
         # Detected PII fields: #{detected_fields.keys.count}
-        # Models scanned: #{detected_fields.values.flat_map { |v| v[:models] }.uniq.count}
+        # #{models_count_line(detected_fields)}
 
         PamDsl.define_policy :#{@name} do
           # ─────────────────────────────────────────────────────────────────────────
@@ -490,6 +492,14 @@ module PamDsl
       lines.join("\n")
     end
 
+    # The models in which personal data was found, and, after a scan, of how
+    # many scanned (models with a table, not abstract).
+    def models_count_line(detected_fields)
+      with_pii = detected_fields.values.flat_map { |v| v[:models] }.uniq.count
+      scanned = @models_scanned ? " (of #{@models_scanned} scanned)" : ""
+      "Models with PII fields: #{with_pii}#{scanned}"
+    end
+
     def write_file(content)
       FileUtils.mkdir_p(File.dirname(@output_path))
       File.write(@output_path, content)
@@ -504,7 +514,7 @@ module PamDsl
 
       if detected_fields
         puts "\nDetected PII fields: #{detected_fields.keys.count}"
-        puts "Models scanned: #{detected_fields.values.flat_map { |v| v[:models] }.uniq.count}"
+        puts models_count_line(detected_fields)
 
         puts "\nFields by sensitivity:"
         detected_fields.group_by { |_, v| v[:sensitivity] }.each do |sens, fields|

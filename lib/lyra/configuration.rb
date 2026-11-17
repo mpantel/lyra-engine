@@ -90,13 +90,22 @@ module Lyra
     # together either way; this decides only what a failed append does.
     MONITOR_APPEND_FAILURES = %i[log fail_write].freeze
     attr_reader :monitor_append_failure
-    # Take a lock on the aggregate before appending its event, in Hijack and
-    # ES-Sync (assumption L of Theorem 5; Lyra::Interceptors::CrudInterceptor
-    # #lyra_lock_aggregate!). On (default): two writers of one record append and
-    # write its row in the same order, at the price of one lock statement per
-    # update or destroy, which also makes the append nest in a savepoint. Off:
-    # the order Hijack and ES-Sync had before, with a divergence between row and
-    # log possible under same-record races, which DualView detects.
+    # Take a lock on the aggregate before appending its event, in Hijack,
+    # ES-Sync and ES-Async (assumption L of Theorem 5;
+    # Lyra::Interceptors::CrudInterceptor#lyra_lock_aggregate!). On (default):
+    # in Hijack and ES-Sync the record's row lock, so two writers of one record
+    # append and write its row in the same order; in ES-Async, whose writers do
+    # not write the row, an advisory lock on the stream, so a record's events
+    # commit in the order they were appended and the projection job applies
+    # only those after its checkpoint (AsyncProjectionJob). An update or a
+    # destroy also checks, under the lock, that the stream does not end in a
+    # Destroyed event, taking the advisory lock for that in ES-NoProj and
+    # ES-Lazy too (#lyra_lock_aggregate_unless_destroyed!). The price is one
+    # lock statement per update or destroy, which also makes the append nest
+    # in a savepoint. Off: the order these modes had before, with a divergence
+    # between row and log possible under same-record races in Hijack and
+    # ES-Sync (DualView detects it), no destroyed check, and ES-Async's job
+    # replaying the whole stream every time.
     attr_accessor :lock_aggregate_before_append
     # Apply the privacy policy's retention rules (Lyra::Retention). Off by
     # default: deleting data on a timer is the deployment's decision.

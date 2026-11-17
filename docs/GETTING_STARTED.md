@@ -24,9 +24,9 @@ file to require. From RubyGems:
 
 ```ruby
 # Gemfile
-gem "orfeas_lyra", "~> 0.9", require: "lyra"
-gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional, privacy
-gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional, verification
+gem "orfeas_lyra", "~> 1.0", require: "lyra"
+gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional, privacy
+gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional, verification
 ```
 
 or the engine straight from GitHub, for changes made since the release:
@@ -35,9 +35,9 @@ or the engine straight from GitHub, for changes made since the release:
 gem "orfeas_lyra", git: "https://github.com/mpantel/lyra-engine", branch: "main", require: "lyra"
 ```
 
-The latest release on rubygems.org is 0.9.3 (4 November 2026, a security update, for all three
+The latest release on rubygems.org is 1.0.0 (17 November 2026, for all three
 gems; see the CHANGELOG). Each release from 0.8.0 on is built from the tag of its version
-(`v0.9.3` for 0.9.3) of
+(`v1.0.0` for 1.0.0) of
 https://github.com/mpantel/lyra-engine. The earlier 0.6.0 releases (January
 2026) predate this guide (no RailsEventStore 3, Genesis or repair).
 

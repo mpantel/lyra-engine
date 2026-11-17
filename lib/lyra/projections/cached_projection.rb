@@ -45,7 +45,9 @@ module Lyra
     #
     class CachedProjection
       # 2: entries are { "v" => last event id, "a" => attributes or nil }.
-      CACHE_VERSION = 2
+      # 3: the attributes as the table holds them (an enum's value, not its
+      #    label; a serialized attribute's text), not as the events give them.
+      CACHE_VERSION = 3
       DEFAULT_EXPIRES_IN = 1.hour
       MEMORY_CACHE_BYTES = 32.megabytes
 
@@ -91,14 +93,16 @@ module Lyra
             rest = attributes.reject { |key, _| key.to_s == primary_key }
             return record if rest.empty?
 
-            return matches_attributes?(record, rest) ? record : nil
+            return matches_attributes?(TypedValues::EventReader.new(model_class), record, conditions_for(model_class, rest)) ? record : nil
           end
 
           # Without a primary key there is no way to know which stream holds
           # the answer, so every record of the model is considered. That cost
           # is inherent to querying by a non-key attribute with projections
           # disabled; the entries keep it to one bulk read once warm.
-          all(model_class).find { |record| matches_attributes?(record, attributes) }
+          tests = conditions_for(model_class, attributes)
+          reader = TypedValues::EventReader.new(model_class)
+          all(model_class).find { |record| matches_attributes?(reader, record, tests) }
         end
 
         # Every live record of the model, in primary-key order
@@ -132,7 +136,9 @@ module Lyra
         # @return [Array<Hash>] Matching record attributes
         def where(model_class, conditions)
           candidates = ReferenceLinks.lookup(model_class, conditions) || all(model_class)
-          candidates.select { |record| matches_conditions?(record, conditions) }
+          tests = conditions_for(model_class, conditions)
+          reader = TypedValues::EventReader.new(model_class)
+          candidates.select { |record| matches_attributes?(reader, record, tests) }
         end
 
         # Count records
@@ -184,6 +190,14 @@ module Lyra
           find(model_class, id)
         end
 
+        # For a reader that keeps its own copy of a model's records, kept
+        # current by the same stamps (Uniqueness::Snapshot): every stream's
+        # last event, the entries at given versions, and whether a record's
+        # attributes belong to +model_class+ (STI).
+        def stream_versions_for(model_class) = stream_versions(model_class)
+        def entries_for(model_class, versions) = entries_at(model_class, versions)
+        def of_class?(model_class, attributes) = !of_class(model_class, attributes).nil?
+
         private
 
         def fresh?(entry, version)
@@ -218,12 +232,20 @@ module Lyra
         # The state reached by replaying the events after +entry+'s stamp onto
         # its attributes, as [attributes or nil, version]; nil when that cannot
         # be done exactly (no usable entry, a stamp that is no longer in the
-        # stream, nothing after it), and the caller replays the whole stream.
+        # stream, nothing after it, an erasure after it), and the caller
+        # replays the whole stream.
+        #
+        # An erasure rewrites the stream's events in place (Lyra::Erasure)
+        # and appends an ErasureApplied: the events before it no longer hold
+        # what the entry was built from. Replaying only the events after the
+        # stamp kept the erased values, in a process other than the eraser's
+        # (whose own entries the erasure drops).
         def build_from_entry(model_class, id, stream, entry)
           return nil unless entry.is_a?(Hash) && entry["v"] && entry["a"].is_a?(Hash)
 
           events = load_events_after(stream, entry["v"])
           return nil if events.nil? || events.empty?
+          return nil if events.any? { rewrites_stream?(_1) }
 
           version = events.last.event_id
           replayed = events.select { Lyra::Event.operation_of(_1) }
@@ -231,6 +253,10 @@ module Lyra
           return [nil, version] if Lyra::Event.operation_of(replayed.last) == :destroyed
 
           [reconstruct_state(model_class, id, replayed, entry["a"]), version]
+        end
+
+        def rewrites_stream?(event)
+          defined?(Lyra::Events::ErasureApplied) && event.is_a?(Lyra::Events::ErasureApplied)
         end
 
         # The id of the last event in a record's stream, or nil if it has none.
@@ -247,23 +273,33 @@ module Lyra
         # id }): one bulk cache read, and a replay of only the streams whose
         # entry is missing or out of date.
         def records_at(model_class, versions)
-          return [] if versions.empty?
+          entries_at(model_class, versions).filter_map { |_, (_, attributes)| attributes }
+                                           .select { |attributes| of_class(model_class, attributes) }
+        end
+
+        # { id => [the id of the last event the attributes were built from,
+        # attributes or nil (destroyed)] } for the streams whose last events
+        # are +versions+, in their order, whatever their class: one bulk
+        # cache read, and a replay of the streams whose entry is missing or
+        # out of date.
+        def entries_at(model_class, versions)
+          return {} if versions.empty?
 
           keys = versions.keys.to_h { |id| [record_cache_key(model_class, id), id] }
           cached = cache_read_multi(keys.keys)
           rebuilt = {}
 
-          records = keys.filter_map do |key, id|
+          entries = keys.to_h do |key, id|
             entry = cached[key]
-            next entry["a"] if fresh?(entry, versions[id])
+            next [id, [versions[id], entry["a"]]] if fresh?(entry, versions[id])
 
             attributes, built_version = build_record(model_class, id, entry)
             rebuilt[key] = entry_for(attributes, built_version) if built_version
-            attributes
+            [id, [built_version, attributes]]
           end
 
           cache_write_multi(rebuilt) if rebuilt.any?
-          records.select { |attributes| of_class(model_class, attributes) }
+          entries
         end
 
         # +attributes+ if the record belongs to +model_class+, nil otherwise.
@@ -311,26 +347,21 @@ module Lyra
           end
         end
 
-        # Shared by find_by and where so both decide a match the same way.
-        def matches_attributes?(record, attributes)
-          attributes.all? do |key, value|
-            record[key.to_s] == value || record[key.to_sym] == value
-          end
+        # Shared by find_by and where so both decide a match the same way, and
+        # as a CachedRelation of the built records decides it: each value
+        # read as the record built from +record+ (the event attributes) holds
+        # it (+reader+, a TypedValues::EventReader), and compared with the
+        # condition's value bound as Active Record binds it (TypedValues).
+        # The event's "250.0" against find_by(amount: 250.0) was a String
+        # against a Float, and missed.
+        def matches_attributes?(reader, record, tests)
+          true.equal?(TypedValues.all_hold(tests, reader, record))
         end
 
-        def matches_conditions?(record, conditions)
-          conditions.all? do |key, value|
-            record_value = record[key.to_s] || record[key.to_sym]
-
-            case value
-            when Array
-              value.include?(record_value)
-            when Range
-              value.cover?(record_value)
-            else
-              record_value == value
-            end
-          end
+        # The conditions of a hash, compiled once for the records they are
+        # tested on (TypedValues.condition).
+        def conditions_for(model_class, conditions)
+          conditions.map { |key, value| TypedValues.condition(model_class, key, value) }
         end
 
         # Reconstruct record state from events
@@ -339,17 +370,21 @@ module Lyra
         def reconstruct_state(model_class, id, events, base = nil)
           key = Lyra.key_column(model_class)
           attributes = base ? base.dup : { key => id }
+          # The attributes the events set (all of them, from a create).
+          set = base ? Set.new : nil
 
           events.each do |event|
             case Lyra::Event.operation_of(event)
             when :created, :imported
-              event_attrs = Lyra::Event.created_attributes(event.data)
-              attributes.merge!(stringify_keys(event_attrs))
+              event_attrs = stringify_keys(Lyra::Event.created_attributes(event.data))
+              attributes.merge!(event_attrs)
+              set&.merge(event_attrs.keys)
             when :updated
               changes = event.data[:changes] || event.data["changes"] || {}
               changes.each do |field, change|
                 new_value = change.is_a?(Array) ? change.last : change
                 attributes[field.to_s] = new_value
+                set&.add(field.to_s)
               end
             end
           end
@@ -357,6 +392,10 @@ module Lyra
           # The key as the row holds it (an integer key from the stream name's
           # text), under the primary key column
           attributes[key] = Lyra.key_value(model_class, id)
+          # Entries hold the attributes as the table does (an enum's value,
+          # a serialized attribute's text), converted once here rather than
+          # on every read (TypedValues.convert_event_values!).
+          TypedValues.convert_event_values!(model_class, attributes, set)
           attributes
         end
 

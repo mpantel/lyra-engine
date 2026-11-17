@@ -52,6 +52,11 @@ module Lyra
 
       def destroy
         lyra_genesis_first_use
+        # Active Record deletes no row of a record that is not persisted (a new
+        # one, or a copy already destroyed) but still runs after_destroy:
+        # nothing is recorded for it (CrudInterceptor#lyra_intercept_destroy).
+        # Otherwise _delete_row counts the rows its DELETE reached.
+        @lyra_rows_deleted = persisted? ? nil : 0 if respond_to?(:lyra_events_enabled?, true)
         return super unless lyra_takes_over_write_here? && persisted?
         return false unless lyra_hijack_mode? ? lyra_hijack_destroy : lyra_prepare_event_source_destroy
 
@@ -149,7 +154,12 @@ module Lyra
           # Return 1 to indicate one row was "deleted"
           1
         else
-          super
+          # How many rows the DELETE reached: after_destroy runs even when it
+          # reached none (a stale copy, whose row another copy, a delete_all or
+          # hand-written SQL deleted first; without optimistic locking nothing
+          # checks), and Monitor must not record a second destroy
+          # (lyra_intercept_destroy).
+          @lyra_rows_deleted = super
         end
       end
 
@@ -359,8 +369,13 @@ module Lyra
 
         # Override all to use cached projections in disabled mode
         # Note: Rails 8 passes arguments to all() in internal call chains (e.g., reload)
+        # A named scope called in a uniqueness validation's conditions:
+        # (-> { live }) runs under the check's relation, an Active Record one
+        # whose exists? reads the events (Lyra::Projections::Uniqueness): all
+        # returns it, as Active Record's all returns the current scope, so
+        # that the scope builds on it.
         def all(*args, **kwargs, &block)
-          if lyra_read_from_events?
+          if lyra_read_from_events? && !Lyra::Projections::Uniqueness.scoped?(self)
             Lyra::Projections::CachedRelation.scoped_for(self) || lyra_all_from_events(all_queries: kwargs[:all_queries])
           else
             super
@@ -525,7 +540,16 @@ module Lyra
       end
 
       def lyra_intercept_destroy
-        return if @lyra_hijacked
+        # A destroy that deleted no row records nothing, though Active Record
+        # still runs after_destroy: one whose DELETE reached no row (a stale
+        # copy destroyed after another copy, delete_all or hand-written SQL
+        # deleted the row) and one of a record that was not persisted (a new
+        # one, or a copy destroyed twice), which runs no DELETE (WriteHooks#
+        # destroy sets 0). A second Destroyed makes the stream ill-formed. nil
+        # means no count was taken: a soft delete (paranoia) runs the destroy
+        # callbacks without Active Record's destroy, and is recorded as before.
+        rows, @lyra_rows_deleted = @lyra_rows_deleted, nil
+        return if @lyra_hijacked || rows == 0
 
         event_data = build_event_data(:destroyed)
         publish_event(:destroyed, event_data)

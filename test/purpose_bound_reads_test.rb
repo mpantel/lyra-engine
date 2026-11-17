@@ -105,6 +105,23 @@ class PurposeBoundReadsTest < Minitest::Test
     assert_raises(ArgumentError) { Lyra.config.reads_without_purpose = :sometimes }
   end
 
+  # A destroy is a write: the only access it records is the application's own
+  # load of the record, in every mode. Whatever Lyra reads to record the
+  # destroy is Lyra's own read.
+  def test_a_destroy_under_a_purpose_records_only_the_application_s_load
+    Lyra.config.record_access_events = true
+    %i[enable_monitor! enable_hijack! enable_event_sourcing!].each do |mode|
+      Lyra.config.public_send(mode)
+      user = ReadUser.create!(name: "Bo #{mode}", email: "bo-#{mode.to_s.delete('!')}@example.com")
+      before = access_events
+
+      Lyra.with_purpose(:directory) { ReadUser.find(user.id).destroy }
+
+      assert_equal 1, access_events - before, "#{mode}: the find, and nothing else"
+      assert_equal %w[granted], Lyra::AccessLog.for(user).map { _1.data[:outcome] }, mode.to_s
+    end
+  end
+
   # 0.18 (fixed in 1.0.0): the rows insert_all and upsert_all wrote were
   # reloaded as the application's read, so under a purpose that does not
   # allow every declared field the reload was refused and the rows were
@@ -227,6 +244,10 @@ class PurposeBoundReadsTest < Minitest::Test
   end
 
   private
+
+  def access_events
+    ActiveRecord::Base.connection.select_value("SELECT count(*) FROM event_store_events WHERE event_type LIKE '%DataAccess%'").to_i
+  end
 
   def clean
     conn = ActiveRecord::Base.connection

@@ -15,7 +15,10 @@ module Lyra
   #   catches up on read; ES-NoProj needs a Rebuild (rebuild: true).
   # Every other switch (Monitor to Disabled, ES-Sync to ES-NoProj, ...) keeps
   # the authoritative store as it is and passes freely. Entering ES-NoProj
-  # also links the events' foreign keys (Lyra::Projections::ReferenceLinks).
+  # also links the events' foreign keys (Lyra::Projections::ReferenceLinks),
+  # and is refused for a default scope ES-NoProj cannot evaluate and for a
+  # database foreign key from an unmonitored table into a monitored one
+  # (Lyra::Projections::ForeignKeys); force: true overrides both.
   #
   # A check compares every row with the state replayed from its stream, and
   # every stream with its row, in batches, reading the real table (never the
@@ -100,6 +103,7 @@ module Lyra
         to = label(mode, projection_mode)
         report = nil
         refuse_unevaluable_default_scopes!(from, to) unless force
+        refuse_foreign_keys_into_event_only_tables!(from, to) unless force
 
         if gate_enabled? && gate_required?(from, to) && !force
           report = certified_check(from, to) || check(to: to, from: from, rebuild: rebuild)
@@ -146,8 +150,9 @@ module Lyra
       # Why ModeSync must not adopt +row+ (latest_applied's hash), or nil when it may.
       #
       # With the gate off nothing is certified, and a switch is adopted as recorded.
-      # With it on, an escalation (Monitor to a mode whose tables or events are
-      # authoritative) must have passed the gate: the row names the certificate of
+      # With it on, a switch the gate checks (gate_required?: an escalation from
+      # Disabled or Monitor, or leaving a lagging mode for one that reads the
+      # tables) must have passed the gate: the row names the certificate of
       # the clean check that cleared it, one for the row's own from -> to, recorded
       # before the row and named by no earlier switch. The switcher checked the
       # certificate's age when it switched, so no clock is compared here. A row
@@ -256,6 +261,33 @@ module Lyra
                           "or set LYRA_FORCE_MODE_TRANSITION=1.", report)
       end
 
+      # At boot, in ES-NoProj set by configuration (config.projection_mode =
+      # :disabled in an initializer) rather than reached by a switch: what
+      # the switch into ES-NoProj would refuse, as one warning each, for the
+      # models enrolled by then (with eager loading, all of them): a database
+      # foreign key into an event-only table, and a default scope ES-NoProj
+      # cannot evaluate. Never stops the boot: config.mode = ... is the raw,
+      # ungated setter, and a model enrolled later is not seen here.
+      # Returns the warnings.
+      def check_es_noproj!(models: Lyra.config.monitored_models)
+        return [] unless Lyra.config.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
+
+        foreign_keys = Lyra::Projections::ForeignKeys
+        messages = foreign_keys.blocking(models).map do |fk|
+          "Lyra: in ES-NoProj every write to #{fk.from_table} that sets #{fk.column} will fail. " \
+            "#{foreign_keys.description([fk])} #{foreign_keys.remedy([fk])} " \
+            "The switch into ES-NoProj (Lyra::ModeTransition.to!) refuses this."
+        end
+        messages += Lyra::Projections::DefaultScopes.unevaluable(models).map do |model, reason|
+          "Lyra: in ES-NoProj every read of #{model.name} will be refused: ES-NoProj cannot evaluate its default " \
+            "scope from the event store (#{reason}). Write the default scope as hash conditions and column " \
+            "orderings, or use another projection mode."
+        end
+        logger = defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+        messages.each { |message| logger ? logger.warn(message) : Kernel.warn(message) }
+        messages
+      end
+
       def last_applied
         return nil unless table_ready?
 
@@ -299,6 +331,21 @@ module Lyra
                           "every read of #{refused.size == 1 ? 'that model' : 'those models'}. Write the default scope " \
                           "as hash conditions and column orderings, or use another projection mode. " \
                           "(#{refused.first.last})")
+      end
+
+      # ES-NoProj leaves the tables of monitored models empty, so a database
+      # foreign key into one from a table no monitored model writes refuses
+      # every write there that references a record
+      # (Lyra::Projections::ForeignKeys). The switch into ES-NoProj names
+      # each such constraint first. force: true switches anyway.
+      def refuse_foreign_keys_into_event_only_tables!(from, to)
+        return unless to == "event_sourcing/disabled" && from != to
+
+        blocking = Lyra::Projections::ForeignKeys.blocking(Lyra.config.monitored_models)
+        return if blocking.empty?
+
+        raise Refused.new("Lyra refuses #{from} -> #{to}: #{Lyra::Projections::ForeignKeys.description(blocking)} " +
+                          Lyra::Projections::ForeignKeys.remedy(blocking))
       end
 
       def apply(mode, projection_mode)

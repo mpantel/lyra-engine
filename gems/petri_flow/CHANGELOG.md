@@ -4,6 +4,19 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-17
+
+Released with Lyra 1.0.0 and PAM DSL 1.0.0.
+
+### Changed
+- **The gems' MIT-LICENSE copyright line no longer names the University of the Aegean**, which is
+  the author's affiliation, not a copyright holder.
+- **`rake petri_flow:verify` exits 1 when a workflow fails verification**: a terminal place it
+  cannot reach, an unbounded net, or a run that can stop short of a terminal place. The reports
+  are written first, as before. `PETRI_FLOW_EXPECTED_FAILURES` (class names, comma-separated)
+  exempts a workflow kept flawed on purpose, as a demonstration. It used to exit 0 whatever it
+  found.
+
 ## [0.9.3] - 2026-11-04
 
 ### Security

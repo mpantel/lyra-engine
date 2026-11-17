@@ -105,9 +105,20 @@ module PamDsl
     def test_existing_keys_are_unchanged_and_the_new_ones_are_added
       export = compliance.data_export
 
-      %i[subject generated_at events pii_inventory data_lineage processing_activities].each { |key| assert export.key?(key), key }
+      %i[subject generated_at events pii_inventory data_lineage].each { |key| assert export.key?(key), key }
       %i[records accesses processing_context notice gaps].each { |key| assert export.key?(key), key }
       assert_equal 3, export[:events].size
+    end
+
+    # From 1.0.0 the copy's purposes are the policy's (processing_context): the
+    # per-event processing_activities, a purpose guessed from the source's
+    # keywords, is gone.
+    def test_the_copy_has_no_guessed_processing_activities_only_the_policy_s_context
+      export = compliance.data_export
+
+      refute export.key?(:processing_activities)
+      refute_empty export[:processing_context]
+      assert(export[:processing_context].all? { |context| context.key?(:purpose) })
     end
 
     def test_every_attribute_is_in_the_copy_not_only_the_detected_ones
@@ -212,7 +223,7 @@ module PamDsl
     # ── Review findings: the copy ────────────────────────────────────────────
 
     def test_the_old_keys_leave_out_withheld_fields_and_other_people_s_data
-      old = compliance.data_export.slice(:events, :pii_inventory, :data_lineage, :processing_activities).inspect
+      old = compliance.data_export.slice(:events, :pii_inventory, :data_lineage).inspect
 
       refute_includes old, "x$2a", "withheld"
       refute_includes old, "Bob Payer", "another person's"

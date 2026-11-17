@@ -307,12 +307,16 @@ class SubjectAccessCopyTest < Minitest::Test
     assert_equal 1, exports_of(person).size
   end
 
-  # 15. The keys data_export always returned are still there.
+  # 15. The keys data_export always returned are still there, but for the
+  # per-event processing_activities, whose purposes were guessed from keywords:
+  # from 1.0.0 the purposes are the policy's, in processing_context.
   def test_the_existing_keys_are_unchanged
     person = SaPerson.create!(name: "Ann", email: "ann@example.com")
     copy = export(person)
 
-    %i[subject generated_at events pii_inventory data_lineage processing_activities].each { assert copy.key?(_1), _1 }
+    %i[subject generated_at events pii_inventory data_lineage processing_context].each { assert copy.key?(_1), _1 }
+    refute copy.key?(:processing_activities), "the guessed purposes are gone"
+    refute_empty copy[:processing_context]
     assert_equal 1, copy[:events].size
     assert_equal :created, copy[:events].first[:operation].to_sym
   end
@@ -375,7 +379,7 @@ class SubjectAccessCopyTest < Minitest::Test
                                           payer_name: "Paul Payer")
     registration.update!(sa_person_id: bob.id, vat_number: "BOBVAT", payer_name: "Bob Payer")
 
-    old = export(ann, record: false).slice(:events, :pii_inventory, :data_lineage, :processing_activities).inspect
+    old = export(ann, record: false).slice(:events, :pii_inventory, :data_lineage).inspect
     refute_includes old, "$2a$secret", "a withheld field"
     refute_includes old, "Paul Payer", "another person's field"
     refute_includes old, "BOBVAT", "the new owner's side of the move"

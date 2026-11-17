@@ -53,6 +53,14 @@ module Lyra
         end
       end
 
+      # Rails' uniqueness validation answered from events in ES-NoProj
+      # (Lyra::Projections::Uniqueness); inert in other modes.
+      initializer "lyra.install_es_noproj_uniqueness", after: "lyra.inject_interceptors" do
+        ActiveSupport.on_load(:active_record) do
+          Lyra::Projections::Uniqueness.install!
+        end
+      end
+
       # Read hooks for ES-Lazy (projection_mode :lazy); inert in other modes.
       initializer "lyra.install_lazy_reads", after: "lyra.inject_interceptors" do
         ActiveSupport.on_load(:active_record) do
@@ -148,6 +156,36 @@ module Lyra
 
           validator = Lyra::Schema::Validator.new
           validator.enforce! if validator.schema_exists?
+        end
+      end
+
+      # A retention rule that can never act (:soft_delete, the strategy of
+      # a rule that names none, on a table with no deleted_at or
+      # discarded_at): a warning per model at boot, for the models enrolled
+      # by then (with eager loading, all of them). Lyra::Retention warns
+      # again in each run that skips records for it. Never stops the boot.
+      initializer "lyra.check_retention_rules", after: "lyra.apply_declared_models" do
+        config.after_initialize do
+          next unless Lyra.config.monitored_models.any?
+
+          Lyra::Retention.check_rules!
+        rescue StandardError => e
+          Rails.logger&.debug("Lyra: retention rules not checked at boot (#{e.class}: #{e.message})")
+        end
+      end
+
+      # ES-NoProj set by configuration rather than reached by a switch: a
+      # warning for each thing the switch into ES-NoProj would refuse (a
+      # database foreign key from an unmonitored table into a monitored one,
+      # a default scope it cannot evaluate), for the models enrolled by then
+      # (with eager loading, all of them). Never stops the boot.
+      initializer "lyra.check_es_noproj", after: "lyra.apply_declared_models" do
+        config.after_initialize do
+          next unless Lyra.config.monitored_models.any?
+
+          Lyra::ModeTransition.check_es_noproj!
+        rescue StandardError => e
+          Rails.logger&.debug("Lyra: ES-NoProj requirements not checked at boot (#{e.class}: #{e.message})")
         end
       end
 

@@ -92,7 +92,11 @@ eight statements for Hijack, nine with PaperTrail.
 The event-sourcing modes follow the same pattern: ES-Sync adds its projection
 write inside the transaction; ES-Async and ES-Lazy write no row at write time
 (a job projects ES-Async's after commit; ES-Lazy projects before the next read,
-and takes no lock on the aggregate); ES-NoProj writes no rows at all, and its
+and takes no lock on the aggregate for a create; for an update or a destroy,
+while `lock_aggregate_before_append` is on, it takes the advisory lock on the
+stream to check that the stream does not end in a `Destroyed` event, as
+ES-NoProj does, and a model with optimistic locking takes it whatever the
+setting); ES-NoProj writes no rows at all, and its
 extra statements are reads that rebuild records from their streams and its
 reference links.
 

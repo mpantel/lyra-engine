@@ -795,6 +795,29 @@ as Active Record applies them to an association) in the event store and writes
 each one's event through `CachedRelation`'s `delete_all`/`update_all`; a scope
 it cannot evaluate refuses the parent's destroy with `UnsupportedQuery`.
 
+**Uniqueness validation.** Rails' uniqueness validator asks the table whether
+another row holds the value, and the table is empty. The relation Rails builds
+for the check (scope, conditions, case sensitivity, the record itself left out
+on update) is kept and extended so that its `exists?` evaluates its where
+clause on the records rebuilt from events (`Lyra::Projections::Uniqueness`),
+refusing with `UnsupportedQuery` what it cannot evaluate exactly. Since no row
+is written, no unique index catches two concurrent writers of one value; on
+PostgreSQL the check takes a transaction-level advisory lock on the model,
+attribute and value first, so the second writer's check waits for the first's
+commit (limits in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled)).
+
+**Database foreign keys.** The tables of monitored models get no rows, so a
+database foreign key from a table no monitored model writes into one of them
+refuses every write there that sets the column. `ModeTransition.to!` refuses
+the switch into ES-NoProj while one exists (`Lyra::Projections::ForeignKeys`,
+one `connection.foreign_keys` query per table, at the switch only), naming
+the tables, the column and the constraint; drop the constraint and keep the
+reference in the model, or monitor the referencing model. Foreign keys
+between monitored tables, or from a monitored table into an unmonitored one,
+never fire and pass. ES-NoProj set by configuration at boot is not a switch:
+the boot warns of each such constraint, and of each default scope ES-NoProj
+cannot evaluate, and goes on.
+
 **Genesis.** In ES-NoProj a model's first read in a process, as well as its
 first write, imports rows that predate Lyra, so they have streams to read.
 
@@ -1038,7 +1061,7 @@ Lyra's own tables are created on first use and need no migration:
 
 ### Application Tables (Example: Aegean E-Pay Testbed)
 
-See `examples/aegean_epay_testbed/db/migrate/*` in the replication package (https://doi.org/10.5281/zenodo.17770613) for the complete schema.
+See `examples/aegean_epay_testbed/db/schema.rb` in the replication package (https://doi.org/10.5281/zenodo.17770613) for the complete schema; the testbed has a fixed schema and no migration history.
 
 ## Extensibility Points
 
@@ -1196,9 +1219,9 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for a full walkthrough.
 ### As Rails Engine
 ```ruby
 # Gemfile (the gems are named orfeas_*, their entry files are not)
-gem "orfeas_lyra", "~> 0.9", require: "lyra"
-gem "orfeas_pam_dsl", "~> 0.9", require: "pam_dsl"        # optional, privacy
-gem "orfeas_petri_flow", "~> 0.9", require: "petri_flow"  # optional, verification
+gem "orfeas_lyra", "~> 1.0", require: "lyra"
+gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional, privacy
+gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional, verification
 
 # config/initializers/lyra.rb
 Lyra.configure do |config|

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-17
+
 ### Breaking
 - **A query uses every declared field it names, whatever it returns.** Purpose-bound reads checked
   record loads and `pluck`; aggregates, filters and `exists?` were not checked, so under a purpose
@@ -70,6 +72,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Article 30 register lists it as a gap, as for a purpose the policy generator writes. A policy
   that relied on the default must declare the basis it means (`basis :consent` included).
 
+- **The Art. 15 export no longer has `processing_activities`.** `data_export`'s
+  `processing_activities` listed, per event, a purpose guessed from keywords in its
+  `metadata[:source]` (Lyra's events carry `lyra_interceptor` or `lyra_command_handler`, so unless
+  a `metadata_proc` set another source every event read "Application functionality"), whatever
+  the policy declared. The key is gone: the
+  copy's purposes are `processing_context`, taken from each record's model's policy (basis,
+  recipients, transfers, retention and sources per purpose). Code that read
+  `data_export[:processing_activities]` reads `processing_context`. The per-subject Art. 30 method
+  `GDPRCompliance#processing_activities`, and the GDPR report's key of that name, are unchanged.
+
 - **PAM DSL: the consent grammar refuses what the Regulation does not allow, and a `:consent`
   purpose always needs consent.** On a purpose whose basis is `:consent`, `required! false` (Art.
   6(1)(a)) and `withdrawable! false` (Art. 7(3)) raise `PamDsl::ConsentGrammarError` when the
@@ -107,7 +119,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ModeTransition`, `Repair`, `DualView.find_discrepancies`, the recommendations) and the replay
   verifiers of the BPI and Olist examples are updated.
 
+### Added
+- **The switch into ES-NoProj refuses a database foreign key it cannot honour.** ES-NoProj leaves
+  the tables of monitored models empty: their records live in the event log. A database foreign
+  key from a table no monitored model writes into such a table (an unmonitored `Match` whose
+  `registration_id` references `registrations`) therefore made every write there that sets the
+  column fail with `ActiveRecord::InvalidForeignKey`. `Lyra::ModeTransition.to!` into ES-NoProj now
+  refuses such a constraint up front (`ModeTransition::Refused`, as for a default scope ES-NoProj
+  cannot evaluate), naming the referencing table and column, the referenced table, the constraint
+  and the loaded models that write the table, and the fix: drop the constraint
+  (`remove_foreign_key :table, name: "..."`) and keep the reference in the model (`belongs_to`
+  validates it), or monitor the referencing model. `force: true` switches anyway. Foreign keys
+  between monitored tables, and from a monitored table into an unmonitored one, sit on a table
+  that gets no rows in ES-NoProj and pass. The check reads `connection.foreign_keys` for each
+  table of each database the monitored models use, at the switch only
+  (`Lyra::Projections::ForeignKeys.blocking(models)`). ES-NoProj set by configuration at boot
+  (`config.projection_mode = :disabled`, which no switch gates) now gets a warning
+  (`Rails.logger.warn`, else `Kernel#warn`) for each such constraint and each default scope
+  ES-NoProj cannot evaluate, for the models enrolled by then (with eager loading, all of them);
+  the boot goes on, as for a retention rule that cannot act. `Lyra::ModeTransition.check_es_noproj!`
+  runs that check on demand and returns the warnings.
+- **A warning for a retention rule that can never act.** `:soft_delete`, PAM's strategy for a
+  rule that names none, sets `deleted_at` or `discarded_at`; on a table with neither,
+  `Lyra::Retention` skipped every record past its period and kept it, and said so only in each
+  action's `detail`. Lyra now warns (`Rails.logger.warn`, else `Kernel#warn`), naming the model,
+  its policy and rule, and the fix (add the column, or `on_expiry :anonymize` or `:hard_delete`):
+  at boot for the models enrolled by then, and in each run that skips records for it, once per
+  model, not once per record. `Lyra::Retention.check_rules!(models:)` makes the boot check on
+  demand and returns the names of the models it warned about. Nothing else changes: the records
+  are still skipped, and only models with a rule of their own are acted on (the policy's
+  `default` period is not executed; now documented).
+
 ### Fixed
+- **ES-NoProj let Rails' uniqueness validation pass every duplicate.** `validates :x, uniqueness:
+  true` asks the table whether another row holds the value; in ES-NoProj a monitored model's table
+  is empty, so every value passed, and the table's unique index could not catch the duplicate
+  either, since no row is written. The testbed saved a second bank-transfer payment with an RF code
+  already issued (`BankPayment#remittance_info`) and a second web invoice with a series and number
+  already used (`Finance::WebInvoice`). The relation Rails builds for the check is now answered
+  from the records rebuilt from events (`Lyra::Projections::Uniqueness`), as Active Record and the
+  database answer it from the table: Rails still builds it, so `scope:` (columns and
+  associations), `conditions:` (hash conditions, `where.not`, ranges, `or`, named scopes, a lambda
+  taking the record), `case_sensitive:`, `allow_nil`/`allow_blank`, the record itself left out on
+  update by its primary key (a custom one too), `Model.unscoped` (a soft-delete default scope is
+  not applied, as in Rails) and, under STI, the type condition of the class that declared the
+  validation all follow Rails' own construction. Values compare through the attribute's type (a
+  decimal `"250.00"` is `250`, an enum's label, a datetime in another zone), with SQL's NULL
+  semantics; `LOWER(column) = LOWER(value)` and a `citext` column's equality are worked out by the
+  database's own `LOWER` (texts it lowered once are remembered). A form that cannot be evaluated exactly (an SQL fragment
+  or a subquery in `conditions:`, a join, `LIKE`, a string column with a collation of its own)
+  raises `UnsupportedQuery` instead of passing or refusing the value on a guess. The check is
+  still exempt from the purpose check. Other modes keep Active Record's relation and the table's
+  answer. A uniqueness check is a read and then a write in every mode; where the table modes
+  have the unique index to refuse the second of two concurrent writers, ES-NoProj now takes a
+  transaction-level advisory lock on the model, attribute and value before the check reads
+  (PostgreSQL; under `case_sensitive: false` or on `citext`, on `LOWER(value)` as the database
+  computes it), so the second writer's check waits for the first's commit and then finds its
+  record. It is taken only inside a transaction (`save`, `create`, `update`) and only by a save
+  that claims a value (a new record, a changed attribute or scope column, or a check with
+  `conditions:`): a save that keeps its value does not wait for, or deadlock with, other writers.
+  It closes the race under READ COMMITTED, not for a REPEATABLE READ transaction whose snapshot
+  predates the other's commit. Each check reads every record of the model; a per-process copy
+  stamped as the projection cache's entries are reads only the streams written since the last
+  check (24 ms instead of 94 ms at 3,000 records in the test environment). A check answers from
+  the entries it read itself, so another thread replacing one meanwhile cannot show it that
+  thread's uncommitted state; the copies are kept under 32 MB (models with more than 20,000
+  streams are read through the projection cache), expire after an hour as the cache's memory
+  entries do, and are rebuilt when a model's columns change.
+- **An erasure in another process did not reach warm ES-NoProj reads.** `Lyra::Erasure` rewrites
+  the record's events in place and appends an `ErasureApplied`. The eraser drops its own cache
+  entries; another process brought its entry up to date by replaying only the events after the
+  entry's stamp, the `ErasureApplied`, which changes no attribute, and kept the erased values:
+  `find_by`, `where` and the uniqueness check answered with the erased e-mail until the entry
+  expired. An entry with an `ErasureApplied` after its stamp is now rebuilt from the rewritten
+  stream.
+- **ES-NoProj's lists, `character(n)` columns and serialized attributes compared as the table does
+  not.** A hash condition's list of two or more values is an `IN` of the values the type binds:
+  Active Record leaves out one it binds as NULL (`"abc"` on an integer, an enum's unknown label,
+  `""` on a boolean), and ES-NoProj kept it as NULL, so `where.not(qty: [9, "abc"])` returned no
+  row instead of every row but 9. An enum's unknown label alone is bound as `IS NULL`, as Active
+  Record binds it; an integer the enum has no label for (`where(status: 5)`) is bound as `= 5`,
+  which no row equals, NULL or not, and stays a member of a list (`where.not(status: [5, 7])`
+  returned no row). A `character(n)` value compares without its trailing spaces (`'ab'` is `'ab '`
+  in PostgreSQL). A serialized attribute compares as the text it is stored as
+  (`{"a"=>1,"b"=>2}` is not `{"b"=>2,"a"=>1}` there), and a Hash given for one is its value, not a
+  condition on a table named after it (`where(prefs: {...})` was refused). Hash conditions in
+  `where`, `where.not`, `find_by`, `exists?` and `count`, and the uniqueness check, all follow.
+- **ES-NoProj compared a condition's value as given, not cast through the column's type.**
+  Active Record binds a condition's value through the attribute's type before the database
+  compares it; ES-NoProj compared the Ruby values. `find_by(amount: 250.0)` on a decimal column
+  compared the event's `"250.0"` with the Float and found nothing, with a BigDecimal too (the
+  testbed created a second bank-transfer payment code instead of reusing the first), and
+  `where(transaction_type: :card)` matched no row, as did a Symbol on any string column or enum.
+  Conditions in `where`, `where.not`, `find_by`, `exists?`, `count` and the joined conditions now
+  bind the value as Active Record binds it (the attribute's type serializes it) and read it back as
+  a record holds it, in equality, `IN` lists and ranges (each end): a decimal, float or integer
+  given as a String, Float or BigDecimal (`3.5` on an integer is 3, `250.004` on a decimal(10, 2)
+  is 250.00); a date given as a String or Time; a `datetime`, `timestamptz` or `time` given as a
+  String or Date, read in the database's clock (UTC) as Active Record binds it, not in
+  `Time.zone`, and a `time` compared as its time of day in UTC; a boolean given as `"t"`, `1`,
+  `"0"`; an enum, integer- or string-backed, given as its label, a Symbol or its column's value
+  (`where(status: "0")`); a deterministically encrypted attribute as its ciphertext compares
+  (`downcase: true` included); an alias for its attribute. A value the type binds as NULL (`"abc"`
+  or `""` on an integer column, `""` on a boolean) matches nothing, a value out of an integer
+  column's range matches nothing (and leaves a range end open), and NULL is unknown as in SQL:
+  `where.not(tag: "x")` and `where.not(amount: 250)` no longer return the rows whose column is
+  NULL. An equality on a non-deterministically encrypted attribute matches no row, as on the
+  table, and a range, a pattern or an SQL fragment on one is refused (`UnsupportedQuery`). SQL
+  fragments (`where("at >= ?", date)`) bind as Active Record quotes: a date or a string on a
+  datetime in the database's clock (the testbed's refund list filtered `requested_at` by a date
+  in `Time.zone` "Athens"), a number not rounded to the column's scale, and a value the database
+  rejects (`"qty >= ?", 2.5` on an integer column) refused. A condition on a name that is not an
+  attribute (`where(id: …)` where the primary key is `code`) is refused, as the table rejects
+  it; it matched nothing. An order puts `false` before `true` (they compared as equal) and orders
+  an enum by the value its column holds, not by its label. A record rebuilt from events also read
+  an integer-backed enum wrong: the event holds the label, which was read as the column's
+  integer, so every record had the first label (`0`); and a serialized attribute (`serialize
+  :prefs, coder: JSON`) failed to load. Both are now turned into the column's value, as a
+  projection writing the row does, once when the record's cache entry is built (the entries'
+  format is new: `CachedProjection::CACHE_VERSION` 3), with an STI subclass's own enums and
+  serialized attributes, and also in `Lyra::Temporal` reads and the rights' subject lookup. A
+  record that cannot be built from its events raises; it was left out of the answer. Strings are
+  still ordered by code point, not by the database's collation.
 - **Retention did nothing in ES-NoProj.** `Lyra::Retention` (and `lyra:retention:apply`) listed
   the model's ids from its streams but loaded each record from its table, which ES-NoProj leaves
   empty or stale: no record was found, a dry run listed nothing and no rule was applied, and
@@ -269,6 +402,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Genesis's lock was per class, not per table.** An import through an STI subclass did not wait
   for one through its base class. The lock is now named after the table's stream owner (the STI
   base class), which the erasure of a row with no stream also takes.
+- **An erasure could miss an update that committed while it ran.** It read the record's stream
+  before its transaction and took the row lock only when it wrote the row, after rewriting the
+  events, so a Monitor update that committed in between appended an event the erasure never saw,
+  and that event kept the value. `Lyra::Erasure.erase!` now takes the row lock, then the record's
+  advisory lock (the locks a writer holds, in the order writers take them), and only then reads
+  the stream, all in one transaction; everything derived from the stream is computed under the
+  locks, so a refusal there rolls back with nothing changed. A write already in flight finishes
+  first; one that starts later waits and is new data. In ES-NoProj, with no row, only the advisory
+  lock is taken.
+- **An access-log entry was lost when the reader's transaction rolled back,** though the read had
+  already returned its value. `Lyra::AccessLog` now appends on a connection of its own
+  (`Lyra::OwnConnection`), so the entry survives the rollback; an access that cannot be recorded
+  still does not go ahead. Inside a transaction this costs a second connection per access, so size
+  the pool for it (twice the threads avoids any wait): when no connection comes free within the
+  pool's checkout timeout, or the connection is pinned (Rails' transactional tests), the entry is
+  written inline, in the reader's transaction, and lost if that rolls back.
 - **PAM DSL works without ActiveSupport again.** Loaded on its own, with its standard-library
   polyfill, the Article 30 register raised `NoMethodError` (`String#presence` is ActiveSupport),
   and JSON export (`Reporter#export_json`, `GDPRCompliance#portable_export`) relied on
@@ -317,6 +466,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UPDATE ran; Active Record still ran `after_update`, and the stream became
   `[Created, Destroyed, Updated]`. Monitor now records no update when the UPDATE reached no row or
   nothing changed.
+- **Monitor appended a second `Destroyed`** when two stale copies of a record were both destroyed,
+  when a copy was destroyed after `delete_all` or hand-written SQL had deleted its row, and when
+  the same copy was destroyed twice. Without optimistic locking Active Record does not check what
+  its DELETE reached, and it runs `after_destroy` even when the DELETE reached no row, or when it
+  ran none for a record that is not persisted; the stream became `[Created, Destroyed, Destroyed]`,
+  which no replay can apply. A destroy now records nothing unless it deleted the record's row, so
+  a new record's `destroy` no longer appends an event without an id in any mode either. A row
+  deleted by hand-written SQL keeps its stream open, as any write that bypasses Active Record does,
+  until `lyra:repair` appends the `Destroyed`. Hijack and the event-sourcing modes refuse a stale
+  destroy, as before; a soft delete (paranoia) and optimistic locking are unchanged.
 - **`belongs_to ... touch: true` cascades published nothing.** Rails touches the parent through
   `touch_later`, which sets the timestamps and clears their change before `touch` runs at commit,
   so Lyra saw no change. The parent's row moved and its stream did not; with timestamps compared,
@@ -346,6 +505,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record whose event attributes had string keys, as Monitor's do.
 
 ### Changed
+- **The gems' MIT-LICENSE copyright line no longer names the University of the Aegean**, which is
+  the author's affiliation, not a copyright holder.
 - **Ruby 4.0.9, Rails 8.1.4.1, pg 1.7.0.** Security releases: Ruby 4.0.9 fixes memory
   corruption when compiling crafted regular expressions, Rails 8.1.4.1 fixes advisories in
   Active Support and Action View (Active Record unchanged). Lyra's requirements are unchanged
@@ -362,6 +523,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event versions stay on disk, in WAL and in backups until reclaimed or expired), states that a
   database error logged by a failed bypass publish can contain the failing row, and describes a
   narrow wait between an erasure and a model's first use in another transaction.
+- **Erasure can delete the subject's access log; off by default.** `Lyra::Erasure.erase!` left the
+  record's access stream (`Lyra::DataAccess$<Model>$<id>`: who read the record, when, under which
+  purpose and basis) whole and unreported, and `everywhere` never reached it, since it holds field
+  names, not values. Whether it goes is the controller's decision (it may be evidence to keep, Art.
+  5(2)). `config.erase_access_log` (default `false`) deletes it once the record is fully erased
+  (this erasure and the earlier ones together cover every personal field);
+  `erase!(access_log: true|false)` (`lyra:erase ACCESS_LOG=1|0`) decides per call, `true` at once. Its events are deleted
+  from every stream and from the events table, in the erasure's transaction. `access_log_subjects:`
+  (`ACCESS_LOG_SUBJECTS=`) names the ids the application passed as the person's subject
+  (`validate_access!(…, subject: "user-7")`), whose logs follow the same rule. `ErasureApplied` and
+  the `Result` record `access_log` (`"erased"` or `"kept"`) and `access_log_entries`, and
+  `ErasureApplied` how many such ids (`access_log_subjects`), never which.
+  `Lyra::AccessLog.erase!(subject, reason:, erased_by: nil)` (`lyra:erase_access_log SUBJECT=
+  REASON= [OPERATOR=]`) deletes one subject's log alone, a record's or a bare id's, and records
+  it as `AccessLogErased` in `Lyra::AccessLogErasures`. A model-wide entry (`Lyra::DataAccess$<Model>$*`, a `pluck`'s) names
+  no subject and is refused (`Lyra::AccessLog::ModelWideSubject`). Retention's `:hard_delete` of a
+  record erased before with its log kept deletes the log too when the setting is on, and records
+  an `ErasureApplied` that names no fields: **code that reads `ErasureApplied` must allow an empty
+  `fields`**. Not covered: the access logs of other records `everywhere` reaches, and an access
+  recorded (on its own connection) while the erasure runs.
+- **Mode switches, erasures and repairs record what the operating system says beside the operator's
+  label.** The actor (`OPERATOR=`, `Current.user`, `LYRA_OPERATOR`) is a label nothing checks.
+  `Lyra::Attribution` adds the user the process runs as (by uid, not the `USER` variable), the host
+  and the pid: `lyra_mode_transitions` gains `os_user`, `host` and `pid` (added to an existing table
+  on first use), the metadata of `ErasureApplied` and of `AccessLogErased` (an access log erased on
+  its own) carries them beside `erased_by`, and a repair's events record
+  `repaired_by` (the label: `lyra:repair` passes `OPERATOR`, `Lyra::Repair.run` takes `operator:`),
+  `os_user`, `host` and `pid`, where a repair recorded no actor at all. `ErasureApplied`'s data gains
+  `any_fields`, `requested_fields` (what the request named; `nil` for the declared columns) and
+  `beyond_policy` (the columns erased only because of `any_fields`). This authenticates no one: it
+  makes the label comparable with the OS and SSH audit logs, which remain the attribution control.
 - **PAM DSL: restriction of processing (Art. 18) and the right to object (Art. 21).** PAM had no
   construct for either: a restriction could only be approximated by narrowing a purpose for
   everyone or withdrawing a consent, and a purpose on contract or legal obligation could not be
@@ -507,7 +699,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error as it refuses the others. PAM now has 25 field types (18 before). No field of the Aegean
   testbed changes type.
 - **The Art. 15 export is a copy of the data.** `Lyra::Privacy::GDPRCompliance#data_export` keeps
-  its keys and adds five. `records` holds each of the subject's records whole: every attribute (not
+  its keys, but for `processing_activities` (see Breaking), and adds five. `records` holds each of the subject's records whole: every attribute (not
   only those a detector flags; encrypted columns in plaintext) and its stored history, `from`/`to`
   per change. A record is the subject's by what it is: the subject's own row, the rows of monitored
   models whose `<type>_id` names them (indexed queries), and the records the subject's events touch,
@@ -584,16 +776,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decided by the field's type); sensitivity is a separate Art. 32 risk tier that gates nothing,
   and the old name mixed the two. `SensitivityViolationError` stays as a deprecated alias of the
   new class until 2.0, so `rescue PamDsl::SensitivityViolationError` still catches it.
-- **ModeSync adopts an escalation only if a gated switch recorded it.** It adopted the newest
+- **ModeSync adopts a switch the gate checks only if the gate cleared it.** It adopted the newest
   `applied` row of `lyra_mode_transitions` and checked nothing, so one `INSERT` moved every process
   from Monitor to ES-NoProj. A switch now records where it came from (`from_config`), whether the
   gate was overridden (`forced`) and the certificate of the clean check that cleared it
-  (`certificate_id`). Other processes adopt an escalation only if the row names that certificate
-  (for the same `from -> to`, recorded before the row, named by no earlier switch) or is forced;
-  the escalation is judged from the row's `from` and from where the previous switch left the
-  application, so a row cannot claim a `from` that avoids the gate. No clock is compared, so a
-  switch near the end of its certificate's life or under clock skew is adopted. With the gate off,
-  switches are adopted as recorded. A refusal is logged once; an error while deciding leaves the
+  (`certificate_id`). Other processes adopt a switch the gate checks (an escalation from Disabled
+  or Monitor to Hijack or event sourcing, or leaving ES-NoProj, ES-Lazy or ES-Async for a mode
+  that reads the tables) only if the row names that certificate (for the same `from -> to`,
+  recorded before the row, named by no earlier switch) or is forced; whether the gate checks the
+  switch is judged from the row's `from` and from where the previous switch left the application,
+  so a row cannot claim a `from` that avoids the gate. A switch the gate does not check (Monitor to
+  Disabled, ES-Sync to ES-NoProj) is adopted as recorded. No clock is compared, so a switch near
+  the end of its certificate's life or under clock skew is adopted. With the gate off, switches are
+  adopted as recorded. A refusal is logged once; an error while deciding leaves the
   row to be tried again. Columns Lyra adds to its own tables are added outside the caller's
   transaction and safely when two processes add one at once. This guards against mistakes and
   naive writes, not against anyone who can write the table.
@@ -635,6 +830,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance `touch` already did. Bulk bypass events (`update_all`, `upsert_all` and the like) now
   list `created_at` and `updated_at` among their changes when those moved, so an upsert's event
   carries `updated_at` beside the columns it set.
+
+### Documented
+- **`allow_for` widens, it does not restrict.** A field may be used for a purpose when its
+  `allow_for` names the purpose or the purpose's `requires`/`optionally` names the field
+  (`Policy#allowed?` takes the union, as before). The PAM DSL README, PRIVACY_COMPLIANCE.md,
+  API_REFERENCE.md and the methods' comments now say so. No behaviour change.
 
 ## [0.9.3] - 2026-11-04
 

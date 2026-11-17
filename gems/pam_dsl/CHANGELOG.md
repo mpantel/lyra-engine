@@ -4,6 +4,17 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-17
+
+### Breaking
+- **`GDPRCompliance#data_export` no longer has `processing_activities`.** The key listed, per
+  event, a purpose guessed from keywords in its source (`registration`, `payment`, `email`,
+  `analytics`, else "Application functionality"), whatever the policy declared. The copy's
+  purposes are `processing_context`: per purpose that admits the records' declared fields, its
+  basis, recipients, transfers, retention and sources, from the policy. Read `processing_context`
+  instead. The per-subject Art. 30 method `processing_activities`, and `full_report`'s key of that
+  name, are unchanged.
+
 ### Added
 - **Restriction of processing (Art. 18) and the right to object (Art. 21).**
   - Declarations on a purpose: `allowed_when_restricted(*exceptions, reference: nil)` with the
@@ -90,12 +101,13 @@ All notable changes to PAM DSL will be documented in this file.
   lists the columns no declaration covers.
 - `PolicyComparator`'s field details include the three field options.
 
-### Fixed
-- The ActiveSupport-free polyfill lacked `Object#presence`, which the Article 30 report uses, and
-  a reporter test expected "1 months" where the formatter writes "1 month";
-  `rake test:polyfill` passes again.
-
 ### Changed
+- **The gems' MIT-LICENSE copyright line no longer names the University of the Aegean**, which is
+  the author's affiliation, not a copyright holder.
+- **The generator counts the models with personal data as such.** Its draft's header and summary
+  said "Models scanned:" for the number of models in which it found personal data. They now say
+  "Models with PII fields: N (of M scanned)" after a scan (on the Aegean testbed, 11 of 32: its 28
+  models and 4 of its gems').
 - **Condition 6 alone, the rights in the Art. 15 copy, and per-purpose declarations in the
   per-subject register.** `Policy#validate_rights!(fields, purpose, subject:)` checks only the
   subject's restrictions and upheld objections (no purpose declaration, no consent), records only
@@ -152,7 +164,18 @@ All notable changes to PAM DSL will be documented in this file.
   register raised `NoMethodError` on `String#presence`, and JSON export
   (`Reporter#export_json`, `GDPRCompliance#portable_export`) relied on ActiveSupport having loaded
   `json`. The polyfill now provides `Object#presence` and treats a whitespace-only string as blank,
-  as ActiveSupport does; both files require `json`. Nothing changes under ActiveSupport.
+  as ActiveSupport does; both files require `json`. Nothing changes under ActiveSupport. A
+  reporter test expected "1 months" where the formatter writes "1 month"; `rake test:polyfill`
+  passes again.
+
+### Documented
+- **`allow_for` widens, it does not restrict.** `Policy#allowed?(field, purpose)` holds when the
+  field's `allow_for` names the purpose or the purpose's `requires`/`optionally` names the field;
+  a field is not kept from a purpose by an `allow_for` that leaves it out. `Field#allowed_for?`
+  checks the field's side only. The README and the comments say so; no behaviour change.
+- **`:soft_delete`, the default deletion strategy, keeps the data.** The README says that a rule
+  that should remove data names `:anonymize` or `:hard_delete`, and that Lyra's executor acts only
+  on `for_model` rules.
 
 ## [0.9.3] - 2026-11-04
 

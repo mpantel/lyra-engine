@@ -33,6 +33,16 @@ module Lyra
   # lifted. An objection's 18(1)(d) restriction, which covers one purpose,
   # does not hold it.
   #
+  # Only a model with a retention rule of its own (for_model) is acted on:
+  # the policy's default period is not executed.
+  #
+  # :soft_delete is the strategy of a rule that names none (PAM DSL's
+  # default), and it needs a deleted_at or discarded_at column: on a table
+  # without one, every record past its period is skipped and kept. Lyra
+  # warns about such a rule (Rails.logger, else Kernel#warn) at boot, for
+  # the models enrolled by then (check_rules!), and again in each run that
+  # skips records for it, once per model, not once per record.
+  #
   # Run it on a schedule: bin/rails lyra:retention:apply (DRY_RUN=1 lists
   # what would happen, and works with the executor off), or enqueue
   # Lyra::RetentionJob. Off by default: deleting data on a timer is a
@@ -68,6 +78,27 @@ module Lyra
         Result.new(actions: actions, dry_run: dry_run)
       end
 
+      # Warns about each of +models+ whose retention rule is :soft_delete
+      # while its table has neither deleted_at nor discarded_at, so the rule
+      # can never act; returns their names. Lyra calls it at boot for the
+      # models enrolled by then. A model whose table does not exist, or
+      # whose policy cannot be read, is passed over.
+      def check_rules!(models: Lyra.config.monitored_models)
+        models.filter_map do |model|
+          policy = Lyra::Privacy.policy_for(model)
+          rule = policy.retention_rule(model)
+          next unless rule && rule.strategy == :soft_delete && model.table_exists?
+          next if soft_delete_column(model)
+
+          warn_soft_delete(model, policy, rule)
+          model.name
+        rescue StandardError => e
+          raise unless e.is_a?(ActiveRecord::ActiveRecordError) || e.class.name.start_with?("PamDsl::")
+
+          nil
+        end
+      end
+
       private
 
       def apply_model(model, dry_run, now)
@@ -80,13 +111,39 @@ module Lyra
         shortest = ([rule.duration] + rule.field_durations.values).compact.min
         return [] unless shortest
 
-        PurposeBoundReads.internal(INTERNAL) do
+        actions = PurposeBoundReads.internal(INTERNAL) do
           candidates(model, anchor, now - shortest).filter_map do |record|
             next unless rule.applies.call(record)
 
             act(model, record, rule, personal, anchor, dry_run, now)
           end
         end
+        skipped = actions.count { |a| a.strategy == :soft_delete && a.outcome == :skipped }
+        warn_soft_delete(model, policy, rule, skipped: skipped) if skipped.positive?
+        actions
+      end
+
+      def soft_delete_column(model)
+        (SOFT_DELETE_COLUMNS & model.column_names).first
+      end
+
+      # Once per model per call: the model, its policy and rule, what
+      # happens to its records, and the two ways to fix it.
+      def warn_soft_delete(model, policy, rule, skipped: nil)
+        period = rule.duration ? "keep_for #{rule.duration.inspect}, " : ""
+        kept = if skipped
+                 "#{skipped} #{skipped == 1 ? 'record past the period was' : 'records past the period were'} " \
+                   "skipped and kept"
+               else
+                 "records past the period will be skipped and kept"
+               end
+        message = "Lyra: the retention rule for #{model.name} (policy :#{policy.name}, #{period}" \
+                  "on_expiry :soft_delete, also what a rule that names no strategy gets) cannot act: " \
+                  "#{model.table_name} has no deleted_at or discarded_at column, so #{kept}. " \
+                  "Add a deleted_at (or discarded_at) column, or give the rule another strategy " \
+                  "(on_expiry :anonymize or :hard_delete)."
+        logger = defined?(Rails) && Rails.respond_to?(:logger) && Rails.logger
+        logger ? logger.warn(message) : Kernel.warn(message)
       end
 
       def anchor_for(model)
@@ -162,7 +219,7 @@ module Lyra
       end
 
       def soft_delete(model, record, dry_run, now)
-        column = (SOFT_DELETE_COLUMNS & model.column_names).first
+        column = soft_delete_column(model)
         return action(model, record, :soft_delete, [], :skipped, "no deleted_at or discarded_at column") unless column
         return nil if record.public_send(column)
         held = restricted(record, nil)

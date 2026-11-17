@@ -27,7 +27,25 @@ namespace :petri_flow do
     end
 
     runner = PetriFlow::VerificationRunner.new
-    runner.run_all
+    results = runner.run_all
+
+    # A workflow fails verification when a terminal place is unreachable, the
+    # net is unbounded, or it can stop short of a terminal place. The reports
+    # are written either way; then the task exits 1 if any failed, unless
+    # PETRI_FLOW_EXPECTED_FAILURES names it (a workflow kept flawed on purpose,
+    # as a demonstration).
+    failed = results.filter_map do |_id, r|
+      unreachable = r[:terminal_reachability].select { |_place, reachable| !reachable }.keys
+      unbounded = r.dig(:verification, :boundedness, :is_bounded) == false
+      improper = r.dig(:verification, :liveness, :terminates_properly) == false
+      next if unreachable.empty? && !unbounded && !improper
+
+      [r[:class_name], { unreachable: unreachable, unbounded: unbounded, terminates_improperly: improper }]
+    end.to_h
+    expected = ENV.fetch("PETRI_FLOW_EXPECTED_FAILURES", "").split(",").map(&:strip)
+    unexpected = failed.except(*expected)
+    failed.each { |name, why| puts "#{expected.include?(name) ? 'expected failure' : 'FAILED'}: #{name} #{why}" }
+    abort "petri_flow:verify: #{unexpected.size} workflow(s) failed verification: #{unexpected.keys.join(', ')}" if unexpected.any?
   end
 
   namespace :verify do

@@ -19,6 +19,10 @@ class CachedRelationTest < Minitest::Test
       public_send(name)
     end
 
+    def has_attribute?(name)
+      MockModel.column_names.include?(name.to_s)
+    end
+
     def inspect
       "#<MockRecord id=#{id}, name=#{name}>"
     end
@@ -50,9 +54,18 @@ class CachedRelationTest < Minitest::Test
       %w[id name status active amount]
     end
 
+    # The attributes' types, as Active Record gives them: a condition's
+    # value is cast through them.
     def self.type_for_attribute(name)
-      Struct.new(:type).new(name.to_s == "active" ? :boolean : (%w[id amount].include?(name.to_s) ? :integer : :string))
+      if name.to_s == "active" then ActiveModel::Type::Boolean.new
+      elsif %w[id amount].include?(name.to_s) then ActiveModel::Type::Integer.new
+      else ActiveModel::Type::String.new
+      end
     end
+
+    def self.attribute_aliases = {}
+    def self.attribute_names = column_names
+    def self.attribute_types = @attribute_types ||= column_names.to_h { [_1, type_for_attribute(_1)] }
 
     # Simulate AR model responding to scopes
     def self.respond_to?(method, include_private = false)

@@ -2,9 +2,24 @@
 
 require "test_helper"
 
+# The warnings logged while the block runs (Lyra warns through Rails.logger).
+module RetentionWarnings
+  def warnings
+    io = StringIO.new
+    saved = Rails.logger
+    Rails.logger = Logger.new(io)
+    yield
+    io.string.lines.grep(/WARN/)
+  ensure
+    Rails.logger = saved
+  end
+end
+
 # Lyra::Retention: the policy's retention rules applied (opt-in), each
 # expired record getting its rule's on_expiry strategy.
 class RetentionTest < Minitest::Test
+  include RetentionWarnings
+
   MT = Lyra::ModeTransition
 
   def setup
@@ -115,6 +130,63 @@ class RetentionTest < Minitest::Test
     assert_equal "Ann", raw("SELECT name FROM users WHERE id = #{@user.id}")
   end
 
+  # :soft_delete is a rule's strategy when it names none, and a table with
+  # neither deleted_at nor discarded_at gives it nothing to set: every
+  # record past its period is kept. The executor says so once per model
+  # per run, not once per record.
+  def test_a_soft_delete_rule_without_its_column_warns_once_per_run
+    RetUser.create!(name: "Bob", email: "bob@example.com")
+    PamDsl.reset!
+    define_policy { keep_for 1.year } # no on_expiry: :soft_delete
+
+    2.times do
+      found = warnings { assert_equal %i[skipped skipped], apply(after: 2.years).actions.map(&:outcome) }
+      assert_equal 1, found.size, found.join
+      assert_match(/RetUser/, found.first)
+      assert_match(/:ret_policy/, found.first)
+      assert_match(/:soft_delete/, found.first)
+      assert_match(/2 records/, found.first)
+      assert_match(/deleted_at or discarded_at/, found.first)
+      assert_match(/on_expiry :anonymize or :hard_delete/, found.first)
+    end
+  end
+
+  def test_a_soft_delete_rule_with_nothing_due_does_not_warn_at_run_time
+    PamDsl.reset!
+    define_policy { keep_for 1.year; on_expiry :soft_delete }
+
+    assert_empty warnings { apply(after: 10.days) }
+  end
+
+  def test_other_strategies_do_not_warn
+    %i[anonymize hard_delete].each do |strategy|
+      PamDsl.reset!
+      define_policy { keep_for 1.year; on_expiry strategy }
+
+      assert_empty warnings { Lyra::Retention.check_rules!(models: [RetUser]) }, strategy
+      assert_empty warnings { apply(after: 2.years, dry_run: true) }, strategy
+    end
+  end
+
+  # The same check without a run, as Lyra makes it at boot for the models
+  # enrolled by then: the model, the rule and the fix, and the model's name
+  # returned.
+  def test_check_rules_names_a_soft_delete_rule_without_its_column
+    PamDsl.reset!
+    define_policy { keep_for 1.year }
+
+    found = warnings { assert_equal ["RetUser"], Lyra::Retention.check_rules!(models: [RetUser]) }
+    assert_equal 1, found.size
+    assert_match(/RetUser.*:soft_delete.*users has no deleted_at or discarded_at column/m, found.first)
+  end
+
+  def test_check_rules_ignores_a_model_without_a_rule
+    PamDsl.reset!
+    PamDsl.define_policy(:ret_policy) { field :email, type: :email }
+
+    assert_empty warnings { assert_empty Lyra::Retention.check_rules!(models: [RetUser]) }
+  end
+
   def test_rule_conditions_are_given_the_record
     PamDsl.reset!
     define_policy { keep_for 1.year; on_expiry :anonymize; self.when { |user| user.name != "Ann" } }
@@ -183,6 +255,8 @@ end
 # event. A record its model's default scope leaves out (soft-deleted) is
 # still retention's to act on, in every mode.
 class RetentionModesTest < Minitest::Test
+  include RetentionWarnings
+
   TABLE = :ret_items
 
   MODES = {
@@ -270,6 +344,18 @@ class RetentionModesTest < Minitest::Test
     assert_equal [:would_erase], apply(dry_run: true).actions.map(&:outcome)
   ensure
     Lyra.config.retention_anchors = {}
+  end
+
+  # A soft-delete rule on a table that has deleted_at acts, and nothing warns.
+  def test_a_soft_delete_rule_with_its_column_does_not_warn
+    define_policy(:soft_delete)
+    RetItem.create!(name: "Ann", email: "ann@example.com")
+
+    found = warnings do
+      assert_empty Lyra::Retention.check_rules!(models: [RetItem])
+      assert_equal [:soft_deleted], apply.actions.map(&:outcome)
+    end
+    assert_empty found
   end
 
   # lyra:retention:apply in ES-NoProj: what it would do, then what it did.

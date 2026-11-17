@@ -105,7 +105,13 @@ module PamDsl
       self
     end
 
-    # Define allowed purposes for this field
+    # Purposes this field is allowed for. It widens, it does not restrict:
+    # Policy#allowed?(field, purpose) holds when the field lists the purpose
+    # here OR the purpose lists the field (requires/optionally), so a field
+    # listed in allow_for(:p) is allowed for :p even if :p's own field lists
+    # do not name it, and a purpose that lists the field is allowed it even
+    # if allow_for does not name that purpose. To keep a field from a
+    # purpose, leave it out of both.
     def allow_for(*purpose_names)
       @purposes.concat(purpose_names.map(&:to_sym))
       self
@@ -123,7 +129,10 @@ module PamDsl
       self
     end
 
-    # Check if field is allowed for a purpose
+    # Whether this field's own allow_for list admits +purpose+ (true when
+    # the list is empty). Only the field's side: whether a purpose may use
+    # the field is Policy#allowed?, which also admits a purpose that lists
+    # the field.
     def allowed_for?(purpose)
       @purposes.empty? || @purposes.include?(purpose.to_sym)
     end

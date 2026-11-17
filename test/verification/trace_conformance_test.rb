@@ -87,12 +87,25 @@ module TraceConformance
           super.tap { Recorder.record(:publish) }
         end
       end)
-      # Only the statements of the write's own connection. Lyra creates its own
-      # tables on first use on a separate, short-lived connection when a
-      # transaction is open (Lyra.create_own_table), and that connection's
-      # COMMIT is reported on the same thread: on a fresh database the first
-      # ES-Async job would otherwise show a commit that is not the job's.
-      ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+    end
+
+    # The SQL listener lives only from a test's setup to its teardown. Left
+    # subscribed, it would run on every statement of every later test, on any
+    # thread and at any moment: a later test's establish_connection reaps a
+    # dead thread's connection after the old pool has left the handler, the
+    # reset's SET reaches this listener, and ActiveRecord::Base.connection_pool
+    # raises ConnectionNotDefined in that test (seed 23341).
+    def subscribe!
+      unsubscribe!
+      @subscriber = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+        # Nothing to record outside a capture on this thread; return before
+        # resolving any pool.
+        next unless Thread.current[:lyra_trace]
+        # Only the statements of the write's own connection. Lyra creates its
+        # own tables on first use on a separate, short-lived connection when a
+        # transaction is open (Lyra.create_own_table), and that connection's
+        # COMMIT is reported on the same thread: on a fresh database the first
+        # ES-Async job would otherwise show a commit that is not the job's.
         next unless payload[:connection].equal?(ActiveRecord::Base.connection_pool.active_connection)
 
         sql = payload[:sql].to_s
@@ -104,6 +117,11 @@ module TraceConformance
           Recorder.record(:commit)
         end
       end
+    end
+
+    def unsubscribe!
+      ActiveSupport::Notifications.unsubscribe(@subscriber) if @subscriber
+      @subscriber = nil
     end
 
     def table = @table
@@ -206,10 +224,12 @@ class TraceConformanceTest < Minitest::Test
       monitor_with_lyra
     end)
     TraceConformance::Recorder.install!("articles")
+    TraceConformance::Recorder.subscribe!
     clean
   end
 
   def teardown
+    TraceConformance::Recorder.unsubscribe!
     return unless defined?(TraceArticle)
 
     clear_enqueued_jobs

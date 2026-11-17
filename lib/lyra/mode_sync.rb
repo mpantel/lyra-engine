@@ -13,7 +13,8 @@ module Lyra
   # Each process remembers the latest applied row it has seen. At most every
   # config.mode_sync_interval seconds (default 5) it looks for a newer one,
   # and adopts its mode: the process that recorded it already passed the
-  # gate, so the gate is not run again; but an escalation is adopted only if the
+  # gate, so the gate is not run again; but a switch the gate checks (an
+  # escalation, or leaving a lagging mode) is adopted only if the
   # row names the certificate of the clean check that cleared it (or the operator
   # overrode the gate, which the row says), so one INSERT cannot move every
   # process to a mode whose stores were never compared (0.9.3 adopted any row;

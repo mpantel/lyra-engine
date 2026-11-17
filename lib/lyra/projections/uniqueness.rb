@@ -1,0 +1,745 @@
+# frozen_string_literal: true
+
+require "objspace"
+
+module Lyra
+  module Projections
+    # Rails' uniqueness validation (validates :x, uniqueness: true) in
+    # ES-NoProj, where a monitored model's table stays empty and its records
+    # are rebuilt from events.
+    #
+    # The validator builds an Active Record relation (Model.unscoped, the
+    # value compared as the connection compares it, the scope: columns, the
+    # conditions: lambda, and on update where.not(primary key: the record's))
+    # and asks it exists?. That query read the empty table, so every value
+    # passed and duplicates were saved; the table's unique index could not
+    # catch them, since no row is written.
+    #
+    # The relation is still built by Rails, unchanged, so that scope,
+    # conditions and case sensitivity follow Rails' own construction. Only
+    # its exists? is answered here, from the event-sourced records: its where
+    # clause is evaluated on every record of the model, each predicate as the
+    # database evaluates it (TypedValues: the value bound through the
+    # attribute's type, SQL's three-valued logic). What cannot be evaluated
+    # exactly raises UnsupportedQuery instead of passing or refusing a value
+    # on a guess: an SQL fragment or a subquery in conditions:, a join, a
+    # comparison with another column, LIKE, a string column with a collation
+    # of its own, an adapter other than PostgreSQL or SQLite for a string
+    # comparison. LOWER(column) = LOWER(value) (case_sensitive: false) and a
+    # citext column's equality are evaluated by the database's own LOWER, on
+    # the values the records hold (Predicates#lower_all).
+    #
+    # The check reads the records as Rails reads the table: through
+    # Model.unscoped, so a default scope (a soft delete) is not applied, and
+    # with the type condition of the class Rails chooses (under STI, the one
+    # that declared the validation). Other modes are untouched: the relation
+    # is extended only when the model reads from events.
+    #
+    # A check is a read and then a write, and two writers of one value can
+    # both check before either commits. In the table modes a unique index
+    # refuses the second INSERT. ES-NoProj writes no row, so the check takes
+    # a transaction-level advisory lock on (model, attribute, value) before it
+    # reads (lock!): the second writer's check waits until the first's
+    # transaction ends, and then reads its events. See lock! for its limits.
+    #
+    # The purpose check exemption (PurposeBoundReads::UniquenessExemption)
+    # still applies: the validation is part of writing the record.
+    module Uniqueness
+      LOCK = "lyra_unique"
+
+      class << self
+        # Whether +klass+'s reads are answered from events (ES-NoProj), as
+        # the model's read overrides decide it, Lyra's own table reads aside:
+        # whoever builds the relation, the table has no rows to answer from.
+        def reads_events?(klass)
+          klass.respond_to?(:lyra_monitored) && klass.lyra_monitored &&
+            Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
+        end
+
+        # LOWER of texts already sent to a database, per database, in this
+        # process (Predicates#lower_all): LOWER depends only on the text and
+        # the database's character type.
+        LOWER_MEMO_LIMIT = 200_000
+
+        def lower_memo(connection)
+          config = connection.pool.db_config
+          key = [config.env_name, config.name, config.database]
+          (@lower_memos ||= Concurrent::Map.new).compute_if_absent(key) { Concurrent::Map.new }
+        end
+
+        def remember_lower(memo, text, lowered)
+          memo.clear if memo.size >= LOWER_MEMO_LIMIT
+          memo[text] = lowered
+        end
+
+        # The current scope of +klass+ when it is a uniqueness check's
+        # relation: a named scope called in conditions: (-> { live }) runs
+        # under it (Relation#scoping), and Model.all must return it, as
+        # Active Record's all does, for the scope to build on it.
+        def scoped?(klass)
+          scope = klass.current_scope
+          scope.is_a?(Relation) && scope.model == klass
+        end
+
+        # Whether a record matches +relation+'s where clause: its exists?.
+        def exists?(relation)
+          klass = relation.model
+          refuse_unsupported!(relation)
+          return false if relation.limit_value&.zero?
+
+          predicates = Predicates.new(klass)
+          begin
+            test = predicates.compile_all(relation.where_clause.send(:predicates))
+          rescue Predicates::LiteralOutOfRange
+            # Active Record cannot quote the literal; select_all rescues the
+            # RangeError and answers no row: the value is not taken.
+            return false
+          end
+          Genesis.first_use(klass)
+          records = Snapshot.records(klass)
+          predicates.prepare(records)
+          records.any? { |attributes| true.equal?(test.call(attributes)) }
+        end
+
+        # A transaction-level advisory lock on (model, attribute, value),
+        # taken before the check reads, held until the writer's transaction
+        # ends: a second writer of the value waits in its check until the
+        # first commits or rolls back, and then reads the first's events.
+        #
+        # The value is the one the check binds, as the column holds it:
+        # the attribute's type serializes it ("250" and 250.00 on a decimal
+        # are one value, a time is taken in UTC, -0.0 is 0.0, a character(n)
+        # value without its trailing spaces), under the column an
+        # alias_attribute names. Under case_sensitive: false on a text
+        # column, and on a citext column, the key is computed by the
+        # database from LOWER(value), as the check compares: values that
+        # differ only in case take one lock. The scope: and conditions: are
+        # left out of the key, which makes it coarser (writers of one value
+        # in two scopes wait for each other), never finer; keys are hashed
+        # to 32 bits (hashtext), so two values may rarely share one.
+        #
+        # Not taken for a persisted record whose attribute and scope columns
+        # did not change, with no conditions: (ValidatorPatch#lyra_claims?):
+        # it holds a value committed before (or written earlier in its own
+        # transaction, under the lock that write took), and claims nothing a
+        # second writer could also claim. Rails still runs its check whenever it would
+        # (validation_needed?, which runs it for every save under
+        # case_sensitive:), and it is still answered.
+        #
+        # Limits. PostgreSQL only (Lyra::AdvisoryLock; SQLite serialises
+        # writers). Taken only inside a transaction (save, create, update
+        # run their validations in one); valid? alone, then save(validate:
+        # false), is a race in every mode. Under REPEATABLE READ or
+        # SERIALIZABLE a transaction whose snapshot was taken before the
+        # first writer committed does not see its events after the wait
+        # (PostgreSQL's default, READ COMMITTED, takes a new snapshot per
+        # statement). Two transactions that each claim the same two values
+        # in opposite orders deadlock, as two inserts of those values into a
+        # unique index do, and PostgreSQL fails one of them
+        # (ActiveRecord::Deadlocked); a lock key coarser than the index (a
+        # scope or conditions left out, a hash shared) can make two writers
+        # wait, or deadlock, where an index on the scoped columns would not.
+        def lock!(klass, attribute, value, case_insensitive:)
+          klass.with_connection do |connection|
+            next unless connection.transaction_open?
+
+            name = klass.attribute_aliases.fetch(attribute.to_s, attribute.to_s)
+            prefix = "#{LOCK}/#{Lyra.stream_owner_name(klass)}/#{name}"
+            text = lowered_key_text(klass, name, value) if case_insensitive || citext?(klass, name)
+            if text && connection.adapter_name.match?(/postgres/i)
+              connection.execute("SELECT pg_advisory_xact_lock(hashtext(#{connection.quote("#{prefix}/")} || LOWER(#{connection.quote(text)})))")
+            else
+              Lyra::AdvisoryLock.xact_lock(connection, "#{prefix}#{canonical(klass, name, value)}", purpose: "uniqueness check")
+            end
+          end
+        end
+
+        # A citext column, wherever its type lives (public.citext, a schema
+        # outside the search path).
+        def citext?(klass, name)
+          column = klass.columns_hash[name]
+          return false unless column
+
+          column.type == :citext || column.sql_type.to_s.match?(/(\A|\.)"?citext"?\z/)
+        end
+
+        private
+
+        # The text LOWER is applied to in the lock's key, for a value of a
+        # text column (nil otherwise, or for NULL: the canonical key then).
+        def lowered_key_text(klass, name, value)
+          column = klass.columns_hash[name]
+          return nil unless column && %i[string text citext].include?(column.type)
+
+          value = TypedValues.normalize(value)
+          type = klass.type_for_attribute(name)
+          return nil if value.nil? || !type.serializable?(value)
+
+          text = type.serialize(value)&.to_s
+          TypedValues.schema(klass).blank_padded.include?(name) ? TypedValues.unpadded(text) : text
+        end
+
+        # "/" and the value as the column holds it; "#null" for NULL.
+        def canonical(klass, name, value)
+          type = klass.type_for_attribute(name)
+          value = TypedValues.normalize(value)
+          bound = value.nil? || !type.serializable?(value) ? nil : type.serialize(value)
+          return "#null" if bound.nil?
+
+          bound = TypedValues.unpadded(bound) if TypedValues.schema(klass).blank_padded.include?(name)
+          bound = bound.utc if bound.is_a?(Time)
+          bound = 0.0 if bound.is_a?(Float) && bound.zero?
+          bound = bound.strftime("%Y-%m-%d %H:%M:%S.%N") if bound.is_a?(Time)
+          "/#{bound}"
+        rescue StandardError
+          "/#{value.inspect}"
+        end
+
+        def refuse_unsupported!(relation)
+          used = {
+            "joins" => relation.joins_values.any? || relation.left_outer_joins_values.any?,
+            "eager loading" => relation.eager_loading?,
+            "group" => relation.group_values.any?,
+            "having" => !relation.having_clause.empty?,
+            "offset" => !relation.offset_value.nil?,
+            "from" => !relation.from_clause.empty?
+          }.select { |_, present| present }.keys
+          return if used.empty?
+
+          raise UnsupportedQuery.new(relation.model, "a uniqueness check (it uses #{used.join(', ')})")
+        end
+      end
+
+      # Every record of a model, as CachedProjection.all reads them, for the
+      # checks: each stream's last event is read (one query), and a copy of
+      # the records, stamped as the projection cache's entries are, is kept
+      # in this process. Only the streams whose last event is not the stamp
+      # are read from the cache or rebuilt (CachedProjection.entries_for);
+      # the others are used as they are. CachedProjection.all reads every
+      # entry from the cache, which copies each (Marshal) on every read: at
+      # 3,000 records that was 55 of a check's 94 ms.
+      #
+      # Each check reads every entry of the copy once, into a hash of its
+      # own, decides from it which are stale, and answers from it alone:
+      # another thread replacing an entry meanwhile cannot change what this
+      # check sees. An entry is used only while its stamp is its stream's
+      # last event as this transaction sees it. The copy can hold an entry
+      # built inside a transaction from that transaction's own uncommitted
+      # events (the projection cache's shared entries can too): it is
+      # stamped with an event no other transaction sees until it commits,
+      # and one that rolls back is never any stream's last event, so no
+      # other check uses it; a check after the commit uses it, and then it
+      # is committed state.
+      #
+      # Bounded: a model with more than LIMIT streams is read through
+      # CachedProjection.all, and the copies of all models together are kept
+      # under BYTES (as ObjectSpace measures their records), beside the
+      # projection cache's own MEMORY_CACHE_BYTES: past it the copies used
+      # least recently are dropped. A copy is dropped and rebuilt after
+      # EXPIRES_IN, as the projection cache's memory entries expire, and
+      # when its model's attribute types change (reset_column_information,
+      # a migration) or the projection cache's CACHE_VERSION does.
+      module Snapshot
+        LIMIT = 20_000
+        BYTES = 32.megabytes
+        EXPIRES_IN = CachedProjection::DEFAULT_EXPIRES_IN
+
+        # One model's copy: { id => [stamp, frozen attributes or nil] }.
+        Copy = Struct.new(:entries, :types, :version, :born, :used, :bytes)
+
+        @copies = {} # stream owner (a class) => Copy
+        @lock = Mutex.new
+
+        class << self
+          def records(klass)
+            versions = CachedProjection.stream_versions_for(klass)
+            return CachedProjection.all(klass) if versions.size > LIMIT
+
+            copy = copy_for(klass)
+            local = versions.each_key.to_h { |id| [id, copy.entries[id]] }
+            stale = versions.reject { |id, version| local[id]&.first == version }
+            if stale.any?
+              CachedProjection.entries_for(klass, stale).each do |id, (version, attributes)|
+                local[id] = [version, frozen(attributes)].freeze
+              end
+              keep(copy, local, stale.keys)
+            end
+            prune(copy, versions)
+            local.each_value.filter_map do |entry|
+              attributes = entry&.last
+              attributes if attributes && CachedProjection.of_class?(klass, attributes)
+            end
+          end
+
+          # Forget every copy (tests).
+          def reset!
+            @lock.synchronize { @copies = {} }
+          end
+
+          # The bytes the copies hold, as counted (tests, monitoring).
+          def bytes = @lock.synchronize { @copies.each_value.sum(&:bytes) }
+
+          private
+
+          # One copy per table: the stream owner (an STI base class). A new
+          # one when it has expired or its model's types have changed.
+          def copy_for(klass)
+            owner = klass.respond_to?(:base_class) ? klass.base_class : klass
+            now = monotonic
+            @lock.synchronize do
+              copy = @copies[owner]
+              if copy.nil? || !copy.types.equal?(owner.attribute_types) || copy.version != CachedProjection::CACHE_VERSION ||
+                 now - copy.born > EXPIRES_IN.to_f
+                copy = @copies[owner] = Copy.new(Concurrent::Map.new, owner.attribute_types, CachedProjection::CACHE_VERSION, now, now, 0)
+              end
+              copy.used = now
+              copy
+            end
+          end
+
+          # The entries this check read again, into the shared copy, within
+          # the byte budget.
+          def keep(copy, local, ids)
+            @lock.synchronize do
+              ids.each do |id|
+                entry = local[id]
+                previous = copy.entries[id]
+                copy.bytes += size_of(entry) - (previous ? size_of(previous) : 0)
+                copy.entries[id] = entry
+              end
+              enforce_budget(copy)
+            end
+          end
+
+          # Past BYTES, drop the copies used least recently, this one last.
+          def enforce_budget(current)
+            total = @copies.each_value.sum(&:bytes)
+            return if total <= BYTES
+
+            (@copies.reject { |_, copy| copy.equal?(current) }.sort_by { |_, copy| copy.used } +
+              @copies.select { |_, copy| copy.equal?(current) }.to_a).each do |owner, copy|
+              break if total <= BYTES
+
+              total -= copy.bytes
+              @copies.delete(owner)
+            end
+          end
+
+          # Streams that are gone (an erasure that rewrote them) are dropped
+          # once the copy has grown well past the model's streams.
+          def prune(copy, versions)
+            return unless copy.entries.size > (versions.size * 2) + 100
+
+            @lock.synchronize do
+              copy.entries.each_key do |id|
+                next if versions.key?(id)
+
+                removed = copy.entries.delete(id)
+                copy.bytes -= size_of(removed) if removed
+              end
+            end
+          end
+
+          def frozen(attributes)
+            return nil unless attributes
+
+            attributes.each_value { |value| value.freeze if value.is_a?(String) }
+            attributes.freeze
+          end
+
+          # The memory an entry holds: its hash and its strings.
+          def size_of(entry)
+            attributes = entry&.last
+            return 40 unless attributes
+
+            attributes.sum(ObjectSpace.memsize_of(attributes)) do |key, value|
+              ObjectSpace.memsize_of(key) + (value.is_a?(String) ? ObjectSpace.memsize_of(value) : 0)
+            end
+          end
+
+          def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        end
+      end
+
+      # Extends the relation a uniqueness check builds (ValidatorPatch): its
+      # exists? is answered from the event-sourced records. The relations
+      # the validator derives from it (where, where.not, the conditions)
+      # are clones and keep the extension.
+      module Relation
+        def exists?(conditions = :none)
+          return super unless conditions == :none && !null_relation? && Uniqueness.reads_events?(model)
+
+          Uniqueness.exists?(self)
+        end
+      end
+
+      # Prepended to ActiveRecord::Validations::UniquenessValidator: the
+      # relation Rails builds for the check is extended (Relation), and the
+      # advisory lock taken, when the model reads from events. In other modes
+      # the relation is Rails' own.
+      module ValidatorPatch
+        RECORD = :lyra_uniqueness_record
+
+        # The record being validated, for build_relation (which Rails does
+        # not pass it): whether its save claims a value (lyra_claims?).
+        def validate_each(record, attribute, value)
+          previous = Thread.current[RECORD]
+          Thread.current[RECORD] = record
+          super
+        ensure
+          Thread.current[RECORD] = previous
+        end
+
+        private
+
+        def build_relation(klass, attribute, value)
+          relation = super
+          return relation unless Uniqueness.reads_events?(klass)
+          # An unboundable value (out of the column's range) matches no row.
+          return relation if relation.null_relation?
+
+          if lyra_claims?(Thread.current[RECORD], attribute)
+            case_insensitive = options.key?(:case_sensitive) && !options[:case_sensitive]
+            Uniqueness.lock!(klass, attribute, value, case_insensitive: case_insensitive)
+          end
+          relation.extending!(Relation)
+        end
+
+        # Whether saving +record+ claims its value: a new record, one whose
+        # attribute or scope columns change, or any record checked under
+        # conditions: (which may read any of its attributes). A persisted
+        # record that keeps them holds a value already committed.
+        def lyra_claims?(record, attribute)
+          return true if record.nil? || !record.persisted? || options[:conditions]
+
+          aliases = record.class.attribute_aliases
+          resolve_attributes(record, Array(options[:scope]) + [attribute]).any? do |name|
+            record.attribute_changed?(aliases.fetch(name.to_s, name.to_s))
+          end
+        end
+      end
+
+      # A relation's where clause compiled into a test of a record's event
+      # attributes (CachedProjection's), answering as SQL does: true, false
+      # or nil (unknown, which a WHERE does not select).
+      class Predicates
+        # An Arel literal out of its column's range (#literal).
+        class LiteralOutOfRange < StandardError; end
+
+        STRING_ADAPTERS = /postgres|sqlite/i
+
+        def initialize(klass)
+          @klass = klass
+          @reader = TypedValues::EventReader.new(klass)
+          @lowered = [] # [name, bound text, cell] for each LOWER comparison
+        end
+
+        # The AND of +predicates+.
+        def compile_all(predicates)
+          tests = predicates.map { compile(_1) }
+          ->(attributes) { TypedValues.all_of(tests.map { _1.call(attributes) }) }
+        end
+
+        # The values the LOWER comparisons need, worked out by the database
+        # once for the records to be tested.
+        def prepare(records)
+          @lowered.each do |name, bound, cell|
+            values = records.filter_map { |attributes| text(name, @reader.read(attributes, name)) }.uniq
+            lowered = lower_all([bound, *values])
+            cell[:target] = lowered.first
+            cell[:values] = values.zip(lowered.drop(1)).to_h
+          end
+        end
+
+        private
+
+        def compile(node)
+          case node
+          when Arel::Nodes::And then compile_all(node.children)
+          when Arel::Nodes::Or
+            tests = node.children.map { compile(_1) }
+            ->(attributes) { TypedValues.any_of(tests.map { _1.call(attributes) }) }
+          when Arel::Nodes::Grouping then compile(node.expr)
+          when Arel::Nodes::Not then negated(compile(node.expr))
+          when Arel::Nodes::Equality then equality(node)
+          when Arel::Nodes::NotEqual then not_equal(node)
+          when Arel::Nodes::HomogeneousIn then homogeneous_in(node)
+          when Arel::Nodes::In then in_list(node, negate: false)
+          when Arel::Nodes::NotIn then in_list(node, negate: true)
+          when Arel::Nodes::Between then between(node)
+          when Arel::Nodes::GreaterThanOrEqual then bounded(node) { |value| value.. }
+          when Arel::Nodes::LessThanOrEqual then bounded(node) { |value| ..value }
+          when Arel::Nodes::LessThan then bounded(node) { |value| ...value }
+          when Arel::Nodes::GreaterThan then greater_than(node)
+          else refuse(node)
+          end
+        end
+
+        # column = value, IS NULL when the bound value is nil (Arel's rule),
+        # no row when it is unboundable; LOWER(column) = LOWER(value).
+        def equality(node)
+          return lower_equality(node) if lower?(node.left) && lower?(node.right)
+
+          name = column(node.left, node)
+          return ->(_) { false } if unboundable?(node.right)
+          return is_null(name) if node.right.nil?
+          return citext_equality(name, node.right, node) if Uniqueness.citext?(@klass, name)
+
+          condition(name, value(node.right, node))
+        end
+
+        def not_equal(node)
+          name = column(node.left, node)
+          return ->(_) { true } if unboundable?(node.right)
+          return negated(is_null(name)) if node.right.nil?
+          return negated(citext_equality(name, node.right, node)) if Uniqueness.citext?(@klass, name)
+
+          negated(condition(name, value(node.right, node)))
+        end
+
+        # IN or NOT IN over the values the attribute's type binds
+        # (HomogeneousIn#casted_values: a value it cannot bind, or binds as
+        # NULL, is left out); with none, IN (NULL): unknown for every row.
+        def homogeneous_in(node)
+          name = column(node.attribute, node)
+          refuse(node) if Uniqueness.citext?(@klass, name)
+          type = @klass.type_for_attribute(name)
+          values = node.values.select { type.serializable?(_1) && !type.serialize(_1).nil? }
+          return ->(_) { nil } if values.empty?
+
+          test = condition(name, values)
+          node.type == :in ? test : negated(test)
+        end
+
+        # IN (...) or NOT IN (...) built with Arel: unboundable values are
+        # left out (an empty list is 1=0, or 1=1 for NOT IN), and each other
+        # is bound as it is, NULL included (x IN (1, NULL) is unknown where
+        # x is not 1), unlike a hash condition's list.
+        def in_list(node, negate:)
+          name = column(node.left, node)
+          refuse(node) unless node.right.is_a?(Array)
+          refuse(node) if Uniqueness.citext?(@klass, name)
+          tests = node.right.reject { unboundable?(_1) }.map { |bound| in_member(name, bound, node) }
+          return ->(_) { negate } if tests.empty?
+
+          test = ->(attributes) { TypedValues.any_of(tests.map { _1.call(attributes) }) }
+          negate ? negated(test) : test
+        end
+
+        # One member of an Arel IN list, compared with =: a value bound as
+        # NULL (nil, or one its type serializes to nil) is unknown.
+        def in_member(name, bound, node)
+          raw = value(bound, node)
+          type = @klass.type_for_attribute(name)
+          return ->(_) { nil } if raw.nil? || (type.serializable?(raw) && type.serialize(raw).nil?)
+
+          condition(name, raw)
+        end
+
+        def between(node)
+          name = column(node.left, node)
+          refuse(node) unless node.right.is_a?(Arel::Nodes::And) && node.right.children.size == 2
+          low, high = node.right.children.map { |bound| ranged_value(bound, node) }
+          condition(name, low..high)
+        end
+
+        def bounded(node)
+          name = column(node.left, node)
+          condition(name, yield(ranged_value(node.right, node)))
+        end
+
+        # > value: at least value, and not equal to it.
+        def greater_than(node)
+          name = column(node.left, node)
+          bound = ranged_value(node.right, node)
+          at_least = condition(name, bound..)
+          equal = condition(name, bound)
+          ->(attributes) { TypedValues.all_of([at_least.call(attributes), negated(equal).call(attributes)]) }
+        end
+
+        def condition(name, value)
+          string_comparison!(name)
+          compiled = TypedValues.condition(@klass, name, value)
+          ->(attributes) { compiled.evaluate(@reader, attributes) }
+        end
+
+        def is_null(name)
+          ->(attributes) { @reader.read(attributes, name).nil? }
+        end
+
+        def negated(test)
+          lambda do |attributes|
+            result = test.call(attributes)
+            result.nil? ? nil : !result
+          end
+        end
+
+        # LOWER(column) = LOWER(value): the database lowers the value and the
+        # values the records hold (prepare), and they are compared here.
+        def lower_equality(node)
+          name = column(single_argument(node.left, node), node)
+          bound = single_argument(node.right, node)
+          return ->(_) { false } if unboundable?(bound)
+          return is_null(name) if bound.nil?
+
+          lowered(name, database_text(bound, node))
+        end
+
+        # A citext column's = is case-insensitive: LOWER on both sides.
+        def citext_equality(name, bound, node)
+          lowered(name, database_text(bound, node))
+        end
+
+        def lowered(name, bound_text)
+          string_comparison!(name)
+          return ->(_) { nil } if bound_text.nil?
+
+          cell = {}
+          @lowered << [name, bound_text, cell]
+          lambda do |attributes|
+            stored = text(name, @reader.read(attributes, name))
+            next nil if stored.nil?
+
+            cell[:values].fetch(stored) == cell[:target]
+          end
+        end
+
+        # A string comparison is the database's: refused where it may not be
+        # Ruby's (a collation of the column's own; MySQL's case-insensitive
+        # default collations).
+        def string_comparison!(name)
+          column = @klass.columns_hash[name]
+          return unless column && %i[string text citext].include?(column.type)
+
+          if column.respond_to?(:collation) && column.collation
+            raise UnsupportedQuery.new(@klass, "a uniqueness check on #{name}, which has a collation of its own (#{column.collation})")
+          end
+          adapter = @klass.with_connection(&:adapter_name)
+          return if adapter.match?(STRING_ADAPTERS)
+
+          raise UnsupportedQuery.new(@klass, "a uniqueness check comparing strings on #{adapter}")
+        end
+
+        # The text LOWER(column) reads for an attribute's value: the text the
+        # column holds, a character(n) value without its trailing spaces
+        # (its cast to text drops them).
+        def text(name, value)
+          return nil if value.nil?
+
+          serialized = @klass.type_for_attribute(name).serialize(value)&.to_s
+          serialized && TypedValues.schema(@klass).blank_padded.include?(name) ? TypedValues.unpadded(serialized) : serialized
+        end
+
+        # LOWER of each of +texts+, as the database computes it. Texts
+        # lowered before (per database, in this process) are not sent
+        # again; the rest go in one query (PostgreSQL: one array
+        # parameter; SQLite: one SELECT of LOWER(...) per 500).
+        def lower_all(texts)
+          @klass.with_connection do |connection|
+            memo = Uniqueness.lower_memo(connection)
+            known = {}
+            texts.each { |text| (lowered = memo[text]) ? known[text] = lowered : nil }
+            missing = texts.reject { known.key?(_1) }.uniq
+            if missing.any?
+              lower_query(connection, missing).each_with_index do |lowered, i|
+                known[missing[i]] = lowered
+                Uniqueness.remember_lower(memo, missing[i], lowered)
+              end
+            end
+            texts.map { known.fetch(_1) }
+          end
+        end
+
+        def lower_query(connection, texts)
+          if connection.adapter_name.match?(/postgres/i)
+            array = PG::TextEncoder::Array.new.encode(texts)
+            connection.select_values(
+              "SELECT LOWER(t.x) FROM unnest(#{connection.quote(array)}::text[]) WITH ORDINALITY AS t(x, i) ORDER BY t.i",
+              "Lyra uniqueness LOWER"
+            )
+          else
+            texts.each_slice(500).flat_map do |slice|
+              connection.select_rows("SELECT #{slice.map { "LOWER(#{connection.quote(_1)})" }.join(', ')}", "Lyra uniqueness LOWER").first
+            end
+          end
+        end
+
+        # The column an attribute node names: one of this model's own table.
+        def column(node, predicate)
+          unless node.is_a?(Arel::Attributes::Attribute) && node.relation.respond_to?(:name) &&
+                 node.relation.name.to_s == @klass.table_name.to_s && !node.relation.is_a?(Arel::Nodes::TableAlias)
+            refuse(predicate)
+          end
+          TypedValues.attribute_name(@klass, node.name)
+        end
+
+        def lower?(node)
+          node.is_a?(Arel::Nodes::NamedFunction) && node.name.to_s.casecmp?("LOWER") && node.expressions.size == 1
+        end
+
+        def single_argument(node, predicate)
+          refuse(predicate) unless lower?(node)
+          node.expressions.first
+        end
+
+        def unboundable?(node)
+          node.respond_to?(:unboundable?) && node.unboundable?
+        end
+
+        # The value a bound node carries, before its type casts it (the
+        # condition casts it, as Active Record does). A literal quoted
+        # without a type, another column or an expression is refused.
+        def value(node, predicate)
+          return literal(node) if node.is_a?(Arel::Nodes::Casted)
+
+          bound_attribute(node, predicate).value_before_type_cast
+        end
+
+        # A literal Arel quotes through its attribute's type (attr.in([..])):
+        # one out of the type's range cannot be quoted, and the query is not
+        # run (LiteralOutOfRange).
+        def literal(node)
+          node.value_for_database
+          node.value
+        rescue ::RangeError
+          raise LiteralOutOfRange
+        end
+
+        def ranged_value(node, predicate)
+          refuse(predicate) if unboundable?(node)
+          value(node, predicate)
+        end
+
+        # The text the database is given for a bound value.
+        def database_text(node, predicate)
+          return literal(node).then { node.value_for_database&.to_s } if node.is_a?(Arel::Nodes::Casted)
+
+          bound_attribute(node, predicate).value_for_database&.to_s
+        end
+
+        # The attribute a bound value is (Active Record passes it to Arel as
+        # it is, or in a BindParam).
+        def bound_attribute(node, predicate)
+          bound = node.is_a?(Arel::Nodes::BindParam) ? node.value : node
+          refuse(predicate) unless bound.is_a?(ActiveModel::Attribute)
+          bound
+        end
+
+        def refuse(node)
+          described = node.respond_to?(:to_sql) ? (node.to_sql rescue node.class.name) : node.class.name
+          raise UnsupportedQuery.new(@klass, "a uniqueness check's condition (#{described.to_s[0, 80]})")
+        end
+      end
+
+      def self.install!
+        validator = ActiveRecord::Validations::UniquenessValidator
+        validator.prepend(ValidatorPatch) unless validator.ancestors.include?(ValidatorPatch)
+      end
+    end
+  end
+end
+
+# Under Rails the engine installs the validator patch (Lyra::Engine).
+if defined?(ActiveSupport)
+  ActiveSupport.on_load(:active_record) { Lyra::Projections::Uniqueness.install! } unless defined?(Lyra::Engine)
+end

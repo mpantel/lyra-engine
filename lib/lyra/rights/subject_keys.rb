@@ -110,7 +110,7 @@ module Lyra
 
             attributes = state.transform_keys(&:to_s).slice(*model.column_names)
             attributes[Lyra.key_column(model)] ||= id
-            model.instantiate(attributes)
+            model.instantiate(Lyra::Projections::TypedValues.database_attributes(model, attributes))
           end
         end
 

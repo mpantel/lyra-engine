@@ -232,7 +232,10 @@ class RightsStoreTest < Minitest::Test
           )
           :appended
         rescue PamDsl::RightsConcurrencyError
-          ActiveRecord::Base.connection.select_value("SELECT 1") # the transaction is still usable
+          # The transaction is still usable. with_connection, not .connection:
+          # a permanent lease would outlive this thread and be reset by a later
+          # test's establish_connection.
+          ActiveRecord::Base.with_connection { |c| c.select_value("SELECT 1") }
           :refused
         end
       end

@@ -86,7 +86,9 @@ class AssociationConditionsTest < Minitest::Test
   def test_several_records_nil_and_negation
     assert_equal %w[A1 A2 B1], titles(AcArticle.where(author: [@ann, @bob]))
     assert_equal %w[N1], titles(AcArticle.where(author: nil))
-    assert_equal %w[B1 N1], titles(AcArticle.where.not(author: @ann))
+    # author_id != ann's id, as SQL decides it: N1's NULL is unknown, not
+    # different, so N1 is left out, as Active Record leaves it out on a table.
+    assert_equal %w[B1], titles(AcArticle.where.not(author: @ann))
   end
 
   def test_a_has_many_condition_is_refused_as_activerecord_would_need_a_join
