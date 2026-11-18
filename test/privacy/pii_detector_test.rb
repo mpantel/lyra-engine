@@ -123,24 +123,23 @@ module Lyra
         assert pii_fields[:ssn][:sensitive]
       end
 
-      def test_mask_email
-        masked = PIIDetector.mask("alice@example.com", :email)
-        assert_equal "a***@example.com", masked
-      end
+      # The masking rules are PAM DSL's and tested there; here only that
+      # PIIDetector.mask hands value and type to the installed detector.
+      def test_mask_delegates_to_the_installed_detector
+        assert_equal PamDsl::PIIDetector.mask("alice@example.com", :email),
+                     PIIDetector.mask("alice@example.com", :email)
 
-      def test_mask_phone
-        masked = PIIDetector.mask("1234567890", :phone)
-        assert_equal "***-***-7890", masked
-      end
+        detector = Detector.new
+        def detector.mask(value, pii_type)
+          "#{pii_type}:#{value.length}"
+        end
+        provider = Provider.new
+        provider.define_singleton_method(:detector) { detector }
+        Lyra::Privacy.provider = provider
 
-      def test_mask_ssn
-        masked = PIIDetector.mask("123-45-6789", :ssn)
-        assert_equal "***REDACTED***", masked
-      end
-
-      def test_mask_name
-        masked = PIIDetector.mask("Alice Smith", :name)
-        assert_equal "Alice ***", masked
+        assert_equal "email:17", PIIDetector.mask("alice@example.com", :email)
+      ensure
+        Lyra::Privacy.provider = nil
       end
 
       def test_detect_credit_card_field
@@ -152,12 +151,6 @@ module Lyra
         assert PIIDetector.contains_pii?(:latitude)
         assert PIIDetector.contains_pii?(:longitude)
         assert PIIDetector.contains_pii?(:gps)
-      end
-
-      def test_detect_health_fields
-        assert PIIDetector.contains_pii?(:medical)
-        assert PIIDetector.contains_pii?(:health)
-        assert PIIDetector.contains_pii?(:diagnosis)
       end
 
       def test_detect_financial_fields

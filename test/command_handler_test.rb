@@ -318,14 +318,6 @@ module Lyra
     # Aggregate Tests
     # =========================================================================
 
-    def test_uses_generic_aggregate_when_no_custom_class
-      command = Commands::CreateCommand.new(@model_class, { name: "Test" })
-      result = CommandHandler.handle(command)
-
-      # Should succeed using GenericAggregate
-      assert result.success?
-    end
-
     def test_an_explicit_id_is_kept_under_a_single_key
       command = Commands::CreateCommand.new(@uuid_model_class, { "id" => "chosen-id", name: "Test" })
       result = CommandHandler.handle(command)

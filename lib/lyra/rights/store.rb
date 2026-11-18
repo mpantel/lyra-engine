@@ -64,6 +64,8 @@ module Lyra
         @snapshot = {}.freeze
         @versions = {}.freeze
         @checked_at = nil
+        @overlays = {}.freeze
+        @overlays_generation = 0
         @generation = 0
         @table_ready = false
         init_pending
@@ -128,16 +130,15 @@ module Lyra
       # Every request in force, read afresh.
       def active
         refresh!
-        current = @snapshot
         pending = pending_here
+        current = snapshot_here(pending)
         current = current.merge(pending.to_h { |key| [key, load_in_force(key)] }) if pending
         current.values.flatten
       end
 
       def active_for(keys)
-        refresh_if_due
-        snapshot = @snapshot
-        pending = pending_here
+        pending = refresh_if_due
+        snapshot = snapshot_here(pending)
         Array(keys).flat_map do |key|
           key = key.to_s
           pending&.include?(key) ? load_in_force(key) : snapshot.fetch(key, [])
@@ -153,9 +154,8 @@ module Lyra
       # this connection's open transaction wrote): what Condition 6 asks
       # before it resolves a subject's keys (PamDsl::Rights.could_apply?).
       def in_force_requests
-        refresh_if_due
-        pending = pending_here
-        current = @snapshot
+        pending = refresh_if_due
+        current = snapshot_here(pending)
         current = current.merge(pending.to_h { |key| [key, load_in_force(key)] }) if pending
         current.values.flatten
       end
@@ -172,12 +172,13 @@ module Lyra
       # The subject keys with a request in force (the snapshot's, and those
       # this connection's open transaction wrote), for model-wide queries.
       def keys_in_force
-        refresh_if_due
-        pending = pending_here
-        keys = @snapshot.keys
+        pending = refresh_if_due
+        keys = snapshot_here(pending).keys
         return keys unless pending
 
-        (keys + pending.select { |key| load_in_force(key).any? }).uniq
+        # A pending key is in force as this transaction left it, not as the
+        # snapshot holds it (a restriction it lifted is not).
+        (keys - pending.to_a) + pending.select { |key| load_in_force(key).any? }
       end
 
       # Which of +keys+ have any request recorded (in force or not): one
@@ -196,11 +197,15 @@ module Lyra
 
       # ── The snapshot ──
 
-      # Read the committed requests in force again. Not from a connection
-      # whose open transaction recorded rights: that would put what may yet
-      # roll back in the snapshot every thread reads.
+      # Read the committed requests in force again. From a connection whose
+      # open transaction recorded rights, into a snapshot of that
+      # connection's own (refresh_around): what it reads may be its own
+      # uncommitted rights, or, under REPEATABLE READ or SERIALIZABLE, the
+      # database as its transaction began, and neither may reach the
+      # snapshot every thread reads.
       def refresh!
-        return self if pending_here
+        pending = pending_here
+        return refresh_around(pending) if pending
 
         @mutex.synchronize do
           # One row first: how many requests are in force and when the last
@@ -237,6 +242,10 @@ module Lyra
       # The next check reads the table again.
       def invalidate!
         @checked_at = nil
+        @mutex.synchronize do
+          @overlays = {}.freeze
+          @overlays_generation += 1
+        end
       end
 
       # ── Rebuild ──
@@ -265,13 +274,76 @@ module Lyra
 
       private
 
+      # Refreshes what this connection answers from when it is due, and
+      # returns the keys its open transaction wrote (pending_here), or nil.
+      # A connection without rights of its own refreshes the shared snapshot,
+      # as before; one with them, its own (refresh_around), on the same
+      # schedule.
       def refresh_if_due
-        return if Rights.current?(@checked_at)
-
-        refresh!
+        pending = pending_here
+        if pending
+          refresh_around(pending) if !Rights.current?(@overlays[current_connection]&.last)
+        elsif !Rights.current?(@checked_at)
+          refresh!
+        end
+        pending
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished
-        nil
+        pending
       end
+
+      # What this connection answers from: the shared snapshot, or, while its
+      # open transaction has rights of its own (+pending+), the snapshot
+      # refresh_around read for it.
+      def snapshot_here(pending)
+        return @snapshot unless pending
+
+        @overlays[current_connection]&.first || @snapshot
+      end
+
+      # refresh! from a connection whose open transaction recorded rights for
+      # +pending+ keys: the requests in force of every other subject, as
+      # this connection reads them, into a snapshot used by this connection
+      # only (snapshot_here), until its transaction ends (settled clears it)
+      # or it is due again. Its pending keys are read afresh by the readers.
+      # The shared snapshot is not written: under READ COMMITTED this
+      # connection reads what others committed, but under REPEATABLE READ or
+      # SERIALIZABLE it reads the database as its transaction began, and
+      # another thread must not lose a restriction committed since. It used
+      # to return at once, and a snapshot another write had just left
+      # without a subject (settled) stayed so until the transaction ended: a
+      # restriction committed before it began was not in force inside it.
+      #
+      # The rows are read outside the mutex. A write settled meanwhile (by
+      # another thread: invalidate! moves @overlays_generation) may be
+      # missing from what was read, so the read is made again; a read that
+      # still raced is used for this check only (no read time: the next
+      # check reads again), never kept as fresh.
+      def refresh_around(pending, attempts = OVERLAY_READS)
+        generation = @overlays_generation
+        shared = @snapshot
+        versions = @versions
+        overlay = {}
+        in_force_markers.each do |key, marker|
+          next if pending.include?(key)
+
+          cached = shared[key]
+          in_force = cached && versions[key] == marker ? cached : load_in_force(key)
+          overlay[key] = in_force.freeze unless in_force.empty?
+        end
+        connection = current_connection
+        stored = @mutex.synchronize do
+          raced = @overlays_generation != generation
+          next false if raced && attempts > 1
+
+          @overlays = @overlays.merge(connection => [overlay.freeze, raced ? nil : Rights.now]).freeze
+          true
+        end
+        stored ? self : refresh_around(pending, attempts - 1)
+      end
+
+      # How many times refresh_around reads before it settles for a read
+      # that raced with a write.
+      OVERLAY_READS = 3
 
       def load_in_force(key)
         PamDsl::Rights.project(events_for(key)).select(&:in_force?)

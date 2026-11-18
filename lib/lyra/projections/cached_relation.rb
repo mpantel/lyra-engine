@@ -123,8 +123,16 @@ module Lyra
 
       # As ActiveRecord: these count or test for existence. With a block,
       # they load the records.
-      %i[size empty? total_count ids].each do |name|
+      %i[size empty? ids].each do |name|
         define_method(name) { aggregated { super() } }
+      end
+
+      # Kaminari's: of a page, the records the relation selects before the
+      # window, counted as any count is.
+      def total_count
+        return unpaged.count if unpaged
+
+        aggregated { super() }
       end
 
       %i[any? none? one? many?].each do |name|
@@ -161,7 +169,7 @@ module Lyra
 
       # A Hash of conditions, or an SQL fragment with its binds: what they
       # name is used (the fragment is not evaluated here; see UnsupportedQuery).
-      def exists?(conditions = nil)
+      def exists?(conditions = :none)
         terms = case conditions
                 when Hash then conditions_term(conditions)
                 when Array then conditions.first.is_a?(String) ? [[:value, conditions.first]] : []
@@ -182,6 +190,7 @@ module Lyra
       # and so is what update_all's SET expressions read.
       %i[update_all delete_all touch_all destroy_all].each do |name|
         define_method(name) do |*args, **kwargs, &block|
+          refuse_pending_page!
           unless Thread.current[:lyra_cached_delivery]
             reads = name == :update_all ? Lyra::PurposeBoundReads::RelationCheck.set_reads(args.first || kwargs) : nil
             query_check(:all, reads ? [[:value, reads]] : [])
@@ -290,6 +299,7 @@ module Lyra
       # over the records a right in force does not leave out
       # (Lyra::Rights::Queries; a record whose people cannot be read raises).
       def aggregated(extra_terms = [])
+        refuse_pending_page!
         return yield if Thread.current[:lyra_cached_delivery]
         return yield unless Lyra::PurposeBoundReads.checking?
 
@@ -298,6 +308,14 @@ module Lyra
           kept = Lyra::PurposeBoundReads.rights_kept_records(model_class, named, @records)
           kept ? inside_query { with_records(kept) { yield } } : inside_query { yield }
         end
+      end
+
+      # page(n) read before per(m): Kaminari would give page n of its default
+      # size; this relation would give every record. Refused.
+      def refuse_pending_page!
+        return unless page_pending
+
+        raise UnsupportedQuery.new(model_class, "page(#{page_pending}) without per(...) (name the page size)")
       end
 
       # The block run with +records+ as this relation's records.
@@ -311,6 +329,7 @@ module Lyra
 
       # A record load: its named attributes checked first, then each record.
       def deliver(extra_terms = [])
+        refuse_pending_page!
         return yield if Thread.current[:lyra_cached_delivery]
 
         named = query_check(:load, extra_terms)
@@ -437,6 +456,7 @@ module Lyra
         relation.default_scope_applied = default_scope_applied
         relation.windowed = windowed?
         relation.create_with_attributes = create_with_attributes
+        relation.page_pending = page_pending if page_pending
         relation.extending!(*extensions) if extensions.any?
         relation
       end
@@ -629,10 +649,15 @@ module Lyra
         where(attributes).sole
       end
 
-      def exists?(conditions = nil)
+      # As Active Record: with no argument, whether the relation has a record;
+      # exists?(false) and exists?(nil) are false (they used to answer as
+      # exists? with no argument).
+      def exists?(conditions = :none)
         case conditions
-        when nil, false
+        when :none
           @records.any?
+        when nil, false
+          false
         when Integer, String
           @records.any? { |r| r.id.to_s == conditions.to_s }
         when Hash
@@ -790,26 +815,40 @@ module Lyra
       end
       private :sorted_by
 
-      # Order arguments as [{ column => :asc/:desc }]: symbols, hashes,
-      # "col [ASC|DESC], ..." strings and Arel orderings of a column. Anything
-      # else is refused; an unreadable ordering used to compare as equal and
-      # leave the result silently unordered.
+      # Order arguments as [{ column => :asc/:desc }]: symbols, hashes of a
+      # column and asc or desc, "col [ASC|DESC], ..." strings (with this
+      # model's table, if any, in front of the column) and Arel orderings of a
+      # column of this model's table. Anything else is refused; an unreadable
+      # ordering used to compare as equal and leave the result silently
+      # unordered, and another table's column ("posts.title", an Arel
+      # attribute of another table) or a direction other than asc or desc
+      # ("desc nulls last") ordered by this model's column of that name,
+      # ascending.
       def order_keys(args)
         args.flatten.flat_map do |arg|
           case arg
           when Symbol then [{ arg => :asc }]
-          when Hash then arg.map { |column, direction| { column.to_sym => direction.to_s.downcase.to_sym } }
+          when Hash
+            arg.map do |column, direction|
+              direction = direction.to_s.downcase
+              raise UnsupportedQuery.new(model_class, "order(#{arg.inspect[0, 60]})") unless %w[asc desc].include?(direction)
+
+              { column.to_sym => direction.to_sym }
+            end
           when String
             arg.split(",").map do |part|
-              match = part.strip.match(/\A"?(?:\w+"?\.)?"?(\w+)"?(?:\s+(asc|desc))?\z/i)
-              raise UnsupportedQuery.new(model_class, "order(#{arg.inspect})") unless match && model_class.column_names.include?(match[1])
+              match = part.strip.match(/\A(?:"?(\w+)"?\.)?"?(\w+)"?(?:\s+(asc|desc))?\z/i)
+              unless match && (match[1].nil? || match[1] == model_class.table_name.to_s) && model_class.column_names.include?(match[2])
+                raise UnsupportedQuery.new(model_class, "order(#{arg.inspect})")
+              end
 
-              { match[1].to_sym => (match[2] || "asc").downcase.to_sym }
+              { match[2].to_sym => (match[3] || "asc").downcase.to_sym }
             end
           when Arel::Nodes::Ordering
-            raise UnsupportedQuery.new(model_class, "order(#{arg.to_sql})") unless arg.expr.respond_to?(:name)
+            column = own_column(arg.expr)
+            raise UnsupportedQuery.new(model_class, "order(#{arg.to_sql})") unless column
 
-            [{ arg.expr.name.to_sym => arg.descending? ? :desc : :asc }]
+            [{ column => arg.descending? ? :desc : :asc }]
           else raise UnsupportedQuery.new(model_class, "order(#{arg.inspect[0, 60]})")
           end
         end
@@ -852,29 +891,57 @@ module Lyra
       # Pagination support (Kaminari/WillPaginate compatibility)
       # =========================================================================
 
+      # page(n).per(m): the m records of page n, as Kaminari's scopes give
+      # them. page(n) alone used to give every record (Kaminari's default
+      # page size was never applied), and page(n) changed the relation it was
+      # called on: a relation is now marked as waiting for its per, and is
+      # refused (UnsupportedQuery) if read before it (PAGE_PENDING).
       def page(num)
-        @current_page = [num.to_i, 1].max
-        @per_page ||= 25
-        self
+        relation = spawn_records(@records)
+        relation.page_pending = [num.to_i, 1].max
+        relation
       end
 
+      # As Kaminari's: per(nil), a negative or non-numeric size keeps the
+      # default page size (the model's paginates_per, else Kaminari's
+      # default_per_page, else 25); per(0) is an empty page.
       def per(num)
-        @per_page = num.to_i
+        size = num.to_i
+        @per_page = size.negative? || !num.to_s.match?(/\A\d/) ? default_per_page : size
         paginated_records
       end
 
+      def default_per_page
+        return model_class.default_per_page if model_class.respond_to?(:default_per_page)
+        return Kaminari.config.default_per_page if defined?(Kaminari) && Kaminari.respond_to?(:config)
+
+        25
+      end
+      private :default_per_page
+
+      # Pages of the records the relation selects before the window: the
+      # page's records used to be counted, so a paginated list showed one
+      # page of one.
       def total_pages
         return 1 if @per_page.nil? || @per_page <= 0
-        (@records.size.to_f / @per_page).ceil
+
+        (total_count.to_f / @per_page).ceil
       end
 
       def current_page
         @current_page || 1
       end
 
+      # The records the relation selects before the window (the page's own
+      # used to be counted). CachedRelationDelivery counts them through the
+      # unpaged relation, so that the purpose check and the rights in force
+      # apply to the count as to any count.
       def total_count
         @records.size
       end
+
+      # The relation a page was taken from (per), for total_count.
+      attr_accessor :unpaged
 
       def limit_value
         @per_page
@@ -885,17 +952,29 @@ module Lyra
         (@current_page - 1) * @per_page
       end
 
+      # page(n) waiting for its per(m): the page number, or nil.
+      def page_pending = @page_pending
+
+      def page_pending=(number)
+        @page_pending = number
+        @current_page = number
+      end
+
       private def paginated_records
         return self unless @current_page && @per_page
 
         start_idx = (@current_page - 1) * @per_page
         paginated = @records[start_idx, @per_page] || []
 
+        unpaged = spawn_records(@records)
+        unpaged.page_pending = nil
+        unpaged.instance_variable_set(:@current_page, nil)
         result = spawn_records(paginated)
+        result.page_pending = nil
         result.windowed = true
+        result.unpaged = unpaged
         result.instance_variable_set(:@current_page, @current_page)
         result.instance_variable_set(:@per_page, @per_page)
-        result.instance_variable_set(:@total_records, @records.size)
         result
       end
 
@@ -1296,8 +1375,10 @@ module Lyra
         where(*args).destroy_all
       end
 
+      # In place, as Active Record's: it used to return a limited copy and
+      # leave the relation as it was.
       def limit!(value)
-        spawn_records(@records.first(value))
+        replace_with!(limit(value))
       end
 
       def values
@@ -1363,8 +1444,14 @@ module Lyra
         unscope(*skips)
       end
 
+      # only(:joins, :left_outer_joins), which Active Record's association
+      # scope asks of a scope it merges, keeps the relation (its joins are
+      # its own; there is nothing else to merge). Any other only is refused:
+      # it used to return the relation unchanged, its order and limit kept.
       def only(*keeps)
-        self
+        return self if (keeps.flatten.map(&:to_sym) - %i[joins left_outer_joins]).empty?
+
+        raise UnsupportedQuery.new(model_class, "only(#{keeps.flatten.map(&:inspect).join(', ')})")
       end
 
       def where!(conditions, *rest)
@@ -1735,10 +1822,10 @@ module Lyra
         extra = unsupported_clauses(relation) - %w[order limit]
         raise UnsupportedQuery.new(model_class, "#{what} (it uses #{extra.join(', ')})") if extra.any?
 
-        where_hash = extract_where_conditions(relation, strict: true)
-        raise UnsupportedQuery.new(model_class, what) if where_hash.nil?
+        conditions = extract_where_conditions(relation)
+        raise UnsupportedQuery.new(model_class, what) if conditions.nil?
 
-        narrowed = where_hash.empty? ? self : where(where_hash)
+        narrowed = conditions.reduce(self) { |narrowing, hash| narrowing.where(hash) }
         narrowed = narrowed.order(*relation.order_values) if relation.order_values.any?
         narrowed = narrowed.limit(relation.limit_value) if relation.limit_value
         narrowed
@@ -1760,60 +1847,67 @@ module Lyra
         }.select { |_, used| used }.keys
       end
 
-      # Hash conditions only; with strict: true, returns nil as soon as one
-      # predicate is something it cannot read, so the caller refuses rather
-      # than filter by a subset of the conditions.
-      def extract_where_conditions(relation, strict: false)
-        # Try to extract hash conditions from the relation's where clause
-        return {} unless relation.respond_to?(:where_clause)
+      # The relation's where clause as hash conditions on this model's own
+      # columns, or nil as soon as one predicate is something else, so that the
+      # caller refuses rather than filter by a subset of the conditions: an
+      # equality or IN whose left side is not a column of this model's table (an
+      # SQL literal, a function, another table's column) or whose right side is
+      # not a value (another column, an SQL literal, a subquery), a NOT IN, and
+      # any other kind of predicate. An equality or IN whose left side was not a
+      # column used to be skipped: a scope holding
+      # where(Arel.sql("lower(name)").eq("pear")) answered with every record its
+      # other conditions selected.
+      #
+      # A list of hashes, applied one after another (AND): a column named twice
+      # (where(qty: 1).where(qty: 2)) starts a new hash; the second condition used
+      # to replace the first.
+      def extract_where_conditions(relation)
+        return [] unless relation.respond_to?(:where_clause)
 
         where_clause = relation.where_clause
-        return {} if where_clause.empty?
+        return [] if where_clause.empty?
 
-        # Rails 7+ stores conditions in predicates
-        # Try to convert Arel predicates to a hash
-        conditions = {}
+        conditions = [{}]
         where_clause.send(:predicates).each do |predicate|
-          case predicate
-          when Arel::Nodes::Equality
-            # Simple equality: column = value
-            if predicate.left.respond_to?(:name)
-              column = predicate.left.name.to_sym
-              value = extract_predicate_value(predicate.right)
-              conditions[column] = value
-            end
-          when Arel::Nodes::In
-            # IN clause: column IN (values)
-            if predicate.left.respond_to?(:name)
-              column = predicate.left.name.to_sym
-              values = predicate.right.map { |v| extract_predicate_value(v) }
-              conditions[column] = values
-            end
-          when Arel::Nodes::HomogeneousIn
-            # IN clause over an array of same-type scalars -- Rails' own
-            # optimization of `where(column: [v1, v2, ...])`, and what
-            # `where(id: [...])` compiles to whenever the array has more than
-            # one element. Without this branch, any such condition falls
-            # through unrecognized, and this method silently omits it from
-            # `conditions` -- collapsing the scope to unfiltered if it was
-            # the only condition.
-            if predicate.type == :in && predicate.attribute.respond_to?(:name)
-              conditions[predicate.attribute.name.to_sym] = predicate.values
-            elsif strict
+          column, value =
+            case predicate
+            when Arel::Nodes::Equality
+              [own_column(predicate.left), predicate_value(predicate.right)]
+            when Arel::Nodes::In
+              # column IN (values); a subquery is not a list of values.
+              return nil unless predicate.right.is_a?(Array)
+
+              values = predicate.right.map { |v| predicate_value(v) }
+              [own_column(predicate.left), values.any? { UNREADABLE_VALUE.equal?(_1) } ? UNREADABLE_VALUE : values]
+            when Arel::Nodes::HomogeneousIn
+              # IN over an array of same-type scalars: Rails' own form of
+              # where(column: [v1, v2, ...]). Its NOT IN form (where.not) is refused.
+              return nil unless predicate.type == :in
+
+              [own_column(predicate.attribute), predicate.values]
+            else
               return nil
             end
-          else
-            return nil if strict
-          end
+          return nil if column.nil? || UNREADABLE_VALUE.equal?(value)
+
+          conditions << {} if conditions.last.key?(column)
+          conditions.last[column] = value
         end
-
-        conditions
-      rescue => e
-        return nil if strict
-
-        Rails.logger.debug("Lyra::CachedRelation: Could not extract where conditions - #{e.message}")
-        {}
+        conditions.reject(&:empty?)
+      rescue StandardError
+        nil
       end
+
+      # +node+'s column name, when it is a column of this model's table.
+      def own_column(node)
+        return nil unless node.is_a?(Arel::Attributes::Attribute)
+        return nil unless node.relation.respond_to?(:name) && node.relation.name.to_s == model_class.table_name.to_s
+
+        node.name.to_sym
+      end
+
+      # A predicate's right side that is not a value (predicate_value).
+      UNREADABLE_VALUE = Object.new.freeze
 
       # Conditions must be a hash: of this model's own attributes, or of a
       # table joined before (see CachedJoins). A SQL fragment or an Arel node
@@ -1829,24 +1923,26 @@ module Lyra
         @joins ? with_rows(rows, @joins) : spawn_records(rows.map(&:first))
       end
 
-      def extract_predicate_value(node)
+      # The value on a predicate's right side, or UNREADABLE_VALUE when it is not
+      # one: another column, an SQL literal, a function, a subquery. Such a right
+      # side used to be taken as the value itself, matching nothing.
+      def predicate_value(node)
         case node
-        when Arel::Nodes::Casted
-          node.value
+        when Arel::Nodes::Casted, Arel::Nodes::Quoted then node.value
         when Arel::Nodes::BindParam
           # Rails 7+ bind params
-          node.value.value_before_type_cast
-        when NilClass
-          nil
-        else
-          node.respond_to?(:value) ? node.value : node
+          node.value.respond_to?(:value_before_type_cast) ? node.value.value_before_type_cast : UNREADABLE_VALUE
+        when NilClass then nil
+        when Arel::Nodes::SqlLiteral, Arel::Nodes::Node, Arel::Attributes::Attribute then UNREADABLE_VALUE
+        else node.respond_to?(:value) ? node.value : node
         end
       end
 
       # This relation's state taken from +other+ (the bang methods).
       def replace_with!(other)
         %i[@records @ordering @query_terms @create_attributes @create_with_attributes @plan @default_scope_applied
-           @selected_columns @group_columns @windowed @rows @joins @joined_classes].each do |ivar|
+           @selected_columns @group_columns @windowed @rows @joins @joined_classes @page_pending @current_page @per_page
+           @unpaged].each do |ivar|
           instance_variable_set(ivar, other.instance_variable_get(ivar))
         end
         self

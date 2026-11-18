@@ -87,8 +87,7 @@ require "lyra/purpose_bound_reads"
 require "lyra/erasure"
 require "lyra/retention"
 
-# Event-aware associations
-require "lyra/associations/event_aware"
+# has_and_belongs_to_many links as events
 require "lyra/associations/habtm_links"
 
 # Consistency helpers

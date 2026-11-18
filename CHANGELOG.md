@@ -151,6 +151,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default` period is not executed; now documented).
 
 ### Fixed
+- **ES-NoProj refuses an Active Record relation's condition it cannot read, instead of skipping
+  it.** A named scope called on a relation, a relation passed to `merge`, and a default scope are
+  read as hash conditions on the model's own columns. An equality or `IN` whose left side was not
+  a column was skipped: `scope :p, -> { where(Arel.sql("lower(name)").eq("pear")) }` called as
+  `Item.where(...).p` returned every record the other conditions selected, and a default scope
+  made only of such a condition was taken as evaluable and not applied. A column of another
+  table was read as the model's column of the same name, a right side that is not a value
+  (another column, an SQL literal) was compared as if it were one, and a column named twice
+  (`where(qty: 2).where(qty: 5)`) kept only the last condition. Each now raises
+  `UnsupportedQuery`, except the column named twice, whose conditions are both applied, as SQL
+  does. Orders likewise: an order on another table's column (`"posts.title"`, an Arel attribute
+  of another table) sorted by the model's column of that name, and a direction other than `asc`
+  or `desc` (`order(qty: "desc nulls last")`) sorted ascending; both are refused.
+- **ES-NoProj's `exists?(false)` and `exists?(nil)` are `false`, as in Active Record.** They
+  answered whether the relation had any record.
+- **ES-NoProj's `limit!` limits the relation it is called on**, as Active Record's; it returned a
+  limited copy and left the relation whole. The bang query methods it does not implement
+  (`offset!`, `reorder!`, `distinct!`, `group!`, `none!`, ...) are refused, as before.
+- **ES-NoProj now refuses `only`** (other than `only(:joins, :left_outer_joins)`, which Active
+  Record's association scope asks for) rather than return the relation unchanged, its order and
+  limit kept.
+- **ES-NoProj's pagination (`page(n).per(m)`)**: `total_count` and `total_pages` count the records
+  the relation selects before the window, through the same purpose check and rights as any count;
+  they counted the page's records, so a paginated list showed one page of one. ES-NoProj now
+  refuses a relation read after `page(n)` without `per(m)` rather than answer with every record,
+  and `page` no longer changes the relation it is called on. `per(nil)`, a negative or a
+  non-numeric size keep the default page size, as Kaminari's do; they gave an empty page.
+- **A polymorphic `has_one ... as:` under ES-NoProj matches the owner's type**, as the `has_many`
+  path does; it returned a record of another type of owner with the same id.
+- **A `has_one` with a scope of its own is narrowed by it under ES-NoProj.** `has_one
+  :selected_rate, -> { where(selected: true) }` and `has_one :latest, -> { order(id: :desc) }`
+  answered with whichever record of the owner's the event store found first; the scope is now
+  applied to the owner's records and the first in its order is the answer, as Active Record's
+  `LIMIT 1`. A scope ES-NoProj cannot evaluate raises `UnsupportedQuery`.
+- **A `has_one :through` a plain `has_one` reaches its target as Active Record's join does under
+  ES-NoProj.** It followed only the intermediate record the `has_one` reads, where the join reaches
+  the targets of every intermediate record the owner has (those the `has_one`'s scope selects),
+  narrowed by the association's own scope. When either scope orders, the first target in that
+  order is the answer; in no order, the one target there is (it could be `nil` before, when the
+  intermediate record read had none), and with more than one ES-NoProj now refuses
+  (`UnsupportedQuery`) rather than answer with one of them. The intermediate records are read as
+  Lyra's own read, without a purpose check, as the join reads them in SQL; the `has_one` reader
+  used before was checked, and under a purpose that does not allow the intermediate model's fields
+  raised `PamDsl::PurposeFieldMismatchError`.
+- **Inside a transaction that recorded rights, a restriction committed before it began is in
+  force.** A write of rights drops its subject from the store's shared snapshot until the next
+  read, and a connection with rights of its own in its open transaction never read the snapshot
+  again, so a subject restricted just before such a transaction was not restricted inside it
+  (`active_for`, `active`, `keys_in_force`). Such a connection now reads the rights of every other
+  subject into a snapshot of its own, at most once per refresh interval and checking scope, and its
+  own subjects as its transaction left them; the shared snapshot is never written from it (under
+  `REPEATABLE READ` it reads the database as its transaction began). Outside such a transaction
+  nothing changes, and no query is added. `keys_in_force` inside a transaction that lifted a
+  restriction no longer lists its subject, as `active` does not.
 - **ES-NoProj answers a `has_one :through` by following the through association.** The lookup
   used the source's foreign key on the target: Solidus's `InventoryUnit has_one :order, through:
   :shipment` was asked as `Spree::Order.find_by(order_id: <the unit's id>)`, a column only
@@ -444,8 +498,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   model; sync projection and rebuild updated and deleted rows `where(id:)`. Hijack and event
   sourcing ignored the key the application gave, reserved another (a uuid), and put an `id`
   attribute the table does not have into the `Created` event. ES-NoProj's and `as_of`'s
-  reconstructed records, the dashboard's record pages and `event_aware_belongs_to` also used
-  `id`. All now use the model's primary key. A composite primary key is still not supported, and
+  reconstructed records and the dashboard's record pages also used `id`. All now use the
+  model's primary key. A composite primary key is still not supported, and
   is now refused clearly: `monitor_with_lyra` and `config.models` raise `ArgumentError` naming
   the key, and `verify_mapping!` reports it.
 - **ES-NoProj: `has_many ... dependent: :delete_all` left the children alive.** Rails deletes
@@ -842,6 +896,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance `touch` already did. Bulk bypass events (`update_all`, `upsert_all` and the like) now
   list `created_at` and `updated_at` among their changes when those moved, so an upsert's event
   carries `updated_at` beside the columns it set.
+
+### Removed
+- **`Lyra::Associations::EventAware`** (`event_aware_belongs_to`, `event_aware_has_many`), an
+  opt-in concern that nothing used, superseded by the association interceptor, read-your-writes
+  and ES-Lazy. Its `has_many` never added pending records (its `PendingRecords` returned none),
+  and the records its `belongs_to` rebuilt from events (`VirtualRecord`) bypassed Lyra's read
+  path: their values were the events' own, not converted to the attribute types; the target's
+  default scopes were not applied, so a record the scoped lookup did not find (soft-deleted, say)
+  came back from its events; and purpose-bound reads did not check them.
 
 ### Documented
 - **`allow_for` widens, it does not restrict.** A field may be used for a purpose when its

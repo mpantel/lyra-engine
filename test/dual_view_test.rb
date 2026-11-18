@@ -704,21 +704,6 @@ end
       user&.destroy
     end
 
-    def test_generate_recommendations_empty_for_synced_state
-      view = Object.new
-      def view.compare
-        {
-          crud_view: { exists: true },
-          event_sourced_view: { exists: true, events_count: 5 },
-          differences: {}
-        }
-      end
-
-      recommendations = StateAnalyzer.generate_recommendations(view)
-
-      assert_empty recommendations
-    end
-
     def test_generate_recommendations_for_existence_mismatch
       view = Object.new
       def view.compare

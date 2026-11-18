@@ -516,7 +516,7 @@ module Lyra
 
       conditions = cached.send(:extract_where_conditions, real_relation)
 
-      assert_equal [1, 2, 3], conditions[:id]
+      assert_equal [{ id: [1, 2, 3] }], conditions
     ensure
       Thread.current[:lyra_bypass_read_override] = nil
     end

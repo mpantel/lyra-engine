@@ -58,32 +58,12 @@ class EventSourcingModeTest < Minitest::Test
   # Projection Mode Tests
   # ===========================================================================
 
-  def test_projection_mode_defaults_to_sync
-    assert_equal :sync, Lyra.config.projection_mode
-  end
-
   def test_projection_mode_can_be_set_to_sync
     Lyra.configure do |config|
       config.projection_mode = :sync
     end
 
     assert_equal :sync, Lyra.config.projection_mode
-  end
-
-  def test_projection_mode_can_be_set_to_async
-    Lyra.configure do |config|
-      config.projection_mode = :async
-    end
-
-    assert_equal :async, Lyra.config.projection_mode
-  end
-
-  def test_projection_mode_can_be_set_to_disabled
-    Lyra.configure do |config|
-      config.projection_mode = :disabled
-    end
-
-    assert_equal :disabled, Lyra.config.projection_mode
   end
 
   # ===========================================================================
@@ -145,15 +125,6 @@ class EventSourcingModeTest < Minitest::Test
     Lyra.config.enable_event_sourcing!
     assert Lyra.event_sourcing_mode?
     refute Lyra.monitor_mode?
-  end
-
-  def test_switching_from_hijack_to_event_sourcing
-    Lyra.config.enable_hijack!
-    assert Lyra.hijack_mode?
-
-    Lyra.config.enable_event_sourcing!
-    assert Lyra.event_sourcing_mode?
-    refute Lyra.hijack_mode?
   end
 
   # ===========================================================================

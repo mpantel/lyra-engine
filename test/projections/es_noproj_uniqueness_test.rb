@@ -104,6 +104,16 @@ class EsNoprojUniquenessTest < Minitest::Test
     conditions_named_scope_update_taken: [->(s) { changed(:conditions_scope, s.blank, code: "X1") }, true],
     conditions_or_keep: [->(_) { item(:conditions_or, code: "X1") }, true],
     conditions_or_leave_out: [->(_) { item(:conditions_or, code: "X2") }, false],
+    # Comparisons in the conditions: X1's amount is 250, X2's 100.5.
+    conditions_at_most_leave_out: [->(_) { item(:conditions_at_most, code: "X1") }, false],
+    conditions_at_most_keep: [->(_) { item(:conditions_at_most, code: "X2") }, true],
+    conditions_below_leave_out_the_bound: [->(_) { item(:conditions_below, code: "X2") }, false],
+    conditions_below_keep: [->(_) { item(:conditions_below, code: "X3") }, false],
+    conditions_between_keep: [->(_) { [item(:conditions_between, code: "X1"), item(:conditions_between, code: "X2")] }, [true, false]],
+    conditions_greater_than: [->(_) { [item(:conditions_greater_than, code: "X1"), item(:conditions_greater_than, code: "X2")] }, [true, false]],
+    conditions_not_at_most: [->(_) { [item(:conditions_not_at_most, code: "X1"), item(:conditions_not_at_most, code: "X2")] }, [true, false]],
+    # where.not of two conditions is NOT (a AND b).
+    conditions_not_both: [->(_) { [item(:conditions_not_both, code: "X1"), item(:conditions_not_both, code: "X2")] }, [true, false]],
     # allow_nil, allow_blank
     allow_nil_skips_nil: [->(_) { item(:allow_nil, code: nil) }, false],
     allow_nil_checks_a_value: [->(_) { item(:allow_nil, code: "X1") }, true],
@@ -202,7 +212,13 @@ class EsNoprojUniquenessTest < Minitest::Test
     conditions_arel_literal_out_of_range: [:code, { uniqueness: { conditions: -> { where(arel_table[:tenant_id].not_in([2**70])) } } }],
     tag: [:tag, { uniqueness: true }],
     tag_ci: [:tag, { uniqueness: { case_sensitive: false } }],
-    prefs: [:prefs, { uniqueness: true }]
+    prefs: [:prefs, { uniqueness: true }],
+    conditions_at_most: [:code, { uniqueness: { conditions: -> { where(amount: ..200) } } }],
+    conditions_below: [:code, { uniqueness: { conditions: -> { where(amount: ...100.5) } } }],
+    conditions_between: [:code, { uniqueness: { conditions: -> { where(amount: 200..300) } } }],
+    conditions_greater_than: [:code, { uniqueness: { conditions: -> { where(arel_table[:amount].gt(200)) } } }],
+    conditions_not_at_most: [:code, { uniqueness: { conditions: -> { where(arel_table[:amount].lteq(200).not) } } }],
+    conditions_not_both: [:code, { uniqueness: { conditions: -> { where.not(archived: true, status: :paid) } } }]
   }.freeze
 
   def setup

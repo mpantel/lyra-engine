@@ -495,6 +495,42 @@ class ErasureTest < Minitest::Test
     assert_equal ["ErasePayment #{copy.id}"], result.copies
   end
 
+  # The same for the other identifying types: a phone number, an IP address,
+  # a card number and an IBAN found in a personal structure (also inside a
+  # list in it) are the person's and erased where copied; the labels and the
+  # strings that are not such an identifier stay.
+  def test_phone_ip_card_and_iban_inside_a_personal_structure_are_the_person_s_values
+    {
+      phone: ["+30 210 123 4567", "12"],
+      ip_address: ["192.168.10.4", "not-an-ip"],
+      credit_card: ["4111 1111 1111 1111", "4111"],
+      financial: ["GR16 0110 1250 0000 0001 2300 695", "EUR"]
+    }.each_with_index do |(type, (value, other)), i|
+      payment_class(privacy_policy: payment_policy(:"erase_#{type}_policy", payload: type))
+      payment = ErasePayment.create!(email: "ann#{i}@example.com", payload: { "kind" => "main", "values" => [value, other] })
+      copy = ErasePayment.create!(username: value, notes: other)
+
+      result = Lyra::Erasure.erase!(ErasePayment, payment.id, reason: "r", everywhere: true)
+
+      assert_equal [nil, other], ErasePayment.unscoped.find(copy.id).attributes.values_at("username", "notes"), type
+      assert_equal ["ErasePayment #{copy.id}"], result.copies, type
+      drop_payments
+    end
+  end
+
+  # A NOT NULL column that is neither text nor has a default has no
+  # replacement Lyra could choose: refused before anything is erased.
+  def test_a_not_null_column_without_a_default_is_refused
+    payment_class(columns: ->(t) { t.integer :pin, null: false },
+                  privacy_policy: payment_policy(:erase_pin_policy, pin: :identifier))
+    payment = ErasePayment.create!(email: "ann@example.com", pin: 123_456)
+
+    error = assert_raises(Lyra::Erasure::Unsupported) { Lyra::Erasure.erase!(ErasePayment, payment.id, reason: "r") }
+
+    assert_includes error.message, "ErasePayment.pin is NOT NULL with no default"
+    assert_equal ["ann@example.com", 123_456], ErasePayment.unscoped.find(payment.id).attributes.values_at("email", "pin")
+  end
+
   # An earlier erasure's replacement ("erased:<id>") is not the person's
   # value: a second erasure neither reports it nor searches for it.
   def test_a_second_erasure_does_not_take_the_replacement_for_a_value

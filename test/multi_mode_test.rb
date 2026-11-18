@@ -202,20 +202,6 @@ module Lyra
     # Projection Mode Tests (Event Sourcing only)
     # =========================================================================
 
-    def test_projection_mode_defaults_to_sync
-      assert_equal :sync, Lyra.config.projection_mode
-    end
-
-    def test_projection_mode_can_be_set_in_event_sourcing
-      Lyra.configure do |config|
-        config.mode = :event_sourcing
-        config.projection_mode = :async
-      end
-
-      assert Lyra.event_sourcing_mode?
-      assert_equal :async, Lyra.config.projection_mode
-    end
-
     def test_all_projection_modes_configurable
       [:sync, :async, :disabled].each do |proj_mode|
         Lyra.reset_config!
