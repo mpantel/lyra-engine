@@ -88,6 +88,8 @@ module Lyra
         end
 
         def lyra_find_target_from_cache
+          return lyra_find_target_through if reflection.through_reflection?
+
           owner_key_value = owner.read_attribute(reflection.active_record_primary_key)
           return nil if owner_key_value.nil?
 
@@ -101,6 +103,37 @@ module Lyra
           # Checked as a loaded row is, with the key it was found by.
           Lyra::PurposeBoundReads.check(record, Array(reflection.foreign_key).map(&:to_s)) if record
           record
+        end
+
+        # The foreign key of a has_one :through is on the intermediate record,
+        # not on the target. Solidus's InventoryUnit has_one :order, through:
+        # :shipment was looked up as Spree::Order.find_by(order_id: <the
+        # unit's id>), a column only the shipment has: 0.9.x answered nil, so
+        # carton.orders was empty and no shipped email went out. The target
+        # is read through the intermediate record and then the source
+        # association (AssociationInterceptor.records_through), each as that
+        # association reads (from the event store when its model is
+        # monitored, through its default scopes, checked as a loaded row),
+        # and then narrowed by this association's own scope, which raises
+        # UnsupportedQuery where it cannot be evaluated.
+        #
+        # Known differences from Active Record's join, left as they are:
+        # - an association scope that unscopes (-> { with_discarded }) cannot
+        #   bring back a target the source reader's default scope left out;
+        # - through another has_one, only the intermediate record that
+        #   association reads is followed, where the join chooses among all
+        #   candidates;
+        # - an intermediate record already loaded on the owner is used even
+        #   if stale, and reading the target leaves it loaded there (as the
+        #   has_many :through path does).
+        def lyra_find_target_through
+          records = AssociationInterceptor.records_through(owner, reflection)
+          scope = reflection.scope
+          return records.first unless scope
+
+          relation = Lyra::Projections::CachedRelation.new(reflection.klass, records)
+          relation = scope.arity.zero? ? relation.instance_exec(&scope) : relation.instance_exec(owner, &scope)
+          relation.first
         end
       end
 
@@ -223,9 +256,7 @@ module Lyra
         end
 
         def lyra_records_through
-          through = Array(owner.association(reflection.through_reflection.name).reader)
-          records = through.flat_map { |record| Array(record.association(reflection.source_reflection.name).reader) }
-          Lyra::Projections::CachedRelation.new(reflection.klass, records.compact.uniq)
+          Lyra::Projections::CachedRelation.new(reflection.klass, AssociationInterceptor.records_through(owner, reflection))
         end
 
         def lyra_apply_reflection_scope(relation)
@@ -369,6 +400,22 @@ module Lyra
         rescue StandardError
           false
         end
+      end
+
+      # The records a :through +reflection+ of +owner+ reaches: each
+      # intermediate record's source association, read as that association
+      # reads. With source_type: (a polymorphic source), only the
+      # intermediate records whose type column holds that name are followed,
+      # as Active Record's join selects them (where(thing_type: "A")); the
+      # source reader would return a record of whatever class the column
+      # names.
+      def self.records_through(owner, reflection)
+        through = Array(owner.association(reflection.through_reflection.name).reader)
+        if (source_type = reflection.options[:source_type])
+          type_column = reflection.source_reflection.foreign_type
+          through = through.select { |record| record.read_attribute(type_column) == source_type.to_s }
+        end
+        through.flat_map { |record| Array(record.association(reflection.source_reflection.name).reader) }.compact.uniq
       end
 
       def self.install!

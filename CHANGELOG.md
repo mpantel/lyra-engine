@@ -151,6 +151,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default` period is not executed; now documented).
 
 ### Fixed
+- **ES-NoProj answers a `has_one :through` by following the through association.** The lookup
+  used the source's foreign key on the target: Solidus's `InventoryUnit has_one :order, through:
+  :shipment` was asked as `Spree::Order.find_by(order_id: <the unit's id>)`, a column only
+  `spree_shipments` has. 0.9.x returned `nil` for such an association under ES-NoProj, so
+  `carton.orders` was empty and Solidus sent no shipped email. 1.0.0 reads the intermediate record
+  and then the source association, each as that association reads under ES-NoProj, and narrows
+  the result by the association's own scope (a scope it cannot evaluate raises
+  `UnsupportedQuery`). A `has_many :through` whose source is a `has_one :through`
+  (`carton.orders`) follows it too. With `source_type:` (a polymorphic source), a `has_one` or
+  `has_many :through` follows only the intermediate records whose type column names that class,
+  as Active Record's join does; a `has_many :through` returned records of whatever class the
+  column named.
 - **ES-NoProj let Rails' uniqueness validation pass every duplicate.** `validates :x, uniqueness:
   true` asks the table whether another row holds the value; in ES-NoProj a monitored model's table
   is empty, so every value passed, and the table's unique index could not catch the duplicate

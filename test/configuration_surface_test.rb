@@ -2,8 +2,8 @@
 
 require "test_helper"
 
-# The configuration surface the thesis describes (FEATURE_GAP_PLAN F2):
-# config.models=, config.verify_mapping! and config.privacy_policy=.
+# The configuration surface the thesis describes: config.models=,
+# config.verify_mapping! and config.privacy_policy=.
 class ConfigurationSurfaceTest < Minitest::Test
   def setup
     skip "Requires Rails and database" unless defined?(ActiveRecord::Base) && ActiveRecord::Base.connection.table_exists?(:users)
