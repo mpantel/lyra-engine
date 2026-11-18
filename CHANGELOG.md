@@ -1159,8 +1159,8 @@ Everything since 0.8.0, the version the PAM article describes.
   replays to the anonymized row. Replacement is nil where allowed, `"erased:<id>"` for a NOT NULL
   string, else the column default. Works in every mode, with strict data access on and inside a
   purpose. On request only; not policy-driven, and crypto-shredding remains future work.
-- **Event store failure policies, named** (`Lyra::EventStoreUnavailableError`, `Lyra.append_events`;
-  FEATURE_GAP_PLAN F1) — every event Lyra writes now goes through `Lyra.append_events`, which
+- **Event store failure policies, named** (`Lyra::EventStoreUnavailableError`, `Lyra.append_events`)
+  — every event Lyra writes now goes through `Lyra.append_events`, which
   raises `EventStoreUnavailableError` (the store's error as its `cause`, the stream in its message)
   when the store fails. The policy is fixed by the mode: **fail-closed** in Hijack and every
   event-sourcing mode (the write fails with the error and rolls back), **log-and-continue** in
@@ -1176,7 +1176,7 @@ Everything since 0.8.0, the version the PAM article describes.
   where the events are authoritative (rebuild the tables instead). `ModeTransition.record_ids` and
   `ModeTransition.discrepancy` expose the check it uses.
 - **Access log** (`config.record_access_events`, default false; `Lyra::AccessLog`,
-  `Lyra::Events::DataAccessed`, `Lyra::Events::DataAccessDenied`; FEATURE_GAP_PLAN F6) — when on,
+  `Lyra::Events::DataAccessed`, `Lyra::Events::DataAccessDenied`) — when on,
   every access the privacy policy validates (`validate_access!`) is recorded in the subject's
   access stream (`Lyra::DataAccess$<Model>$<id>`): `DataAccessed` when it went ahead (outcome
   `granted`, or `audited` with the violations audit mode let through), `DataAccessDenied` when
@@ -1192,7 +1192,7 @@ Everything since 0.8.0, the version the PAM article describes.
   validate access, and records it in its benchmark reports. The Article 30 register stays
   PAM's `article_30_report`, generated from the declared policy.
 - **Privacy stamps on events** (`config.annotate_privacy`, default false; `Lyra::Privacy.stamp`,
-  `Lyra::Privacy.stamp_of`; FEATURE_GAP_PLAN F5) — when on, every event that carries an
+  `Lyra::Privacy.stamp_of`) — when on, every event that carries an
   attribute the model's privacy policy declares is stamped as it is built with
   `metadata[:privacy]`: the policy's name and, per attribute, its type, sensitivity, allowed
   purposes, retention period (ISO 8601) and the contexts it has a transformation for — never a
@@ -1215,7 +1215,7 @@ Everything since 0.8.0, the version the PAM article describes.
   switch reaches. On wherever the Mode Transition Safety gate is (not in the test environment);
   the raw `config.mode =` setter is left alone. the migration guide (`docs/MIGRATION_GUIDE.md`, Switching modes) documents the
   deploy-time rule.
-- **Mode Transition Safety** (`Lyra::ModeTransition`, `rake lyra:mode:check`; FEATURE_GAP_PLAN F3)
+- **Mode Transition Safety** (`Lyra::ModeTransition`, `rake lyra:mode:check`)
   — a mode switch that changes the authoritative store is allowed only when rows and events
   agree for every monitored record: escalating from Disabled or Monitor to Hijack or event
   sourcing (rows that predate Lyra are imported by Genesis first), and leaving ES-NoProj,
@@ -1232,8 +1232,8 @@ Everything since 0.8.0, the version the PAM article describes.
   `config.dual_view_discrepancy_handler`) — after a write commits, a sampled share of writes
   is compared with its events; a discrepancy is logged and passed to the handler, and the write
   is never failed. Skipped in ES-NoProj, ES-Lazy and ES-Async, whose tables lag by design.
-- **Domain events** (`monitor_with_lyra domain_events: [...]`, `Lyra::DomainEvents`;
-  FEATURE_GAP_PLAN F8) — rules name a write's event after what it means instead of the CRUD
+- **Domain events** (`monitor_with_lyra domain_events: [...]`, `Lyra::DomainEvents`)
+  — rules name a write's event after what it means instead of the CRUD
   operation: `{ name: "PaymentCompleted", on: %i[create update], if: ->(payment, changes) { ... } }`.
   The first matching rule names the write's own event, which keeps Lyra's envelope (model, id,
   operation, attributes, changes), so replay, projections, DualView and `Lyra.state_at` work
@@ -1246,7 +1246,7 @@ Everything since 0.8.0, the version the PAM article describes.
   callbacks are still recorded as CRUD bypass events. Generated event classes are registered
   at boot. A rule whose block raises fails the write where events are the record (Hijack,
   event sourcing) and is logged in Monitor. Commands now carry their `record`.
-- **Configuration surface** (FEATURE_GAP_PLAN F2): `config.models = %w[Order Payment]` (or a
+- **Configuration surface**: `config.models = %w[Order Payment]` (or a
   hash of name => options) declares the monitored models by name in the initializer; once the
   application's code has loaded, each is given `monitor_with_lyra`, with no model file edited,
   and a name that does not resolve fails the boot. `config.verify_mapping!` verifies the
@@ -1261,8 +1261,7 @@ Everything since 0.8.0, the version the PAM article describes.
   destroyed. `Model.as_of(time).find(id)` / `.find_by_id(id)` return read-only records and
   `.all` every record that existed then. For a row imported by Genesis, a time before its
   import raises `Lyra::Temporal::HistoryNotRecorded` instead of guessing (a time before its own
-  `created_at` is `nil`). Works in every mode that records events, Monitor included
-  (FEATURE_GAP_PLAN F7).
+  `created_at` is `nil`). Works in every mode that records events, Monitor included.
 - **ES-NoProj joins, evaluated in memory** (`Lyra::Projections::CachedJoins`) — `joins`,
   `left_joins`/`left_outer_joins`, `where.missing` and `where.associated` on `belongs_to`,
   `has_many` and `has_one` associations, with hash conditions on the joined table
@@ -1281,9 +1280,8 @@ Everything since 0.8.0, the version the PAM article describes.
   no provider is installed. PAM is an adapter (`Lyra::Privacy::Adapters::Pam`), loaded when
   `pam_dsl` is present. `Lyra::Privacy.annotations_for(event)` returns the annotation of every
   declared attribute an event touched. The foundation for `config.privacy_policy=` and PII
-  annotation in event metadata (`FEATURE_GAP_PLAN.md`, F2 and F5). From `thesis-restructure`
-  (1adadfe); the testbed binds `Registration` and `PaymentTransaction` to its `:epay_data`
-  policy (d0df542), which adds nothing to the write path.
+  annotation in event metadata. The testbed binds `Registration` and `PaymentTransaction` to its
+  `:epay_data` policy, which adds nothing to the write path.
 - **`Lyra::IdGenerator.reserves_safely?(model)`** — true for UUID keys and for integer keys
   backed by a PostgreSQL sequence. It uses the cached sequence lookup, so it adds no query per
   write once a table's sequence is known.
@@ -1294,8 +1292,8 @@ Everything since 0.8.0, the version the PAM article describes.
   row that changed; `delete_all` "destroyed" per row; inserts "created" per row; `upsert_all`
   finds existing rows by its conflict key (primary key, `unique_by:` columns or index name) and
   publishes "updated" for those, "created" for the rest. The caller's `returning:` result is
-  unchanged. Brought over from the `thesis-restructure` branch (3ba39bb, 975dc6e), keeping
-  master's instance methods (events built after the write).
+  unchanged, and the instance methods (`update_column(s)`, `touch`, `delete`) still build their
+  events after the write.
 - **`Lyra.projection_write { ... }`** — Lyra's own read-model writes: skips strict data access
   and publishes no bypass events. `ModelProjection` and `Rebuild` use it; use it for writes that
   must not reach the event stream, such as seeding or wiping a table.
@@ -1706,8 +1704,7 @@ ignored like any unknown option.
   return records a write had already changed. Stamped entries (see Changed) make all three
   impossible: a stale entry is never used.
 - **An explicit id was replaced** — `CommandHandler#handle_create` generated an id even when the
-  application set one; it now keeps it, in the event and in the row. From `thesis-restructure`
-  (526908e), applied to master's own Hijack fix (cd3ea89).
+  application set one; it now keeps it, in the event and in the row.
 - **ES-NoProj `insert_all` ran, then raised** — through `CachedRelation`'s scope branch the
   insert executed and the caller then got `UnsupportedQuery` ("not a scope"). Inserts and
   upserts now go to the table relation and return its result.
