@@ -219,7 +219,7 @@ Details are in [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md) and
 | Question | How Lyra answers it |
 |---|---|
 | Does every CRUD operation produce an event? | `Lyra.verify_mapping!` runs PetriFlow nets for the CRUD lifecycle and for create, update and destroy across the modes, and checks that their terminal places are reachable, that they are safe (1-bounded), and that they are deadlock-free except at terminal places. See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
-| Can a write change the store without an event? | `Lyra::Verification::BypassWorkflow` models `update_column(s)`, `delete`, `touch`, `update_all`, `delete_all`, `insert_all`, `upsert_all` and `dependent: :nullify`; `BypassWorkflow.coverage` checks that every reachable end state is a rejection or a store change with an event logged. |
+| Can a write change the store without an event? | `Lyra::Verification::BypassWorkflow` models `update_column(s)`, `delete`, `touch`, `update_all`, `delete_all`, `touch_all`, `insert_all`, `upsert_all`, Rails' association nullify and `has_and_belongs_to_many` join-row deletes and the application's join-row inserts in a table-backed, a lagging (ES-Async, ES-Lazy) or an events-only store; `BypassWorkflow.coverage` checks that every reachable end state is exactly one of: a rejection (strict mode, Genesis, the bulk lock limit, ES-NoProj's `upsert_all` `UnsupportedQuery`, an ES-Lazy `upsert_all` reaching a destroyed record's row, `insert_all!`'s duplicate key or join row, a value a unique index refuses in `update_column(s)`, `update_all` or `upsert_all`), a store change with an event logged, or neither a write nor an event (a record destroyed since it was read, `insert_all`'s skipped duplicate key or unique value, or join row). |
 | Does the code's restriction and objection lifecycle match its net? | `Lyra::Verification::DataLifecycleWorkflow` (the data lifecycle with its Restricted place D_R of Art. 18: restrict, the Art. 18(3) notice, lift back to the origin; Deleted and Anonymized unreachable from D_R without the lift) and `ObjectionWorkflow` (pending, then upheld, overridden, rejected or withdrawn). Their tests explore them with PetriFlow (safe, terminating) and check that the transitions PAM DSL's `PamDsl::Rights.project` accepts are exactly the nets'. |
 | Does replaying the events produce the row? | `Lyra::DualView.new(Student, id).compare[:differences].empty?`; `config.dual_view_sample_rate` checks a share of committed writes as they happen (opt-in). |
 | Can every change to a field be traced, and a record's state at any time be recovered? | `Lyra::EventFlow#data_lineage`, `Lyra.state_at` and `Model.as_of` (see [Analysis Projections](#analysis-projections)). |
@@ -270,7 +270,7 @@ non-intrusive monitoring and the hijacking of CRUD operations.
 ## Technology Stack
 
 - **Ruby**: 4.0 or later
-- **Rails**: 8.0 or later
+- **Rails**: 8.1 (`>= 8.1, < 8.2`; tested on 8.1.4.1)
 - **RailsEventStore**: `~> 3.0`, event persistence and stream management
 - **PostgreSQL**: the supported database (`pg` gem); Genesis, ES-Lazy's catch-up
   and ES-Async's projection job take PostgreSQL advisory locks
@@ -338,7 +338,24 @@ Lyra.without_strict_access do
 end
 ```
 
-Rails association operations (e.g., `dependent: :nullify`) are automatically allowed.
+Rails association operations (e.g., `dependent: :nullify`, removing a `has_and_belongs_to_many`
+link) are automatically allowed; the same writes made by the application are not, nor are its
+`insert_all`, `insert_all!` and `upsert_all` of join rows, which are recorded as
+`AssociationLinked` where they run (`Lyra::Associations::HabtmLinks.insert_all`).
+
+Bulk inserts conflict as Monitor's table would. In ES-Async the rows of the keys they write
+are brought up to date with their streams first, under the records' aggregate locks and the
+projection job's per-stream lock, with the job's checkpoint moved past the events applied
+(`AsyncProjectionJob.project_pending`), so the waiting jobs have nothing left to apply; the
+write then moves those checkpoints to its own events. A projection job takes its record's row
+right after its stream lock and, when another transaction holds the row, gives the stream lock
+back and waits for the row before trying again, so it never waits for a row while holding the
+lock such a write waits for. In ES-NoProj the primary key and the other unique indexes are
+checked against the event store (`StrictDataAccessRelation#events_only_inserts`), as a create,
+an update, `update_columns` and `update_all` check the unique indexes there
+(`Lyra::Projections::UniqueIndexes`); in ES-Async and ES-Lazy the other unique indexes are
+looked up in the event store's value streams too (`#projected_unique_rows`), and in ES-Sync
+their values are locked.
 
 **Operational Modes:**
 
@@ -726,9 +743,15 @@ listed under [Operational Modes](#layer-1-interception-layer).
 | ES-NoProj | `:disabled` | no row is written; reads are answered from the events |
 | ES-Lazy | `:lazy` | no row at write time; pending events are applied before each read |
 
-In ES-Sync and ES-Async a failed projection is logged and passed to
+In ES-Sync a projection that raises a database error fails the write
+(PostgreSQL has aborted its transaction); any other failed projection, in
+ES-Sync and ES-Async, is logged and passed to
 `config.projection_error_handler`, or re-raised with
-`config.strict_projections = true`. ES-Async's job is enqueued only once the
+`config.strict_projections = true`. A projected create that meets another
+record's value raises, after the job has brought a lagging holder's row up to
+date where nothing holds it (`ProjectionBehind`: the row is held; retried for
+about a day, then reported; `DuplicateInLog`: logged once and discarded).
+ES-Async's job is enqueued only once the
 writing transaction commits, so a worker never looks for an event that is not
 yet visible, and a rolled-back write enqueues nothing; it retries transient
 failures.
@@ -789,7 +812,14 @@ projected configuration for such queries.
 way, `:through` associations (read through the intermediate records),
 association scopes and calculations on associations included; a `has_many`
 returns a `CachedRelation`, and a polymorphic `belongs_to` resolves its class
-from the type column. A `has_many`'s `dependent: :delete_all` or `:nullify`
+from the type column. A `:through` association is read as Active Record's join
+reads it: every record on the way afresh on each read (a loaded intermediate
+association is neither used nor left loaded, so nothing is saved by it), every
+candidate of a `has_one` step, the targets narrowed by their default scopes as
+the join applies them and ordered as it orders them, and only the records
+returned checked as loaded rows; a read that depends on an order it cannot
+reproduce, or an unscope it cannot follow, raises `UnsupportedQuery` (counts
+and sums still answer). A `has_many`'s `dependent: :delete_all` or `:nullify`
 finds the children the association selects (with the child's default scopes,
 as Active Record applies them to an association) in the event store and writes
 each one's event through `CachedRelation`'s `delete_all`/`update_all`; a scope
@@ -805,6 +835,26 @@ is written, no unique index catches two concurrent writers of one value; on
 PostgreSQL the check takes a transaction-level advisory lock on the model,
 attribute and value first, so the second writer's check waits for the first's
 commit (limits in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled)).
+
+**Unique indexes.** For the same reason the table's unique indexes refused
+nothing: a duplicate `create`, `update`, `update_columns` or `update_all` was
+recorded. `Lyra::Projections::UniqueIndexes` checks them where the table
+modes write the row (after the `before_*` callbacks, before the event): the
+values the write claims are locked (the key a uniqueness validation and
+`insert_all` take; an update's after the record's aggregate lock, as
+Monitor's `UPDATE` takes the row, then the index entry), then looked up in
+value streams that `ReferenceLinks` keeps beside its foreign-key links (each
+event that sets an indexed column linked into `Model!column$<digest>`, an
+HMAC of the value under a secret of the installation, with a link checkpoint
+per column), and a value a live record holds raises
+`ActiveRecord::RecordNotUnique`, as PostgreSQL would. ES-Sync, ES-Async and
+ES-Lazy run the same check before their event, since their projection meets
+the index only after it: ES-Sync against its table, current in the writer's
+transaction, under the value's lock; ES-Async and ES-Lazy against the value
+streams (linked there too, without the foreign-key links), their tables
+lagging the log. Their writes that skip callbacks take the values' locks as
+well, and in ES-Async and ES-Lazy are checked against the streams before the
+table write.
 
 **Database foreign keys.** The tables of monitored models get no rows, so a
 database foreign key from a table no monitored model writes into one of them

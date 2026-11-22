@@ -50,6 +50,44 @@ namespace :test do
 
     puts "\n=== All tests passed! ==="
   end
+
+  # The Solidus case study's specs, in its own bundle: spec/olist (the Olist
+  # replay in every mode) and the rest of its suite, less the JavaScript
+  # system examples, which need a Chrome (bin/rspec-chrome-docker runs them;
+  # SOLIDUS_SPECS_JS=1 includes them here). On a database of their own on the
+  # Lyra test server (SOLIDUS_DATABASE_URL), dropped and loaded from
+  # db/schema.rb first. SOLIDUS_SPECS names spec files or directories (default:
+  # every spec). The system examples rebuild app/assets/builds/tailwind.css,
+  # which is committed: it is put back as it was, so that the tree stays clean
+  # (the benchmark campaign refuses, and its reports record, a dirty tree).
+  desc "Run the Solidus case study's specs (the Olist replay and the rest, without JavaScript)"
+  task :solidus do
+    dir = File.expand_path("examples/solidus_case_study", __dir__)
+    abort "The Solidus case study is not in this checkout." unless File.directory?(dir)
+
+    env = {
+      "RAILS_ENV" => "test",
+      "DISABLE_DATABASE_ENVIRONMENT_CHECK" => "1",
+      "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+      "DATABASE_URL" => ENV.fetch("SOLIDUS_DATABASE_URL",
+                                  "postgres://postgres:postgres@localhost:5433/solidus_case_study_test")
+    }
+    css = File.join(dir, "app/assets/builds/tailwind.css")
+    committed = File.exist?(css) ? File.binread(css) : nil
+    args = ENV.fetch("SOLIDUS_SPECS", "").split
+    args = ["--tag", "~js", *args] unless ENV["SOLIDUS_SPECS_JS"] == "1"
+    begin
+      Bundler.with_unbundled_env do
+        Dir.chdir(dir) do
+          system(env, "bundle exec rails db:drop db:create db:schema:load") ||
+            raise("Solidus case study: the test database could not be prepared")
+          system(env, "bundle", "exec", "rspec", *args) || raise("Solidus case study specs failed")
+        end
+      end
+    ensure
+      File.binwrite(css, committed) if committed && File.binread(css) != committed
+    end
+  end
 end
 
 task default: :test

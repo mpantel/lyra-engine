@@ -268,8 +268,11 @@ module Lyra
       Lyra::Projections::CachedRelation.new(BypassTestArticle, [a]).update_all(status: "published")
       Lyra::Projections::CachedRelation.new(BypassTestArticle, [b]).delete_all
 
-      assert_equal({ "status" => %w[draft published] }, value(only_event(a).data, :changes))
-      assert_equal "destroyed", value(only_event(b).data, :operation).to_s
+      # The rows predate the (cleared) log: Genesis imports them first, so
+      # the bulk write's event does not begin their streams (from 1.0.0).
+      assert_equal %w[imported updated], events_for(a).map { value(_1.data, :operation).to_s }
+      assert_equal({ "status" => %w[draft published] }, value(events_for(a).last.data, :changes))
+      assert_equal %w[imported destroyed], events_for(b).map { value(_1.data, :operation).to_s }
       # The table itself (Model.unscoped reads the event store in ES-NoProj).
       table_row = Lyra::ModeTransition.send(:bypass) { BypassTestArticle.unscoped.exists?(b.id) }
       refute table_row, "stale table row left behind"

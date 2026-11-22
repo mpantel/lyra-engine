@@ -8,13 +8,12 @@
 
 services:
   db:
-    # Pinned to the exact minor version the published M4 benchmarks ran on
-    # (16.11). The floating 16-alpine tag drifts: it resolved to 16.14 in
-    # September 2026, which would make later runs incomparable with those.
-    # LYRA_PG_IMAGE picks another exact tag for a new baseline (the 0.9.0
-    # campaign: 18.6-alpine; the 1.0.0 campaign: LYRA_PG_IMAGE=18.7-alpine); the
-    # benchmark harness records the image used.
-    image: postgres:${LYRA_PG_IMAGE:-16.11-alpine}
+    # Pinned to an exact minor version, the one the 1.0.0 benchmark campaign ran on
+    # (18.7), so that development, tests and the campaign use the same server; a
+    # floating tag drifts. LYRA_PG_IMAGE picks another exact tag (the published M4
+    # benchmarks of July 2026 ran on 16.11-alpine, the 0.9.0 campaign on
+    # 18.6-alpine); the benchmark harness records the image used.
+    image: postgres:${LYRA_PG_IMAGE:-18.7-alpine}
     container_name: lyra_postgres
     # Raise max_connections above Postgres's default of 100. The concurrent
     # benchmark sizes its pool to (max_threads + 2) = 66 at 64 threads, and

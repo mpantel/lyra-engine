@@ -38,10 +38,7 @@ module Lyra
       {
         exists: true,
         attributes: record.attributes,
-        timestamps: {
-          created_at: record.created_at,
-          updated_at: record.updated_at
-        }
+        timestamps: timestamps_of(record)
       }
     end
 
@@ -139,6 +136,12 @@ module Lyra
         end
       end
 
+      # With config.record_touches false (Monitor only), a touch that changed
+      # only the update timestamps left no event, so a row whose only
+      # difference is in those columns agrees with its events. A difference in
+      # any other column is reported with the timestamps beside it.
+      differences = {} if !Lyra.config.record_touches && touch_only?(differences)
+
       # has_and_belongs_to_many links: the join table against the link
       # events (Lyra::Associations::HabtmLinks), by association name.
       differences.merge!(Associations::HabtmLinks.differences(model_class, model_id))
@@ -152,6 +155,27 @@ module Lyra
     end
 
     private
+
+    # The record's timestamp columns, by name: those the model has
+    # (created_at, updated_at, updated_on, ...), none for a model without.
+    # Before 1.0.0 created_at and updated_at were read whatever the model had,
+    # and a model without one raised NoMethodError.
+    def timestamps_of(record)
+      klass = record.class
+      return {} unless klass.respond_to?(:timestamp_attributes_for_update_in_model)
+
+      names = klass.timestamp_attributes_for_create_in_model | klass.timestamp_attributes_for_update_in_model
+      names.to_h { |name| [name.to_sym, record.read_attribute(name)] }
+    end
+
+    # Whether every difference is in the model's update timestamps
+    # (updated_at, updated_on).
+    def touch_only?(differences)
+      return false if differences.empty? || !model_class.respond_to?(:timestamp_attributes_for_update_in_model)
+
+      stamps = model_class.timestamp_attributes_for_update_in_model
+      differences.each_key.all? { |key| stamps.include?(key.to_s) }
+    end
 
     # Build a normalized lookup table from attributes hash
     # Converts all keys to symbols for consistent access

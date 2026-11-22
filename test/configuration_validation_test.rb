@@ -54,4 +54,30 @@ class ConfigurationValidationTest < Minitest::Test
   def test_dashboard_authorization_defaults_to_nil
     assert_nil @config.dashboard_authorization
   end
+
+  # nil or at least 1: a limit of 0 refused every write that locks a record,
+  # a single update_columns, touch or delete included.
+  def test_bulk_write_lock_limit_is_nil_or_at_least_one
+    assert_equal 5_000, @config.bulk_write_lock_limit
+    [1, 2, 10_000, nil].each do |limit|
+      @config.bulk_write_lock_limit = limit
+      assert_equal limit, @config.bulk_write_lock_limit
+    end
+    @config.bulk_write_lock_limit = "7"
+    assert_equal 7, @config.bulk_write_lock_limit
+
+    [0, -1, 1.5, "none", "", :all, true].each do |limit|
+      error = assert_raises(ArgumentError, limit.inspect) { @config.bulk_write_lock_limit = limit }
+      assert_match(/bulk_write_lock_limit must be nil \(no limit\) or a whole number of at least 1/, error.message)
+    end
+    assert_equal 7, @config.bulk_write_lock_limit, "unchanged by a refused value"
+  end
+
+  def test_the_lock_limit_message_counts_one_record_as_one
+    one = Lyra::BulkWriteLockLimitError.new(String, 1, 1, "delete")
+    many = Lyra::BulkWriteLockLimitError.new(String, 3, 2, "update_all")
+
+    assert_match(/\ALyra: delete of 1 String record would hold 1 aggregate lock until/, one.message)
+    assert_match(/\ALyra: update_all of 3 String records would hold 3 aggregate locks until/, many.message)
+  end
 end

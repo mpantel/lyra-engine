@@ -29,6 +29,8 @@ namespace :lyra do
       report.discrepancies.first(20).each { puts "  #{_1}" }
       puts(report.clean? ? "Clean: certified for #{Lyra.config.mode_transition_certificate_ttl}s." : "Not certified.")
       exit 1 unless report.clean?
+    rescue Lyra::ModeTransition::Refused => e
+      abort e.message
     end
 
     desc "Show the mode the application runs in and the last one applied"
@@ -36,16 +38,29 @@ namespace :lyra do
       puts "configured:   #{Lyra::ModeTransition.current}"
       puts "last applied: #{Lyra::ModeTransition.last_applied || '(none recorded)'}"
       puts "gate:         #{Lyra::ModeTransition.gate_enabled? ? 'on' : 'off'}"
+      live = Lyra::TouchRegistry.live_processes
+      puts "touches left out (config.record_touches = false): #{live.empty? ? 'by no live process' : "#{live.size} live process(es)"}"
+      live.each do |p|
+        puts "  #{p[:host]} pid #{p[:pid]} (Lyra #{p[:version]}), since #{p[:since]&.utc&.iso8601}, " \
+             "last seen #{p[:last_seen]&.utc&.iso8601}"
+      end
+      puts "  #{Lyra::TouchRegistry::STEPS}" if live.any?
     end
   end
 
   desc "Bring the event log back in line with the tables after Monitor lost events " \
-       "(DRY_RUN=1 lists them; MODELS=User,Order limits it)"
+       "(DRY_RUN=1 lists them; MODELS=User,Order limits it; UNREPRESENTABLE=skip repairs the rest when rows hold " \
+       "values their model cannot represent, default config.genesis_unrepresentable, :refuse)"
   task repair: :environment do
     models = ENV["MODELS"] ? ENV["MODELS"].split(",").map { _1.strip.constantize } : lyra_monitored_models.call
-    result = Lyra::Repair.run(models: models, dry_run: ENV["DRY_RUN"].present?, operator: ENV["OPERATOR"])
+    result = Lyra::Repair.run(models: models, dry_run: ENV["DRY_RUN"].present?, operator: ENV["OPERATOR"],
+                              unrepresentable: ENV["UNREPRESENTABLE"].presence || Lyra.config.genesis_unrepresentable)
     puts result.summary
     (ENV["DRY_RUN"].present? ? result.found : result.remaining).first(20).each { puts "  #{_1}" }
+    if result.unrepresentable.any?
+      puts "Values their model cannot represent (#{ENV['DRY_RUN'].present? ? 'would not be repaired' : 'not repaired'}):"
+      result.unrepresentable.each { puts "  #{_1}" }
+    end
     exit 1 if result.remaining.any? && ENV["DRY_RUN"].blank?
   rescue Lyra::Repair::Refused => e
     abort e.message

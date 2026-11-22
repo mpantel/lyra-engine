@@ -9,6 +9,11 @@ if defined?(ActiveRecord::Base)
     monitor_with_lyra
   end
 
+  # Not monitored: plain Active Record on SdaArticle's table.
+  class SdaPlainArticle < ActiveRecord::Base
+    self.table_name = "articles"
+  end
+
   # Not monitored: the parent whose destroy nullifies the monitored children.
   class SdaAuthor < ActiveRecord::Base
     self.table_name = "users"
@@ -153,6 +158,78 @@ module Lyra
       end
     end
 
+    # RETURNING as raw SQL without the primary key: the rows were written
+    # and no event recorded (the keys could not be read back). The key is
+    # returned under Lyra's alias and taken out of the caller's result.
+    def test_raw_sql_returning_without_the_key_still_records_each_row
+      now = Time.current
+      row = ->(title) { { title: title, status: "draft", created_at: now, updated_at: now } }
+      %i[monitor es_sync es_noproj].each do |mode|
+        wipe
+        case mode
+        when :monitor then Lyra.config.enable_monitor!
+        else
+          Lyra.config.enable_event_sourcing!
+          Lyra.config.projection_mode = mode == :es_sync ? :sync : :disabled
+        end
+
+        inserted = SdaArticle.insert_all([row.call("I")], returning: Arel.sql("upper(title) AS shout"))
+        assert_equal [["shout"], [["I"]]], [inserted.columns, inserted.rows], mode
+        writes = [["I", "insert_all"]]
+        unless mode == :es_noproj # upsert_all is refused there
+          upserted = SdaArticle.upsert_all([row.call("U")], returning: Arel.sql("title"))
+          assert_equal [["title"], [["U"]]], [upserted.columns, upserted.rows], mode
+          writes << ["U", "upsert_all"]
+        end
+
+        writes.each do |title, source|
+          id = SdaArticle.unscoped.where(title: title).pluck(:id).sole
+          event = Lyra.config.event_store.read.stream("SdaArticle$#{id}").to_a.sole
+          assert_equal source, event.metadata[:bypass_source], "#{mode} #{source}"
+        end
+      end
+    end
+
+    # The caller's result is Active Record's own, whatever RETURNING it
+    # asked for, though Lyra adds the primary key to it: the same columns,
+    # rows, column types (by name and by index), cast values and affected
+    # rows as the same write of an unmonitored model on the same table.
+    # The result Lyra rebuilt without its key had no column types:
+    # column_types came back empty, and cast_values left every value as the
+    # database returned it.
+    def test_the_returning_result_is_active_record_s_own
+      now = Time.utc(2026, 1, 2, 3, 4, 5)
+      forms = {
+        symbol: :title, array: %i[title status], with_key: %i[id title], sql: Arel.sql("title"),
+        sql_expression: Arel.sql("upper(title) AS shout, published_at"), star: Arel.sql("*"), none: false, default: nil
+      }
+      id = 9_000
+      %i[monitor es_sync es_noproj].each do |mode|
+        wipe
+        case mode
+        when :monitor then Lyra.config.enable_monitor!
+        else
+          Lyra.config.enable_event_sourcing!
+          Lyra.config.projection_mode = mode == :es_sync ? :sync : :disabled
+        end
+        writes = %i[insert_all insert_all!] + (mode == :es_noproj ? [] : %i[upsert_all]) # upsert_all is refused there
+        forms.each do |form, returning|
+          writes.each do |write|
+            id += 1
+            row = { id: id, title: "t#{id}", status: "s", published_at: now, created_at: now, updated_at: now }
+            plain = SdaPlainArticle.public_send(write, [row], returning: returning)
+            SdaPlainArticle.where(id: id).delete_all
+            lyra = SdaArticle.public_send(write, [row], returning: returning)
+
+            assert_equal result_shape(plain), result_shape(lyra), "#{mode} #{write} #{form}"
+            refute_empty lyra.column_types, "#{mode} #{write} #{form}" unless returning == false
+            event = Lyra.config.event_store.read.stream("SdaArticle$#{id}").to_a.sole
+            assert_equal write.to_s, event.metadata[:bypass_source], "#{mode} #{write} #{form}"
+          end
+        end
+      end
+    end
+
     def test_strict_mode_refuses_insert_all_bang
       Lyra.config.strict_data_access = true
       now = Time.current
@@ -197,6 +274,11 @@ module Lyra
     end
 
     private
+
+    def result_shape(result)
+      { columns: result.columns, rows: result.rows, column_types: result.column_types,
+        cast_values: result.cast_values, affected_rows: result.affected_rows }
+    end
 
     def wipe
       Lyra.projection_write(lyra_internal) do

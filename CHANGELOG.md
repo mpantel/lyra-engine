@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-17
+## [1.0.0] - 2026-11-22
 
 ### Breaking
+- **Lyra requires Rails 8.1: `rails >= 8.1, < 8.2`** (`lyra.gemspec`), where it declared
+  `rails >= 8.0`. Rails 8.0 was never tested: Lyra is developed and tested on Rails 8.1.4.1 (with
+  Ruby 4.0.10 and RailsEventStore 3.2.0), and CI tests only the lockfile. The upper bound is new
+  because Lyra patches Active Record internals (relations, associations, persistence), which a
+  Rails minor release may change, so a future Rails minor needs a Lyra release that is tested on
+  it. The `rails_event_store ~> 3.0` and Ruby `>= 4.0` requirements are unchanged. The blog app
+  asks for Ruby `>= 4.0`, Lyra's floor; no locked gem version changed.
+
 - **A query uses every declared field it names, whatever it returns.** Purpose-bound reads checked
   record loads and `pluck`; aggregates, filters and `exists?` were not checked, so under a purpose
   that does not allow `name`, `Registration.group(:name).count`, `maximum(:name)` and
@@ -149,8 +157,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   demand and returns the names of the models it warned about. Nothing else changes: the records
   are still skipped, and only models with a rule of their own are acted on (the policy's
   `default` period is not executed; now documented).
+- **`config.record_touches`: keep timestamp-only touches out of the log, in Monitor.** An instance
+  `touch`, a `touch_all` and a `belongs_to ... touch: true` cascade each append an event, and an
+  application that touches a lot fills the log with writes that change only `updated_at` (on the
+  Olist replay through Solidus, cascades touching orders and shipments). `true`, the default,
+  records every touch as before. `false` leaves out a touch whose only changes are the model's
+  update timestamps (`updated_at`, `updated_on`); a touch that also changes another column
+  (`touch(:completed_at)`, a `lock_version` increment) is recorded in full, and so is an explicit
+  `update_all(updated_at: ...)` or `update_columns(updated_at: ...)`, which are not touches.
+  DualView, and with it the sampler, the gate's check and `lyra:repair`, then takes a difference
+  confined to those columns as agreement; a difference in any other column is reported with the
+  timestamps beside it. Monitor (and Disabled) only: Hijack and event sourcing take the log as the
+  record of every change and rebuild rows from it, where a missing touch would rebuild a stale
+  `updated_at`, and Hijack passes into event sourcing without a check. So `record_touches =
+  false` raises `ArgumentError` in those modes, and while it is false `mode=`, `hijack_enabled =
+  true`, `ModeTransition.apply_label` and an ungated `enable_hijack!` or `enable_event_sourcing!`
+  raise `ArgumentError`. A process with the option off registers in `lyra_mode_transitions` (kind
+  `touch_skipping`: host, pid, since, Lyra's version, last seen; `Lyra::TouchRegistry`) before it
+  leaves a touch out, refreshes the entry at most every 60 seconds from the touch path and
+  ModeSync's check, ends it when the option is set back to `true` and at exit, and logs a warning
+  once. An entry not refreshed for 180 seconds (the database's `clock_timestamp()`) is no longer
+  live. Registry writes never join the caller's transaction: each commits on its own, on a second
+  connection when the caller's is in a transaction (checked out for at most one second, with a
+  two-second `lock_timeout`); when none can be had, the touch is recorded. Each takes the
+  registry's advisory lock and re-reads the application's mode under it, and a switch takes the
+  same lock for its last look at the registry and its record (a check for its last look and its
+  certificate), so a registration and a switch are serialized: either the switch is refused, or the
+  registering process ends its entry, records the touch and is fenced. While this process has the
+  option off or any process has a live entry, every way into Hijack or event sourcing is refused
+  with `ModeTransition::Refused`, naming the processes and the way up: `ModeTransition.to!` (`force: true` included, and so the gated
+  `enable_*!` helpers), `check` (at its start and before it certifies; `rake lyra:mode:check`
+  prints it and exits non-zero), ModeSync's adoption (the switch stays unseen, and is adopted once
+  the entry has ended or expired) and a boot into such a mode; `rake lyra:mode:status` lists the
+  live processes. No certificate issued before an entry's latest refresh or end is taken. A process
+  with the option off does not boot into an application whose mode is Hijack or event sourcing,
+  cannot set the option false at runtime in one, and one that finds itself in such a mode later is
+  fenced: each ModeSync check raises, and so does every touch it would have left out, with the save
+  that cascades it. `Lyra::Projections::Rebuild.rebuild` is refused (`Rebuild::Refused`) with the
+  option off or a live entry, since it would set every touched row
+  back. To escalate: restart every process with the option on, run `lyra:repair` in Monitor (the
+  check then sees the stale timestamps; the repair records them, one `Updated` event per record),
+  then switch. A row with no stream that is touched with the option off is imported by Genesis as
+  it then is. Strict mode is unchanged (a `touch` is allowed, `touch_all` refused as
+  `update_all`). An unrecorded touch has no event, so no event names it as its cause.
+  `LYRA_RECORD_TOUCHES=false` sets it in the Solidus example. Accepts `"true"`/`"false"` strings.
+  On 200 Olist orders replayed through Solidus in Monitor, the log falls from 8,691 events (2,547
+  of them touches) to 6,331; the 187 touches left are order completions (`touch(:completed_at)`),
+  and the oracle (197/200 orders, as in Disabled), the mails and DualView (1,575 records, no
+  discrepancy) are unchanged.
 
 ### Fixed
+- **Every `causation_id` Lyra gives names an event in the log.** A write's scope fixed its event
+  id before its callbacks ran, and the writes they made recorded it as their cause. A save that
+  changes nothing records no event (see Changed), so its callbacks' writes named an event that
+  never existed: replaying 200 Olist orders through Solidus, 203 of 793 causation ids in Monitor,
+  ES-Sync and ES-NoProj alike, each a `LineItemUpdated` inside an `Order#save` with nothing to
+  change, which still saves its line items (has_many autosave). A write is now the cause of the
+  writes made after its own event is in the log; when it records none, they take the cause that
+  was in scope when the write began. The writes its `before_*` callbacks make (a `belongs_to`
+  autosave, a `dependent: :destroy`) come before anyone knows and name the write, as before. A
+  save that changes nothing still records nothing in its stream; when a write made in its
+  `before_*` callbacks names it as cause, Lyra records a `SaveWithoutEffect` marker with its id in
+  an internal stream, `Lyra::SavesWithoutEffect`, in the write's transaction. So it does for every
+  write that ends without its event in the log after naming it: an update or destroy that reaches
+  no row (Monitor's stale copy), an aborted save, a command refused after the id was taken
+  (Hijack, event sourcing), a write whose Monitor append failed, and a write that raised, which a
+  caller may rescue inside an enclosing transaction and commit (then in a savepoint, best effort).
+  The marker holds the model, the record's key, the operation and the reason (`no change`,
+  `no row`, `not saved`, `append failed`), no attribute value, and `replay: false`; replay, the
+  projections, ES-Lazy's catch-up, DualView, the dashboard's event window and the subject reports
+  pass it over. A write's scope now wraps its whole save or destroy callback chain, a model's own
+  `after_save` and `after_destroy` included: it opens around `create_or_update` and `destroy`, and
+  around a destroy chain an application runs itself with `run_callbacks(:destroy)` (a soft delete,
+  such as paranoia's). As an `around_save`/`around_destroy` callback it had closed before them
+  (Active Model prepends `after_*` callbacks), so their writes (Solidus's `Payment#update_order`)
+  had no cause and opened a correlation of their own. Bypass writes (`touch`, `update_columns`)
+  and jobs created during a write take their cause the same way. An access-log entry, which
+  commits on its own connection and outlives a write that rolls back, names no write in scope: its
+  cause is the one from outside every write scope (`Lyra::Causation.outside_write_scopes`), and
+  its correlation ties it to the writes. `Lyra::Causation.integrity` reports the causation ids
+  that name no event in a store; none do once the transactions commit, except a cause the
+  application sets itself and an append lost under Monitor's log-and-continue policy. The
+  correlation id the outermost write opens is still its event id when it records nothing: a
+  correlation id is a group's label, not a reference.
+- **Hijack no longer keeps the event of a row write that failed.** Hijack appends a write's event
+  before its row write. On a model with optimistic locking the row write can raise
+  `StaleObjectError` after the append, and a caller that rescued it inside an enclosing
+  transaction committed an `Updated` (or `Destroyed`) for a write that never happened: the log and
+  the row parted, and DualView reported the record. The append and the row write now share a
+  savepoint, which takes the event with it when the row write raises. The row lock taken before
+  the append is still held to the end of the transaction when the write succeeds. Models without
+  optimistic locking take no savepoint: their row write does not raise for a row that moved.
+- **DualView on a model without `created_at` or `updated_at`.** `DualView#crud_state` read both
+  whatever the model had, so a model with only `updated_on`, or no timestamps, raised
+  `NoMethodError` in DualView, the mode gate's check and `lyra:repair`. Its `timestamps` now hold
+  the model's own timestamp columns (`timestamp_attributes_for_create_in_model` and
+  `..._for_update_in_model`), none for a model without.
 - **ES-NoProj refuses an Active Record relation's condition it cannot read, instead of skipping
   it.** A named scope called on a relation, a relation passed to `merge`, and a default scope are
   read as hash conditions on the model's own columns. An equality or `IN` whose left side was not
@@ -169,22 +271,354 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ES-NoProj's `limit!` limits the relation it is called on**, as Active Record's; it returned a
   limited copy and left the relation whole. The bang query methods it does not implement
   (`offset!`, `reorder!`, `distinct!`, `group!`, `none!`, ...) are refused, as before.
-- **ES-NoProj now refuses `only`** (other than `only(:joins, :left_outer_joins)`, which Active
-  Record's association scope asks for) rather than return the relation unchanged, its order and
-  limit kept.
-- **ES-NoProj's pagination (`page(n).per(m)`)**: `total_count` and `total_pages` count the records
-  the relation selects before the window, through the same purpose check and rights as any count;
-  they counted the page's records, so a paginated list showed one page of one. ES-NoProj now
-  refuses a relation read after `page(n)` without `per(m)` rather than answer with every record,
-  and `page` no longer changes the relation it is called on. `per(nil)`, a negative or a
-  non-numeric size keep the default page size, as Kaminari's do; they gave an empty page.
+- **ES-NoProj's `only` keeps the parts named and drops the rest, as Active Record's**
+  (`only(:where)` keeps the conditions and drops the order, limit, select and group; `only(:order)`
+  orders every record). It returned the relation unchanged, its order and limit kept. The
+  conditions and order are taken off as `unscope` takes them off; `only` of a joined relation
+  without its joins is refused (`UnsupportedQuery`).
+- **ES-NoProj's pagination is Kaminari 1.2.2's.** `page(n)` is `limit(size).offset((n - 1) *
+  size)`, the size the model's `paginates_per` (else Kaminari's `default_per_page`, else 25), or its
+  `max_paginates_per` when that is smaller; a page number below 1, `nil` or not a number is page 1.
+  `page(n)` without `per` answered with every record, and the maximum was not applied. `per(m)` is
+  the page of that size with the same number, at most `max_per_page:`, the relation's
+  `max_paginates_per(n)` (kept on the relation; it set the model's) or the model's; `per(nil)`, a
+  negative or a non-numeric size keep the page as it is (they gave an empty page). `padding`,
+  `next_page`, `prev_page`, `first_page?`, `last_page?`, `out_of_range?`, `total_pages` and
+  `current_page` are Kaminari's (the first five were missing), as are, on a page only,
+  `entry_name` (`page_entries_info`'s), `without_count` (its `last_page?` and `out_of_range?`
+  look at the page; `total_count` raises Kaminari's error) and the deprecated `current_per_page`.
+  `total_count` and `total_pages`
+  count the records the relation selects before the window, through the same purpose check and
+  rights as any count; they counted the page's records, so a paginated list showed one page of
+  one. `Model.page(n)`, Kaminari's own, gives the same page: the relation answers what Kaminari's
+  relation modules define (extending it with them was refused when read). `page` no longer
+  changes the relation it is called on.
+- **ES-NoProj takes a limit or offset after the relation's conditions and order, as SQL does.**
+  A `where`, `where.not`, `order`, scope, `merge`, `select` or `unscope` called after `limit` or
+  `offset` acted on the window's records (`Model.order(:code).limit(2).where(status: "draft")`
+  filtered the first two records); it now applies before the window. A second `limit` or `offset`
+  replaces the first (`limit(1).limit(3)` is three records, `limit(2).offset(1)` records 2 and 3);
+  they applied to the window. `limit_value` and `offset_value` are the values given, as in Active
+  Record (`limit_value` was the page size, `nil` after `limit`; `offset_value` was 0 without an
+  offset). `find`, `find_by` and `exists?` with a condition on a window apply the condition first
+  and keep the window's offset, as Active Record's `where(...).take` does. `sum`, `average`,
+  `minimum` and `maximum` of a window are Active Record's: its one aggregate row, which the window
+  keeps (the aggregate over every record the relation selects) or leaves out (an offset, a limit of
+  0: `0` for `sum`, `nil` otherwise); they were computed over the window's records. `or` of two
+  windows needs the same window, as in Active Record (an `ArgumentError` otherwise). A grouped
+  aggregate of a window, which Active Record limits to some of the groups, is refused. Under a
+  right in force, a window's count, pluck, ids, exists? and batch sizes are taken from the records
+  the right does not leave out, as SQL takes LIMIT and OFFSET after its WHERE (the window was
+  taken first, and then shortened by a record left out of it). `find` with
+  several ids (`find(a, b)`, `find([a, b])`) is Active Record's, window included; it raised
+  `ArgumentError`.
+- **ES-NoProj's `or` returns the records in the relation's order** (else by primary key), each once;
+  it returned this relation's records, then the other's.
+- **ES-NoProj's `reselect` replaces the selected columns, a second `select` adds to the first, and
+  `unscope(:select)` and `unscope(:group)` take them off, as in Active Record.** `reselect` did
+  nothing and a second `select` replaced the first, so the records came back without the columns
+  asked for (`MissingAttributeError`); `unscope(:select)` and `unscope(:group)` were ignored.
+  `select` and `reselect` with no column raise Active Record's `ArgumentError`. The relation's
+  plan (what `unscope`, `rewhere` and `only` replay) now survives `select`, `group` and
+  `create_with`, and a replay keeps them.
+- **ES-NoProj's `unscope(:where)` of a relation filtered by an SQL fragment is refused** (`Model
+  .where("qty > ?", 2).unscope(:where)`); it kept the fragment's condition. `where.not` now
+  continues the relation's plan, so `unscope`, `rewhere` and `merge` can take it off, as Active
+  Record does (they were refused after it). `unscope(where: :owner_id)` takes off a condition
+  named by its `belongs_to` association (`where(owner: ann)`); it was kept.
+- **ES-NoProj's `distinct` of selected columns (`select(:status).distinct`, `SELECT DISTINCT`) is
+  refused**, in either order and through `merge`: its rows are distinct values, not records, and
+  it answered with the records.
+- **ES-NoProj batches as Active Record does.** `find_in_batches`, `find_each` and `in_batches` go
+  by primary key (or the `cursor:` columns, in `order: :asc` or `:desc`, from `start:` to `finish:`),
+  whatever the relation's order (logged, or `ArgumentError` with `error_on_ignore: true`), keeping its
+  limit; they followed the relation's order and took no options. Each `in_batches` batch is the
+  relation narrowed to the batch's records, in the relation's order (`load: true`: the batch's
+  records). `in_batches` without a block returns Active Record's `BatchEnumerator` (`each`,
+  `each_record`, `update_all`, `delete_all`, ...); it raised `LocalJumpError`. The enumerators of
+  `find_each` and `find_in_batches` have Active Record's sizes. Counted (those sizes, and
+  `in_batches`' batches of keys), the records leave out those a right in force leaves out, before
+  the relation's limit, as a count does; a restricted record was counted. Loaded (`find_each`,
+  `find_in_batches`, `in_batches(load: true)`, `each_record`, or a batch's records), each is
+  checked as a load is, and a restricted record raises, as in Active Record. The batches of a
+  relation with no conditions are ranges of keys, as Active Record's are (`use_ranges:`), so a
+  record the keys left out is in one, and loading that batch raises as Active Record's does.
+  Batches of a relation with an offset are taken as Active Record takes them: it applies the
+  offset to each batch's query (see below).
+- **An ES-NoProj bulk write writes what its relation selects when it is called, as Active Record's
+  does, and no longer brings back a record destroyed since.** A relation, and each batch
+  `in_batches` yields, held the records it selected when it was built, loaded or not, and
+  `update_all`, `delete_all`, `touch_all`, `destroy_all`, `update_counters` and `update` wrote
+  those. A record deleted in the meantime (by another relation's `delete_all`, a `destroy`, an
+  erasure, or during an `in_batches` loop) got an `Updated` event after its `Destroyed` and read
+  as live again, so a stale relation could undo a delete or an erasure; `delete_all` appended a
+  second `Destroyed`; `destroy_all`, `update` and `update!` raised `Lyra::RecordDestroyedError`
+  part-way. A record changed or created since was written or left out by the old selection, and a
+  window was not taken again: `order(:code).offset(1).limit(3)`, after one of its records was
+  deleted, wrote the two it still held where Active Record writes the next three. A relation now
+  keeps how it was built (`Lyra::Projections::Rebuildable`): where it started (every record of
+  the model, a foreign-key lookup, an association, a `:through` association with no association
+  scope on the way, its default scopes kept as they were built) and the query methods called on it since, with their arguments
+  copied when they were called, so that a caller changing an array, hash or string afterwards
+  does not change what the write selects, as it does not change Active Record's query. A scope or
+  class method called on the relation is the application's code and is not run again: what it
+  built is recorded as the query methods it called, with the values it used then (`Time.current`,
+  the ids it plucked), as Active Record binds them. A step that changes no selection (`extending`,
+  `includes`, `readonly`, ...) is not recorded; one with another block, or an argument that cannot
+  be copied, leaves the relation without a recipe. `unscope`, `rewhere`, `except` and `only`,
+  which rebuild the relation from its plan, keep the recipe that rebuild records (where the plan
+  started, read again), so they too select at write time; they wrote the records the plan held
+  when the relation was built, with their old values. A write builds the relation again from the
+  event store: the aggregate locks of the records it holds are taken, the lock a single record's
+  update or destroy takes, all or none (`Lyra::AdvisoryLock.xact_lock_all`: tried without waiting
+  in one statement; when one is held, the others are given back and the next try first waits for
+  that one, so two writers over overlapping records wait for each other instead of deadlocking),
+  then the selection is read; a record that came to match since is locked in turn and the
+  selection read again (up to four times, after which a record not yet locked is left out, as if
+  it had matched after the write). A destroyed record is not in the selection. The count returned
+  is Active Record's. A relation keyed by primary key (`where(id: ...)`) is read again by those
+  keys only. `destroy_all`, `update` and `update!` load the selection as Active Record's do, or,
+  once the application has loaded the relation (`to_a`, `each`, ...), work on the records loaded,
+  as Active Record's do: there a record destroyed since is left out of `destroy_all` (Active
+  Record also runs `destroy` on it, reaching no row, and returns it) and takes `update`'s
+  attributes in memory without being written. `destroy_all` delivers its records as a load does,
+  so a record under a restriction raises `RestrictedProcessingError` before any is destroyed, as
+  in Monitor; it was destroyed. It checks each record under its lock before its destroy, which
+  checks again after its `before_destroy` callbacks (one that deletes the record is refused with
+  `Lyra::RecordDestroyedError`, and rolled back). Each batch of `in_batches` is the relation
+  narrowed to the batch's keys, as in Active Record, so a record of a later batch that no longer
+  matches is not written by the batch's bulk write (and the batches are read as the loop reaches
+  them: see below). A relation without a recipe (made from given records, such as a
+  `dependent: :delete_all` or `:nullify`'s children, or from a scope or argument that could not
+  be recorded) writes the records it holds, less those whose streams end in a destroy, read under
+  the same locks (`Lyra::StreamTail.destroyed_streams`: one query for all of them where each last
+  event is a create or an update). The cost is on writes only: one locking statement (in a
+  savepoint) and one read of the selection per bulk write, the read of the records with the given
+  keys for a keyed relation; one read of the streams for a relation without a recipe;
+  `destroy_all` adds two locks and two stream reads per record. On 2,047 records, a
+  `where(id: x).update_all` takes about what it took (165 ms against 156), a `where(code: ...)`
+  one about three times (one more read of the model's records at the write). Reads are unchanged
+  but for recording each query method's call. With `lock_aggregate_before_append` off nothing is
+  locked or checked, as for a single record. ES-Sync, Hijack and Monitor write through SQL and
+  were not affected; for ES-Async and ES-Lazy, see below.
+- **ES-Async bulk writes leave out a row whose destroy is waiting for its projection job.** The
+  row stays in the table until the job runs, and `update_all`, `delete_all` and `touch_all` wrote
+  it and appended an `Updated` after the `Destroyed` (or a second `Destroyed`), bringing the record
+  back. The write now reads the keys it matches, takes their aggregate locks (all or none), then
+  locks the rows (and Genesis admits rows that predate Lyra), reads the rows' streams in one query
+  and leaves out a destroyed record's row from the write, the events and the count, as Active
+  Record's reaches no row of it. A row that came to match while the locks were taken gives the row
+  locks back and the keys are read again (up to three times). `dependent: :nullify` leaves out a
+  destroyed child the same way: no event, and its row is not written. The same
+  `bulk_write_lock_limit` applies. On 1,000 rows the write costs what it did (4,013 queries against
+  4,005, 3.05 s). For ES-Lazy, see below.
+- **A record's locks are taken in one order: its aggregate lock, then its row.** ES-Async's and
+  ES-Lazy's writes through callbacks take the aggregate (advisory) lock only, Hijack's and
+  ES-Sync's the row's only; the writes that skip callbacks (`update_columns`, `touch`, `delete`,
+  ES-Async's `update_all` and `delete_all`) and an erasure now take the aggregate lock first, then
+  write or lock the row. An erasure took the row first, and with the checks above a bulk write
+  took the rows first too, which deadlocked against a write holding the aggregate lock (an ES-Async
+  `update_all` against concurrent `update_columns`: 232 deadlocks in 300 writes; none now). The
+  order is written down at `Lyra::AdvisoryLock`.
+- **A stale copy's `update_columns`, `touch` and `delete` no longer bring back a destroyed record
+  or log a second destroy.** A copy read before another copy, a relation's `delete_all` or an
+  erasure destroyed the record recorded an `Updated` after the `Destroyed` (`update_columns`,
+  `touch`) or a second `Destroyed` (`delete`), in ES-NoProj, ES-Async and ES-Lazy, and `delete`
+  did in Monitor, Hijack and ES-Sync as well. In the first three they now read the record's stream
+  under its aggregate lock first; elsewhere `delete` locks the row first. When the record is gone
+  they record nothing and return what Active Record returns for a row already gone: `false` from
+  `update_columns` and `touch` (the attributes are set in memory), the frozen record from
+  `delete`. A row still in the table (in ES-Async, before the destroy's job deletes it) is not
+  written either: Active Record's own write runs in a savepoint that is rolled back.
+- **ES-NoProj's class-level counters write the record.** `Model.increment_counter`,
+  `decrement_counter`, `update_counters(id, ...)` (with `touch:`) and a record's `increment!` and
+  `decrement!` went to Active Record's SQL on the empty table: they returned 0 and recorded no
+  event. They now write as a relation's `update_counters` does (locks, the counters' current
+  values, an event per record), reading only the records with those keys, and return the number of
+  records written. With optimistic locking the lock version moves too, as Active Record's
+  `Locking::Optimistic.update_counters` moves it, so a copy read before raises `StaleObjectError`
+  on save. A counter cache, which Active Record's associations keep through these, is still left
+  as it is: ES-NoProj does not keep counter caches.
+- **ES-NoProj's `update_counters` on a relation adds to the counters' current values, and two of
+  them no longer deadlock.** It added to the values the relation had read, so an update made since
+  (`update!(qty: 100)`, then `+1` gave the old value plus one, not 101) or a concurrent increment
+  was lost (two threads, 25 increments each over seven records, ended 175 short); Active Record's
+  SQL (`qty = COALESCE(qty, 0) + 1`) adds to the row as it is. It also wrote one `update_all` per
+  set of current values, each taking its records' locks, so two writers whose relations ordered
+  the records differently took them in opposite orders and deadlocked (30 of 50 calls). It now
+  takes every selected record's lock (all or none), reads the counters from the event store under
+  those locks, and writes the groups without locking or reading again.
+- **`config.bulk_write_lock_limit` (default 5,000) caps the records one bulk write locks.** An
+  ES-NoProj bulk write (`update_all`, `delete_all`, `touch_all`, `update_counters`, a `dependent:
+  :delete_all` or `:nullify`, and a `destroy_all` inside a transaction already open), and an
+  ES-Async or ES-Lazy `update_all`, `delete_all` or `touch_all`, holds one advisory lock per record until its
+  transaction ends, and PostgreSQL's lock table is shared by every session: past about 12,800
+  locks with the default `max_locks_per_transaction` and `max_connections` 100 (about 23,200 with
+  200), every session's writes failed with "out of shared memory". A larger write now raises
+  `Lyra::BulkWriteLockLimitError` (its `count` and `limit`) before it locks or writes anything,
+  and a parent's destroy whose dependent write is refused rolls back. Write in batches
+  (`in_batches(of: n) { |batch| batch.update_all(...) }`), each of which commits and gives its
+  locks back on its own, but not inside a transaction already open, which holds them all until it
+  ends; `nil` removes the limit.
+- **ES-Lazy writes that skip callbacks see a destroy committed after their catch-up.** A bulk
+  write (`update_all`, `delete_all`, `touch_all`), `update_columns`, `touch`, `delete` and a
+  `dependent: :nullify` bring the tables up to date and then write; a destroy committed in
+  between left its row in the table, and the write wrote it and appended an `Updated` after the
+  `Destroyed` (or a second `Destroyed`). They now take the records' aggregate locks after the
+  catch-up and read their streams (as in ES-NoProj and ES-Async), leaving such a record out, and
+  replay onto its row each record whose stream has an event the tables have not had yet, so an
+  update committed in between is the row the write starts from (it was lost under the write, or
+  `update_all("tag = tag || ...")` read the old value). The
+  write's own reads no longer catch up again: a catch-up there waited for the catch-up lock while
+  the write held rows that a catch-up running elsewhere waited for, a deadlock that bulk writes
+  and writes that skip callbacks met against catch-ups under load before 1.0.0 too (9 in a run of
+  a bulk write, writes through and past callbacks and a catch-up in a loop, against none to 1
+  now: a catch-up writing rows in the log's order and a bulk write locking them in the table's can
+  still meet on rows alone). A catch-up that a catch-up under way refused no longer clears the
+  under-way flag of the outer one.
+- **ES-NoProj's batches are read when the loop reaches them, as Active Record queries each.**
+  `in_batches`, `find_in_batches` and `find_each` on a relation that can be built again (see
+  above) read each batch then: the records after the last batch's last cursor values, in cursor
+  order, from `start:` to `finish:`, `of` of them, so a record inserted, changed or deleted during
+  the loop is seen as Active Record sees it (a later batch no longer yields a record deleted or no
+  longer matching, and yields one inserted). `use_ranges`, `order: :desc`, `load: true`,
+  `each_record`, a custom cursor and the rights (loads raise, counts leave out) are as before. A
+  relation with no recipe takes its batches from the records it holds, as before.
+  Each batch costs one read: where the relation starts from every record of the model and the
+  cursor is the integer primary key, of the model's keys and then of the next records by key (about
+  the batch's own cost); otherwise of the whole relation. Locally, `in_batches(of: 1000)` over
+  10,000 records takes 2.8 s against 1.3 s (one read of every record up front), `find_each` 2.3 s
+  against 0.9 s.
+- **ES-NoProj's batches of a relation with a limit or an offset are read as the loop reaches
+  them, and take the limit and offset as Active Record does.** They read every record up front,
+  and an offset was refused. Each batch is read when the loop reaches it, as above; a limit stops
+  the loop after its records (a batch reads `of` records, or what is left of the limit when that
+  is less), and the offset skips that many records after the last batch's cursor in every batch's
+  query, as Active Record applies `OFFSET` to each (`offset(1).find_each(batch_size: 2)` skips a
+  record before each batch). An `in_batches` batch is the relation narrowed to the batch's keys
+  with its limit and offset, as Active Record's `rewhere(cursor => values)` is, so the offset
+  skips records of the batch again, and its writes select so at write time (a batch's keys were
+  those of its window); a batch of a relation that starts from every record of the model is
+  built again from its own keys (`Rebuildable::Keyed`), not from every record. An
+  `in_batches(load: true)` batch holds the records read for it; its query methods, aggregates,
+  finders (`find_by`, `find`, `find_or_create_by`, `find_sole_by`, ...) and `update_all`,
+  `delete_all` and `touch_all` are that narrowed relation's, read again from the event store each
+  time, as Active Record's batch keeps its query and runs it (`CachedRelation#query_relation`).
+  Active Record's batch query of a relation with an offset has no `ORDER BY`, so which records
+  it skips is the database's plan (an index scan, or the table's physical order after an
+  update): `in_batches` of such a relation without an order raises `UnsupportedQuery`, and so do
+  the queries of its `load: true` batches (their records are read in cursor order, and given);
+  `find_each` and `find_in_batches`, ordered by the cursor, answer. `in_batches(use_ranges:
+  true)` with an offset raises it too (each range is read with the `OFFSET` and no `ORDER BY`),
+  and with `limit(0)` (Active Record's query has `OFFSET -1`, which the database rejects). The
+  enumerators' sizes take the offset too. The batches of a loaded relation (after `load`, `to_a`,
+  `each`, ...) are its loaded records, from `start:` to `finish:`, in cursor order, as Active
+  Record's are; they were read again. Each `in_batches` batch of it is loaded with its records,
+  and its query methods, aggregates, finders and `update_all`, `delete_all` and `touch_all` are
+  the relation's, as Active Record's batch is the relation loaded with them (each batch's
+  `update_all` writes every record the relation selects); `destroy_all` and `update` work on the
+  batch's records. The batches read by key took every record a step brought in: an `or` (whose
+  other relation is read whole) gave records of other chunks and from before the cursor, so a
+  batch repeated records and, without a limit, `find_each` and `find_in_batches` never ended
+  (since the batches were read as the loop reaches them, above). Each chunk now keeps only its
+  own records, which a step keeps or leaves out as it would among every record; `distinct` and
+  `group` are read whole. Cost, locally, 10,000 records: `limit(5000).find_each(batch_size:
+  1000)` takes 1.36 s against 0.84 s (11 queries against one read of every record up front),
+  `in_batches(of: 1000)` 1.34 s against 0.85 s, as the batches without a limit cost (one read
+  of the keys and one of the batch's records per batch); `find`, `where`, `to_a`, `count` and
+  `first` are unchanged (same queries, time and allocations).
+- **ES-NoProj's `load`, `reload`, `reset` and `loaded?` answer as Active Record's.** They raised
+  `UnsupportedQuery`. `load` loads the records as any read delivers them (the purpose check, each
+  record checked, a restricted one raising `RestrictedProcessingError`), passes each to its block,
+  and returns the relation, `loaded?` true after (before: false on `Model.all`, nil on a relation
+  derived from another, as in Active Record); a relation loaded already is not loaded again.
+  `reset` reads the relation again from the event store (Rebuildable), as a relation built at that
+  moment, and leaves it not loaded; `reload` is `reset` and `load`. A relation that cannot be
+  built again (one of given records) raises `UnsupportedQuery` there. A loaded relation's reads
+  do not read again, its `destroy_all` and `update` work on its loaded records and its
+  `update_all`, `delete_all` and `touch_all` select at write time, as before and as in Active
+  Record. `destroy_all` then resets the relation, as Active Record's does: it no longer holds the
+  records it destroyed (it held them, still loaded). A bang query method (`where!`, `order!`,
+  `limit!`, ...) on a loaded relation raises `ActiveRecord::UnmodifiableRelation`, as in Active
+  Record; it changed the loaded records. `DeferredRelation#loaded?`, which said whether an
+  association's records had been read, is `records_read?`.
+- **ES-NoProj's `find_or_create_by` and `find_or_create_by!` create as `create_or_find_by` does,
+  as Active Record 8.1's.** A record a unique index of the table would conflict with is found
+  (or, outside the relation, `RecordNotFound`) instead of created again.
+- **ES-NoProj's `excluding`, `without` and `in_order_of` are query methods, as Active Record's.**
+  They were Enumerable's, which returned an Array, so a write on them raised `NoMethodError`.
+  `excluding(*records)` (and `without`) is `where.not(primary key: ids)` of the records and of the
+  relations given; a record or relation of another model raises Active Record's `ArgumentError`.
+  `in_order_of(column, values, filter: true)` is a `where` of the column (`IS NULL` for `nil`; no
+  `where` with `filter: false`), which `rewhere`, `unscope(where: ...)`, `unscope(:where)` and
+  `except(:where)` take off as in Active Record, and an order by the column's position among the
+  values after any order the relation has, as Active Record's `CASE` added by `order!`, which
+  `unscope(:order)` and `reorder` take off; the values are cast as Active Record casts them (an
+  enum's label to its value, one the column cannot hold left out, `nil` a position of its own),
+  and none left is `none`. The column may name the model's table (`"items.code"`); an SQL
+  expression raises `UnsupportedQuery`. Both keep the relation's recipe, so `update_all`,
+  `delete_all`, `touch_all` and `destroy_all` on them select at write time, with a limit, offset,
+  `where` or order chained before or after.
+- **ES-NoProj's `merge` takes the other relation's conditions where both name a column, and its
+  further arguments as options, as Active Record (7 and later) does.** `where(status: "active")
+  .merge(where(status: "draft"))` is the draft records; it was the records with both, none. A
+  condition named by a `belongs_to` association (`where(owner: ann)`) is one on its key. This
+  relation's conditions on such a column are taken off as `unscope` takes them off, a `where.not`
+  and an earlier merge included; where they cannot be (after an SQL fragment or a join, an
+  association's key, a condition on several columns at once, `where([:a, :b] => ...)`, or an `or`
+  of conditions on that one column) the merge is refused. An `or` over different columns is kept,
+  as Active Record keeps it. `merge(r1, r2)` intersected with `r2` too, and `merge(r, rewhere:
+  true)` was refused; both are now `merge(r1)`. `merge(nil)` and `merge(false)` raise
+  `ArgumentError` (they returned the relation), as does a value that is not a relation; `merge`
+  of an Array is the loaded records both have, and of a Proc the Proc run on the relation. The
+  other relation's limit and offset (an event-store relation's window, or an Active Record
+  relation's) replace this one's, its group and select columns are added, its distinct taken and,
+  if it reorders, its order replaces this one's; they were dropped (an Active Record relation's
+  limit was taken inside this one's). A relation joined on one side, or both to the same
+  associations, merges as the join's rows (it was refused); a condition on a joined table that the
+  other relation names too, and relations joined to different associations, are refused.
+- **ES-NoProj's `relation.update(id, attributes)` and `update!(id, ...)` are Active Record's
+  `Model.update(id, ...)`:** the model's record with that id is found and written through the
+  model's own read and write paths (its default scope, the purpose check, an event), whether or
+  not the relation selects it, as Active Record does. They raised `RecordNotFound` for a record
+  outside the relation.
+- **ES-NoProj's `update_counters({})` raises Active Record's `ArgumentError`** ("Empty list of
+  attributes to change"); it returned 0. `update_counters(touch: true)` with no counter touches the
+  records, as in Active Record; it did nothing.
+- **A scope answers the same under ES-NoProj on the model and on a relation.** A scope called on
+  a relation now runs its body on that relation, as Active Record runs it (it was built as an Active
+  Record relation and the relation narrowed by it). A scope with an Arel condition
+  (`where(arel_table[:qty].eq(2))`) called on the model was refused while the same scope on a
+  relation was answered; both are answered, by building that scope as Active Record builds it. A
+  scope whose body returns a value (a count, a record) returns it, as in Active Record; on the model
+  it returned the relation, on a relation it was refused. One that returns an Active Record
+  relation of the model answers with that relation's records (it returned the relation the scope was
+  called on). A scope's `where.not` of a list is now answered on a relation as `where.not` is (it
+  was refused). As in Active Record, the body runs with no current scope (a body reading
+  `Model.where(...)` read the relation the scope was called on), and a bang method in it changes a
+  copy of that relation (`limit!(1)` limited the caller's). A `scoping` block's relation is seen
+  inside a fiber or an enumerator in it, as Active Record's current scope is (they read every
+  record).
+- **`update_all(foreign_key: nil)` on an Active Record relation of a monitored model under
+  ES-NoProj** (counted as a dependent nullify) published events for the records the event store
+  holds with that foreign key, every other condition of the relation skipped: `where(author_id: 1,
+  status: "published")` nullified the author's drafts too in the log. The records are now those the
+  relation's where clause selects, all of it, read from the event store (not the table first); a
+  condition that cannot be read refuses the write (`UnsupportedQuery`). The events and the write
+  are one transaction where events are required, so a write that fails after its events were
+  published takes them back (a refused write used to leave its records nullified in the log).
+  `author.articles.update_all(author_id: nil)` now nullifies under ES-NoProj what Monitor does.
+- **A bulk write with an offset in Monitor and the other table modes** (`order(:code).offset(5)
+  .delete_all`, a page's `update_all`) wrote no row: the write by the snapshot's keys applied the
+  offset again. It now writes the rows the relation selects, as Active Record does.
 - **A polymorphic `has_one ... as:` under ES-NoProj matches the owner's type**, as the `has_many`
   path does; it returned a record of another type of owner with the same id.
 - **A `has_one` with a scope of its own is narrowed by it under ES-NoProj.** `has_one
   :selected_rate, -> { where(selected: true) }` and `has_one :latest, -> { order(id: :desc) }`
   answered with whichever record of the owner's the event store found first; the scope is now
   applied to the owner's records and the first in its order is the answer, as Active Record's
-  `LIMIT 1`. A scope ES-NoProj cannot evaluate raises `UnsupportedQuery`.
+  `LIMIT 1`. A scope ES-NoProj cannot evaluate raises `UnsupportedQuery`. The record is checked
+  as a loaded row, as a `has_one` without a scope's is; it was returned unchecked.
 - **A `has_one :through` a plain `has_one` reaches its target as Active Record's join does under
   ES-NoProj.** It followed only the intermediate record the `has_one` reads, where the join reaches
   the targets of every intermediate record the owner has (those the `has_one`'s scope selects),
@@ -195,6 +629,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lyra's own read, without a purpose check, as the join reads them in SQL; the `has_one` reader
   used before was checked, and under a purpose that does not allow the intermediate model's fields
   raised `PamDsl::PurposeFieldMismatchError`.
+- **ES-NoProj reads a `:through` association's intermediate records afresh, as Active Record's
+  join reads the tables.** A `has_one :through` a `belongs_to`, and a `has_many :through`, took
+  them from the owner's association when it was loaded: after the intermediate record changed
+  through another instance (moved to another owner), the answer came from the stale copy. Reading
+  the target also left the intermediate association loaded on the owner, which the join does not.
+  Every record on the way is now read on an association object of its own (from the event store,
+  or with SQL for a model not read from events), and the owner's associations are left as they
+  were. As the join, such a read reads the intermediate records each time: a loaded intermediate
+  association no longer saves the reads.
+- **ES-NoProj checks only the records a `:through` association returns, as Active Record's join
+  does.** The intermediate records reached through a `belongs_to` or a `has_many` were checked as
+  loaded rows (a purpose that does not allow the intermediate model's fields raised
+  `PamDsl::PurposeFieldMismatchError`), and every target was checked before the association's
+  own scope, order and limit: a restricted target the scope leaves out (`scoped_tags`,
+  `tags.where(...)`, a limit, the other candidates of a `has_one :through`) raised where Monitor
+  answers. The records on the way are now read as Lyra's own read; the records returned are
+  checked, and a query on the association (`count`, `exists?`, `pluck`) is checked as a query
+  through the intermediate models, as the join's SQL is (a restriction in force for one of them
+  refuses it, as in Monitor).
+- **An association scope that unscopes brings back a `:through` association's target that the
+  target's default scope leaves out, under ES-NoProj.** `has_one :x, -> { with_discarded },
+  through: ...` answered `nil` for a soft-deleted target, and a `has_many :through` left it out,
+  because the source association had already applied the target's default scope; and a `has_many
+  :through` whose source unscopes (`belongs_to :variant, -> { with_discarded }`) applied the whole
+  default scope again afterwards. The targets are now read without the default scope and narrowed
+  by it as the join applies it: less what the source's scope or the association's own unscopes.
+  The intermediate models' default scopes apply as before, as in the join, except on a step on
+  the target's own table (`cat.grandchildren` through a soft-deleted child), which the join
+  aliases and applies none to. `unscope(where: :col)` called on such an association drops the
+  column from the intermediate models' default scopes too in Active Record (a soft-deleted
+  intermediate record's targets come back); ES-NoProj read those records through their default
+  scopes, and refuses an unscope of a column one of them conditions (`UnsupportedQuery`).
+- **A `:through` association reaches every candidate of each `has_one` on the way under
+  ES-NoProj, in the join's order.** Through another `has_one :through`, a `has_one :through`
+  followed only the target that association read (and was refused when that one was ambiguous);
+  through a `has_one` source with several records, or a `has_one` step on a model not read from
+  events (read with its `LIMIT 1`), it answered with the one record read. The candidates are now
+  all read, as the join reaches them. The targets were in the intermediate records' order, so an
+  order of the source's scope or the association's own came second (`has_one :latest_tag, through:
+  :first_item` answered the first item's latest tag, where the join orders by the tag's label
+  first and the item's position after). They are now ordered as the join orders them: the
+  target's default scope, the next intermediate model's default scope, the association's own
+  scope and the source's (an order on the intermediate model's columns included, as Solidus's
+  `Product#prices` has), then the intermediate step's scope; an `unscope(:order)` in a scope on
+  the target takes the default scopes' and the steps' orders off, as in the join. In no order at
+  all, the targets are in primary key order, as Active Record's `first` takes them. Where the
+  join's order cannot be reproduced (an order on another table, or a default scope ordering a
+  step past the first while an association scope orders too), a read that depends on the order
+  (loading, `first`, `last`, `take`, a `limit` or `offset`, `pluck` and `ids`, a `has_one
+  :through`'s answer) is refused (`UnsupportedQuery`) when there is more than one record;
+  `count`, `size`, `length`, `exists?` and sums answer, and so does a read after `reorder`. A
+  `has_one :through` answers with the first target in that order; in no order, with the one
+  target there is, and more than one is refused. `first`, `last` and `take` on a `has_many
+  :through` follow the same order; they took the first record by primary key.
+- **A `has_many :through` that reaches a target through two intermediate records has it twice
+  under ES-NoProj**, as Active Record's join has (`author.article_authors` through two articles);
+  ES-NoProj kept one, and counted one. `-> { distinct }` keeps one, as before.
+- **`update_all` on a `has_many` under ES-NoProj** (`author.articles.update_all(author_id: nil)`,
+  a `has_many :through` too) writes the records the association selects, as Active Record's runs
+  through the association's scope, recording an event for each, and returns how many; it ran
+  against the table and was refused. A record a `has_many :through` reaches twice is written once,
+  as SQL updates its row once (also for `delete_all`, `touch_all` and `destroy_all` on such a
+  relation).
 - **Inside a transaction that recorded rights, a restriction committed before it began is in
   force.** A write of rights drops its subject from the store's shared snapshot until the next
   read, and a connection with rights of its own in its open transaction never read the snapshot
@@ -356,8 +853,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CachedRelation` answers exactly or raises `UnsupportedQuery` before anything is written.
   `merge` and `merge!` returned the relation unchanged, so `Model.unscoped.merge(Model.where(...))
   .delete_all` deleted every record; they now evaluate the other relation (its conditions,
-  order and limit, or the records of an event-store relation) and refuse another model's, a
-  joined or a limited one. `where!` with anything but hash conditions kept every record and now
+  order and limit, or the records of an event-store relation) and refuse another model's.
+  `where!` with anything but hash conditions kept every record and now
   raises; `exists?(["title = ?", x])` ignored its condition and now evaluates it as `where`
   does (or refuses it). Relation methods Lyra did not implement ran on a bare relation of the model, past the
   relation's conditions: `update` and `update_counters` changed every record, `first_or_create!`
@@ -468,6 +965,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Genesis's lock was per class, not per table.** An import through an STI subclass did not wait
   for one through its base class. The lock is now named after the table's stream owner (the STI
   base class), which the erasure of a row with no stream also takes.
+- **Genesis imported a value the model cannot represent as the model read it.** A row holding a
+  value outside a string or integer enum's mapping (`refund_requests.status = '2'`) was imported
+  with `status: nil`: the `Imported` event disagreed with its row, and the disagreement surfaced
+  later and elsewhere (ES-Lazy's catch-up failed with `PG::NotNullViolation`). Genesis now checks
+  every attribute of every row it imports: the value the model reads, written back by the model's
+  type, must be the value stored, compared as the column's own type reads both or as the database
+  would be sent them. `'1'` and `1`, time zones and timestamp precision, a time of day, a decimal's
+  trailing zeros, jsonb key order or a normalized attribute's untrimmed legacy value are no
+  difference; an enum value outside the mapping, a lossy attribute type (`attribute :n, :integer`
+  over `10.50`), an inet value's host bits (which Rails drops; in `inet[]` arrays too) and a value
+  out of the model's integer range are. Whatever the type, a stored value the model writes back
+  as NULL is lost, in a nullable column too: a JSON `null` in a json/jsonb column, an empty range,
+  a blank or `'null'` JSON text or an empty YAML hash in a serialized column. A serialized,
+  encrypted or JSON attribute's text is otherwise one of many encodings of its value and is not
+  compared (a value of another class is). Columns the model ignores are imported as stored.
+  - By default a model holding such rows is refused: every row is checked before anything is
+    written, and `Lyra::Genesis::Refused` lists model, id, attribute, stored value and value read
+    (at most `Genesis::LISTED`, 20, with the count; a value the privacy policy declares, or an
+    encrypted one, is not shown). Nothing of the model is imported; inside a caller's transaction
+    the import is a savepoint, so a caller that rescues the refusal commits nothing of it. A
+    refused first use is remembered for `Genesis::REFUSAL_RECHECK` (30) seconds from the scan
+    that found it, so repeated uses do not scan the table again; `lyra:genesis` always scans.
+  - With `config.genesis_unrepresentable = :skip` (or `unrepresentable: :skip`, or
+    `UNREPRESENTABLE=skip` for `lyra:genesis`) those rows are left without a stream, the rest is
+    imported, and the rows are listed in the result (`Lyra::Genesis.import`, new, returns a
+    `Result`; `import_all` still returns the count) and in the log. A write to a skipped row,
+    through callbacks or bypassing them (`update_columns`, `touch`, `update_all`, `touch_all`,
+    `delete_all`, `upsert_all`, ...), and an ES-NoProj `find` of it, import it once the model can
+    represent it and raise `Refused` (naming the rows) until then, so its stream never begins with
+    the write's event. A skipped row is therefore fixed in the database; the next use of it, or
+    `lyra:genesis`, imports it. A process knows only the rows it skipped itself. `dependent:
+    :nullify` over a skipped child refuses the parent's destroy where events are required; in
+    Monitor that child's event is left out (logged) and the other children still get theirs.
+  - A write that bypasses callbacks now also runs the model's first use, as a write through
+    callbacks does: on a model not yet imported in the process, `update_all` and the like import
+    the rows that predate Lyra before recording their events.
+  - A gated switch into Hijack or event sourcing is refused with such rows as discrepancies,
+    whatever the setting (`Report#unrepresentable` counts them); `lyra:genesis` lists a refused
+    model's rows and exits 1. `Genesis.import_one` (an erasure of a row with no stream) logs such
+    a value and imports the row: the erasure does not fail on it.
+  - `Lyra::Repair` wrote what the model read too (an `Imported` event for a row without events,
+    an `Updated` event for the changed columns). It now applies the same check
+    (`Genesis.unrepresentable`) under the same setting: by default `Lyra::Repair::Unrepresentable`
+    (a `Repair::Refused`, with the listing) is raised before anything is written; with `:skip`
+    (`Repair.run(unrepresentable: :skip)`, `UNREPRESENTABLE=skip` for `lyra:repair`) those
+    records stay out of line, the rest is repaired, and `Repair::Result` (`skipped`,
+    `unrepresentable`) and `lyra:repair` list them; a dry run lists them.
+  - The error of work run on a connection of its own (`Lyra::OwnConnection`) is raised in the
+    caller only, no longer also printed by its thread.
 - **An erasure could miss an update that committed while it ran.** It read the record's stream
   before its transaction and took the row lock only when it wrote the row, after rewriting the
   events, so a Monitor update that committed in between appended an event the erasure never saw,
@@ -569,6 +1115,382 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the projection time.** It defaulted the two with symbol keys, and stringifying the keys let the
   default replace the value the event carried. A rebuild therefore reset the timestamps of every
   record whose event attributes had string keys, as Monitor's do.
+- **A destroyed record could be written again after events that are not replayed.** The check
+  that refuses an update or destroy of a destroyed record (0.9.3) looked at the stream's last
+  event only. A destroy followed by an event that is not replayed (the additional domain event of
+  an `also:` rule on destroy, an `ErasureApplied` from erasing the destroyed record, a
+  `has_and_belongs_to_many` link made with a stale copy and linked into its stream) let a stale
+  copy update the record in ES-NoProj, ES-Async and ES-Lazy, appending after the destroy. The
+  check now looks at the stream's last replayed event: the last one `Lyra::Event.operation_of`
+  gives an operation.
+- **Strict data access tells Rails' association writes from the application's.** Any
+  `update_all` setting one `*_id` column to nil was taken for a `dependent: :nullify` by its
+  shape, and let through: `Article.where(...).update_all(author_id: nil)` cleared keys in strict
+  mode. Rails' association code now marks the one relation or record it is about to write, just
+  before the write (`Lyra::Associations::Maintenance`), and only that write is let through:
+  a write the application makes meanwhile (in an `after_find` while the association loads its
+  record, in a destroy callback) is its own, and refused. The marked writes are a `has_many`'s
+  nullify (`dependent: :nullify`, and removing children with `delete`, `delete_all`, `clear` or
+  by assigning a new set or ids), a `has_many :through`'s `dependent: :nullify` of its through
+  records, a `has_one`'s `dependent: :nullify`, and the deletes of rows that link records:
+  `has_and_belongs_to_many` join rows, the same rows through a model the application declared on
+  the join table, and a `has_many :through`'s through records when records are removed from it.
+  A `has_many`'s `dependent: :delete_all` of its children stays refused. The same writes made by
+  the application are bulk writes like any other: refused in strict mode, and, where allowed,
+  admitted by Genesis, checked against destroyed streams and the lock limit, and recorded as
+  `update_all` or `delete_all` (an `update_all(fk: nil)` in ES-NoProj on the records the event
+  store holds that the relation selects, as before). Several of Rails' own writes were refused
+  in strict mode and now run: a polymorphic `dependent: :nullify` (two columns, `has_many` and
+  `has_one`; a `has_many`'s is now recorded as `dependent_association`, with both columns'
+  changes, where it was an `update_all`), a `has_many`'s removal of a child whose key is not named
+  `*_id` (`foreign_key: :parent`), a `has_one`'s `dependent: :nullify` (its `update_columns`; the
+  owner could not be destroyed), removing records from a `has_many :through` over a monitored
+  model (its through records' `delete_all`, recorded as before), Rails' deletes through an
+  application model on a join table, and, in ES-NoProj, a `has_many :through`'s
+  `dependent: :nullify`, now recorded as `dependent_association` there as in the other modes. To
+  mark the relation a `has_many :through` writes, Lyra reproduces Active Record's
+  `HasManyThroughAssociation#delete_records`, checked identical in 8.0.5.1 and 8.1.4.1, and
+  installs it for Rails 8.0 and 8.1 only; on another version Rails' own method runs with the
+  through model marked for the whole of it (a write of that model made meanwhile is taken for
+  Rails'), and a warning says so once.
+- **Deleting `has_and_belongs_to_many` join rows yourself is refused in strict mode.** The
+  association's own deletes (`delete`, `delete_all`, `clear`, `destroy`, `destroy_all`,
+  assigning records or ids, destroying the owner) are Rails' bookkeeping, allowed as before, and
+  each records its `AssociationUnlinked`. A `delete_all` the application makes on the join model
+  (`Item.const_get(:HABTM_Tags)`) was always allowed; it is now refused in strict mode when either
+  side's model is monitored, as is one on a model the application declared on the join table
+  (not monitored itself), which deleted links with no event at all and is now recorded as an
+  unlink where it runs. Several monitored models' `has_and_belongs_to_many` can share a join
+  table (both sides of one association, a self-referential one, two owners on columns of their
+  own): a delete through the application's model of it, its own or Rails' (a `has_many :through`
+  over it, its `dependent: :delete_all`), records on the stream of every monitored owner the
+  deleted rows name the `AssociationUnlinked` Rails' own unlink from that side records, linked
+  into the associated records' streams that have none of their own; a side whose model is not
+  monitored records nothing. Links made and removed from a side Lyra does not monitor (its
+  `has_and_belongs_to_many` to a monitored model) were not recorded at all: Rails' link and
+  unlink, and the application's `delete_all` where allowed, are now recorded on the monitored
+  records' streams (appended to the first, linked into the others), as a link made from their
+  side is seen there.
+- **`insert_all` in ES-NoProj decides on primary keys as the event store has them.** The table
+  decided: a record created through callbacks (no row there) was inserted again, a second
+  `Created` on its live stream with its attributes overwritten, where Monitor skips the row
+  (`insert_all!` raises `ActiveRecord::RecordNotUnique`); and a record inserted with `insert_all`
+  and destroyed kept its row, so inserting its key again was skipped with no event, where
+  Monitor creates the record again. The rows' keys are now locked and read from the event store:
+  a record it holds is skipped (`insert_all`) or refused before anything is written
+  (`insert_all!`, and `insert_all` whose `unique_by` is another index, whose `ON CONFLICT` does
+  not cover the key), and the table's row of any other key, left by a destroyed record, is
+  replaced (a row Genesis left without a stream is a record, and conflicts). A key whose record was destroyed is created again, `Created` after
+  `Destroyed` as in Monitor, and the stream reads as the record created last (find, queries,
+  `StreamTail`, the writes that follow). Rows that give no key take the table's sequence, as
+  before.
+- **An ES-Async or ES-Lazy `upsert_all` no longer brings back a destroyed record whose row is
+  still in the table.** Before the destroy's projection job ran (ES-Async), or before the next
+  catch-up (ES-Lazy, a destroy committed after the one the write began with), `ON CONFLICT`
+  updated the row and appended an `Updated` after the `Destroyed`: the record read as live in the
+  log, the job then deleted its row, and `find` raised. The rows the upsert conflicts with now
+  have their aggregate locks taken (all or none, within `bulk_write_lock_limit`) and their streams
+  read. In ES-Async (see the next entry) the rows are then brought up to date with their streams,
+  and a destroyed record is inserted again, as in Monitor. In ES-Lazy a destroyed one refuses
+  the whole upsert with `Lyra::RecordDestroyedError` before anything is written, as an update of
+  a destroyed record is refused: replaying the destroy onto the row there would be applied again
+  by the next catch-up, which would delete the new row. Once the destroy is in the table the
+  upsert inserts, as in Monitor. In ES-Lazy the locked rows are brought up to date with their
+  streams first, so the events carry the values the stream has. ES-Sync, Hijack and Monitor
+  delete the row with the destroy and are unchanged; ES-NoProj refuses `upsert_all` as before.
+- **ES-Async: `insert_all`, `insert_all!` and `upsert_all` conflict as Monitor's do while a
+  projection job is pending.** The id of a record whose destroy was still waiting for its job met
+  the dead row: `insert_all` skipped it (no event; the job then deleted the row), where Monitor
+  creates the record again, and `upsert_all` was refused. The id of a record whose create was
+  waiting had no row yet: the insert wrote one and logged a second `Created` on the live stream,
+  where Monitor's `insert_all` skips it, `insert_all!` raises `ActiveRecord::RecordNotUnique` and
+  `upsert_all` updates it. Deleting the dead row first was no answer: the destroy's job would then
+  delete the new one. The records of the keys the rows give (and, for `upsert_all`, the rows its
+  conflict key finds) are now locked (aggregate locks, within `bulk_write_lock_limit`) and their
+  rows brought up to date with their streams, as their jobs would
+  (`AsyncProjectionJob.project_pending`): under the job's own per-stream lock, the events after
+  the stream's checkpoint are applied and the checkpoint moved past them, in the write's
+  transaction. The pending jobs then apply only what is past the checkpoint, the write's own
+  event at most, which is in the row already: a destroy is never applied to the row created
+  again. A destroyed record is created again with the values given and the column defaults (not
+  the dead row's), `Created` after `Destroyed`; a live one conflicts. `upsert_all` reads the rows
+  its conflict key finds again once the locks are held, so a job that committed in between is
+  seen. Rows already up to date cost one query. The write then moves the checkpoints of the
+  records it brought up to date, and of those it created, to its own events (one statement):
+  writing the same keys again finds nothing to project. Rows that give no key take the table's
+  sequence; a conflict on another unique index is looked up in the event store (see the entry on
+  ES-Sync, ES-Async and ES-Lazy below). A projection job no longer
+  waits for its record's row while it holds the stream's lock: it takes the row with its lock
+  (one statement more per job, no measurable time) and, when another transaction holds the row,
+  lets the lock go and waits for the row first, so a transaction that holds the row and then
+  inserts or upserts its key does not deadlock against the job.
+- **ES-NoProj: `insert_all` and `insert_all!` check the model's other unique indexes against the
+  event store.** Only the primary key was; the other unique indexes were checked against the
+  table, which holds no row of a record created through callbacks: a duplicate (an email taken,
+  no id given) was inserted, a second record with the value, where Monitor's `insert_all` skips it
+  and `insert_all!` raises; and the row a destroyed record left there skipped a value that is free.
+  Each row's values for each unique index (not partial, not an expression; NULL conflicts only
+  under NULLS NOT DISTINCT) are now locked as a uniqueness validation of the value locks them
+  and compared with the records the event store holds that may hold them (found through the
+  values' streams, next entry) and with the table's rows holding them: a conflict is skipped
+  (`insert_all`, on any index or on its `unique_by`) or raises `ActiveRecord::RecordNotUnique`
+  before anything is written (`insert_all!`, and a conflict on an index other than `unique_by`).
+  The table's rows of destroyed records holding the values are deleted, and the row of a live
+  record that holds a value its record gave up since (updated through callbacks) is brought up to
+  the record's values. A row Genesis left without a stream (`genesis_unrepresentable :skip`)
+  conflicts, by its key and by its values, as in Monitor; it was deleted as a destroyed record's
+  row, by its key. The values' locks and the keys' count together against
+  `bulk_write_lock_limit`, so a model with several unique indexes reaches it at fewer rows. A
+  `create` or `update` through callbacks is checked against the same indexes (next entry).
+- **ES-NoProj: `create`, `update`, `update_columns`, `update_column` and `update_all` enforce the
+  table's unique indexes.** ES-NoProj writes no row, so the index never saw these writes: a
+  duplicate email was saved and recorded (unless a uniqueness validation caught it), where Monitor
+  raises `ActiveRecord::RecordNotUnique` from the `INSERT` or `UPDATE`.
+  - *Which indexes.* Unique, on columns, not partial, other than the primary key, and on no column
+    with a nondeterministic collation (whose equality only the database knows; a uniqueness
+    validation refuses such a column too): the list `insert_all` checks too
+    (`Lyra::Projections::UniqueIndexes`). They are read from the database once per model and
+    process, again after `reset_column_information` and every `config.unique_index_refresh`
+    seconds (60), so an index a migration adds is enforced in a process started before it. An
+    index is checked when the write sets one of its columns.
+  - *When.* Where the table modes write the row: after the `before_*` callbacks and before the
+    event is built, so a conflict raises `ActiveRecord::RecordNotUnique` (with PostgreSQL's
+    message, naming the index) before any `after_*` callback and with nothing appended;
+    `update_columns` after its destroyed-record check; `update_all` before any of its events, two
+    of its records given one value conflicting with each other. An update claims the tuple the
+    row would hold: the columns it does not write as the record's stream has them, read under the
+    record's aggregate lock (a copy read before another writer moved the record to another shop
+    claimed its old pair and saved a duplicate). NULL conflicts with nothing unless the index is
+    `NULLS NOT DISTINCT`; values compare as the column holds them, a `citext` column's by the
+    database's `LOWER`, as `citext` compares (Ruby's `downcase` disagreed on "İ"); a destroyed
+    record holds no value, and a record keeps its own.
+  - *Locks.* Each claimed value is locked with the key a uniqueness validation and `insert_all`
+    take, so of two concurrent writers of one value the second waits and raises, as the index
+    makes the second `INSERT` wait. An update, `update_columns` and `update_all` take the value
+    locks after the records' aggregate locks, as Monitor's `UPDATE` takes the row and then the
+    index entry, so they wait where Monitor waits and do not deadlock where it does not (taking
+    them before deadlocked an `update_all` against a save of the same record, and two
+    transactions crossing two records and one value). An update of a model with a uniqueness
+    validation takes the record's aggregate lock before its validations (once, earlier), so the
+    validation's value lock comes after it as well: a validated save and an `update_all` of the
+    record and value, and two validated transactions crossing two records and one value, no
+    longer deadlock. The lock key holds a keyed digest of the value, not the value, which reached
+    the statement log (`hashtext('lyra_unique/User/email/ann@…')`); the `LOWER` of a `citext`
+    value is asked for with the value bound. The links are caught up without waiting for another
+    thread, the links' lock or a connection (a write that cannot have them checks against every
+    record of the model, once), so a model's first use with every connection of the pool taken
+    by its writers finishes. Without `config.value_digest_key` or `secret_key_base`, every environment but development and
+    test raises `ValueDigest::KeyMissing` at first use. The unique indexes ES-NoProj leaves out
+    (partial, expression, nondeterministic collation) are named in the log once per model.
+  - *Lookup.* The value is looked up in a value stream (`"Model!column$<digest>"`, linked by
+    `ReferenceLinks` for each event that sets an indexed column, in one `INSERT`): its cost is the
+    value's history, not the model's size. The digest is an HMAC-SHA256 under a secret of the
+    installation (`config.value_digest_key`, or derived from `secret_key_base`;
+    `Lyra::Projections::ValueDigest`), so a dictionary does not reverse it; a value stream linked
+    under another key is deleted and linked again on its next use. An erasure moves the links of
+    the events it rewrites, so no digest of an erased value is kept. Each column's links have a
+    checkpoint of their own: the first check of a model links only the columns behind (the
+    foreign keys are not read again), before its value locks, in one read of the events; a column
+    added to an index is linked from the first event. Processes that ran an earlier Lyra, or read
+    the indexes before a migration added one, write without the column's links; once they are
+    gone, `bin/rails lyra:link_values` links every value again (a process of this release that
+    reads the new index links its own earlier writes itself).
+  - *Cost.* On the development VM (PostgreSQL in Docker, 1,000 records, 200 interleaved writes) a
+    create or an update that sets a fresh unique email costs three queries more (the lock, the
+    stream read, the link's `INSERT`: 11 against 8 for a create, 12 against 9 for an update),
+    about 90 more objects allocated (of some 2,500) and 2 to 3 ms (of 15 to 25, on a loaded VM);
+    a model without such an index, and an update that sets none of its columns, are unchanged (the
+    same queries, allocations within noise). On the testbed in ES-NoProj the benchmarked writes
+    (`Registration` create, update and destroy: its unique indexes are all partial, so none is
+    checked) are unchanged (12, 10 and 10.5 queries per write, as before), and a `BankPayment`
+    create (a unique `remittance_info`, validated too) costs 13 queries against 10. ES-NoProj's
+    `insert_all` reads the records the values' streams name instead of every record of the model
+    (`Uniqueness::Snapshot`: 52.8 s at 10,000 records, cold), and `Model.insert_all` (and the
+    other inserts on the model) no longer builds the relation of every record first (Active
+    Record sends them through `Model.all`): a cold two-row `insert_all` at 3,000 records took
+    10.2 s, now 77 ms. With `config.reference_links = false` every record of the model is read,
+    as a uniqueness validation reads them.
+  - *`create_or_find_by`.* In ES-NoProj it looked for a conflict on an index made of its
+    attributes alone, so a value its block set was created twice; it now creates in a savepoint
+    and, when the index refuses the record, finds it (`RecordNotFound` when the attributes select
+    none), and `find_or_create_by` creates through it, as Active Record 8.1 does.
+  - *Also.* An `update_columns` on a copy read before another writer changed the value it sets
+    back recorded nothing in ES-NoProj and left the record as it was (its old value was the
+    copy's): it now takes the old values from the record's stream, as the table's `UPDATE` writes
+    the row. ES-Sync, ES-Async and ES-Lazy: next entry.
+- **ES-Sync, ES-Async and ES-Lazy: a duplicate's event was appended before the projection met
+  the unique index.** In these modes the event store is authoritative and the table a projection:
+  a `create`, `save`, `update`, `update_columns` or `update_all` setting a value a unique index
+  already held appended its event, then the projection's `INSERT` or `UPDATE` failed and was only
+  logged (`strict_projections` off). The log held a record the table could not; in ES-Lazy the
+  next read's catch-up then failed on it, and with it the reads of every model. Monitor raises
+  `ActiveRecord::RecordNotUnique` and writes nothing. The writes are now checked before the event
+  is built, as ES-NoProj's are (previous entry; `Lyra::Projections::UniqueIndexes`, the same
+  indexes, claims, value locks and message, naming the mode), so a duplicate raises
+  `ActiveRecord::RecordNotUnique` with no event appended, no projection job enqueued, no row
+  written and nothing logged as a failed projection, and ES-Lazy's reads go on.
+  - *Where the value is looked up.* ES-Sync: in its table, under the value's lock. Its projection
+    writes the row in the writer's transaction, so once the lock is held the table has every
+    committed claim and the transaction's own, compared by the database as its index compares
+    them; one statement (the lock) and one `SELECT` per value claimed, and no links. ES-Async and
+    ES-Lazy, whose tables lag the event store (a create whose job has not run, a write since the
+    last read): in the value streams, as ES-NoProj, which are now linked in these modes too
+    (`ReferenceLinks.values_enabled?`; the foreign-key links stay ES-NoProj's, and a model with
+    no unique index links nothing). The first check of a model in a process links the events
+    stored before (per column, once).
+  - *Writes that skip callbacks.* `update_columns`, `update_column`, `update_all`, `insert_all`,
+    `insert_all!` and `upsert_all` take the values' locks in these modes too, so a write through
+    callbacks checking the table waits for them, as they wait for it (in ES-Sync
+    `update_columns` locks its row first, `FOR NO KEY UPDATE`, and `update_all` its rows, as
+    Monitor's `UPDATE` takes the row and then the index entry). ES-Sync's statement then checks
+    the index itself. In ES-Async and ES-Lazy the values are first looked up in the event store,
+    where a holder whose row is not projected yet was missed by the table: `update_columns` and
+    `update_all` raise; `insert_all` leaves the row out (or raises, for an index other than its
+    `unique_by`), `insert_all!` raises; `upsert_all` raises for a conflict on an index other than
+    its conflict columns (the record it updates excepted), and on its conflict columns updates
+    the holder, whose row ES-Async brings up to date first (it raises where that row is still not
+    in the table). This was the known leftover of the ES-Async insert entry above.
+  - *A holder destroyed or moved away, its row still in the table.* The value is free, as in
+    Monitor, whose row is gone: a `create` (or any of the writes above) saves it. ES-Async brings
+    such a row up to date with its stream in the write's transaction, as its job would, where that
+    waits for nothing (the record's aggregate lock, its row and its stream's projection lock are
+    only tried; a record one is taken for is left to its job), so neither the write's own `UPDATE`
+    or `INSERT` nor its projection job meets the stale value. ES-Lazy's catch-up applies the
+    destroy first (log order).
+  - *Cost.* On the testbed (development VM, PostgreSQL in Docker, 100 writes each after warm-up),
+    a model without a checked unique index and a write that sets none of its columns issue the
+    same statements and locks as before in all three modes: the writes the benchmark campaign
+    measures (`Registration` create, update and destroy, 8/8/13 statements in ES-Sync, 7/8/13 in
+    ES-Async, 7/8/26.8 in ES-Lazy; its unique indexes are all partial, so none is checked; its
+    `insert_all` and `update_all` likewise), and a `BankPayment` update of its amount (8). In
+    ES-Async and ES-Lazy each append of such a model also looks the model up for its value
+    columns, in memory (about 8 objects more per write; times within noise). A write that sets a
+    checked value costs, per value: in ES-Sync the lock and a `SELECT` on the table (a
+    `BankPayment` create, unique `remittance_info`, 11 statements against 9; an update of the
+    code 11 against 9); in ES-Async and ES-Lazy the lock, the value stream's read and the link's
+    `INSERT` (create 11 against 8 in ES-Async, 19 against 16 in ES-Lazy; update of the code 12
+    against 9, 21 against 18), 1 to 3 ms, and a rebuild of the records the stream names when the
+    value has a history. ES-Async's projection jobs are unchanged (10 to 12 statements).
+  - *ES-Sync inside `ReadYourWrites.with_guaranteed_read`.* A write's row was deferred to the
+    block's end, so the block's own reads missed it and so did the check of every write after it
+    (which reads ES-Sync's table): two creates of one email in a block were both saved, the
+    second's row dropped. ES-Sync now writes the row at once inside the block too, as outside it
+    (and as `each_write: true` did); the block has nothing left to project there.
+  - *A projected create that met another record's value inserted nothing, silently.* The
+    projection's `INSERT ... ON CONFLICT DO NOTHING` skipped a row whose value another row held, as
+    it skips a replay of the record's own row. In ES-Async, when the holder's row was held by
+    another transaction (so the write left it to its job) and the new record's job ran before the
+    holder's, the job completed and moved its checkpoint past the create: the log held a record
+    the table never got, and nothing was logged. A create that inserts nothing although the table
+    has no row with its key (looked up on the table's class: a record of an STI subclass whose
+    type changed since keeps its row) now raises (one query, only then), after reading the rows
+    that hold its values (a tuple with a NULL holds nothing, unless its index is `NULLS NOT
+    DISTINCT`) and their records' streams. When each such record gave the value up and only its
+    row lags, an ES-Async job brings those rows up to date itself, where nothing has to be waited
+    for (so a holder whose own job was lost does not block it), and inserts again; a row still
+    held by another transaction raises `Lyra::Projections::ProjectionBehind`, which the job
+    retries at most every five minutes for about a day (`AsyncProjectionJob::BEHIND_ATTEMPTS`,
+    300; the general retry gave up after about seven minutes of a held row, and the record never
+    reached the table), then reports (log, `projection_error_handler`) and gives up, leaving the
+    record to a rebuild. `Lyra::Projections::DuplicateInLog` when a live record holds the value in
+    the log too (two records of the log hold it), a row with no stream holds it, or no holder is
+    found once the insert was tried again (an expression index, which Lyra does not read): logged
+    once per record and process (debug after; 10,000 remembered) and passed to
+    `projection_error_handler`, the job discarded. Both are `ActiveRecord::RecordNotUnique`s:
+    ES-Sync's write fails with either, a rebuild stops at it. ES-Lazy's catch-up logs it (once)
+    and goes on, since raising there would stop every read for a record the log holds for good.
+    An update whose value another row holds raised already.
+  - *ES-Sync: a database error in the projection was logged inside an aborted transaction.* With
+    `strict_projections` off, the error the projection's `INSERT` or `UPDATE` raised was logged and
+    the save reported success, but PostgreSQL had aborted the transaction, so its `COMMIT` rolled
+    the write and its event back: a value committed after a `REPEATABLE READ` transaction's
+    snapshot, which the check's `SELECT` cannot see, ended in a save reported as done with no
+    event. A database error there now fails the write (`ActiveRecord::StatementInvalid` and its
+    subclasses: here `RecordNotUnique` or `SerializationFailure`), whatever `strict_projections`
+    says; other errors are logged as before.
+  - *Not covered.* Transactions at `REPEATABLE READ` or `SERIALIZABLE`, in every event-sourcing
+    mode (as for a uniqueness validation): the check reads the transaction's snapshot, which
+    misses a value another transaction committed after it began. ES-Sync's write then fails at
+    its projection (above), as Monitor's does; ES-Async and ES-Lazy save both records, and the
+    second's projection fails with `DuplicateInLog` (logged once; ES-Async discards the job,
+    ES-Lazy's catch-up goes on). Partial and expression indexes, and columns with a nondeterministic collation,
+    are left to the projection, as in ES-NoProj (named in the log once per model).
+- **`insert_all` and `upsert_all` with `returning:` as raw SQL without the primary key recorded
+  nothing.** `insert_all(rows, returning: Arel.sql("code"))` wrote the rows and published no
+  event, in every mode: the keys could not be read back. The primary key is now returned with the
+  caller's SQL under an alias of Lyra's own and taken out of the result the caller gets.
+- **The result of `insert_all`, `insert_all!` and `upsert_all` with `returning:` is Active
+  Record's own.** Where Lyra added the primary key to `RETURNING` (a symbol, an array, raw SQL,
+  `Arel.sql("*")`) it rebuilt the result without its column types: `column_types` came back empty
+  and `cast_values` cast nothing; `returning: false` lost the affected rows. The column types (by
+  name and by index) and the affected rows are kept.
+- **A model whose primary key has several columns** (one its table declares, enrolled before
+  Active Record read it; Lyra refuses one it knows of) raised `PG::UndefinedColumn` on
+  `insert_all` and `upsert_all` with `returning:` (the key was asked for as one quoted name) and,
+  without it, wrote the rows with no event. In Monitor and Hijack each key column is now returned
+  and taken out of the caller's result, and each row records its `Created`, the record's key
+  being the array of its columns' values. The event-sourcing modes, whose projections, catch-ups
+  and rebuilds cannot apply such an event (ES-Lazy's catch-up then failed on every read of every
+  monitored model), refuse the three writes with an `ArgumentError` before anything is written,
+  and Genesis refuses the model on its first use there (it failed with `PG::UndefinedColumn`).
+- **`has_and_belongs_to_many`: the application's `insert_all`, `insert_all!` and `upsert_all`
+  of join rows were neither refused nor recorded.** Through Rails' join model
+  (`Item::HABTM_Tags`) or a model of the application's on the join table (and `insert`, `insert!`,
+  `upsert`, and an owner's `item_tags.insert_all(...)`), they are now refused in strict mode
+  unless inside `Lyra.without_strict_access`, as its `delete_all` of join rows is, when either
+  side is monitored, and where they run each row written (read back with `RETURNING`) is recorded
+  as the `AssociationLinked` Rails' own link from each side records, on every monitored owner's
+  stream the row names; a row `ON CONFLICT` skipped records nothing, and an upsert that moves a
+  row to another pair unlinks the old pair. Rails' own links are inserted one row at a time
+  through the join model's callbacks, as before.
+- **`has_and_belongs_to_many`: the join table of an owner Lyra does not monitor, whose monitored
+  side has no association back onto it, was not recognised** for a model of the application's on
+  that table: its deletes went unguarded and unrecorded, though Rails' own links and unlinks there
+  are recorded on the monitored side's streams. Lyra now keeps every `has_and_belongs_to_many`
+  declared (those of models loaded before its hook was installed included), and the table is a
+  join table when one whose links it records names it. A
+  `has_many :through` over a model Lyra does not monitor is not one: no link of it is recorded,
+  from either side, as before.
+- **`has_and_belongs_to_many`: Rails' own unlink of a join row naming another association's
+  owner too** (two owners' columns filled on one row of a shared table, which only the
+  application's code writes) recorded the unlink of the side Rails deleted from only; the other
+  owner's stream kept a link whose row was gone. It is now recorded on every monitored owner's
+  stream the row names, as the application's delete of the row already was. Rows naming no other
+  owner record exactly what they did.
+- **`config.bulk_write_lock_limit` takes `nil` or a whole number of at least 1.** 0 (or a
+  negative number) refused every write that locks a record, a single `update_columns`, `touch` or
+  `delete` included; any other value raises `ArgumentError` now, and a string is read as its
+  number. `BulkWriteLockLimitError`'s message no longer reads "a update_columns of 1 ... records".
+- **A bulk write is no longer aborted for the deadlocks of the transactions it waits behind.**
+  `Lyra::AdvisoryLock.xact_lock_all` gave back every lock it had taken whenever one was held, and
+  waited for that one without a limit, in its queue; there it was the one PostgreSQL aborted when
+  the transactions ahead of it deadlocked among themselves, and transactions that came and went with
+  a few of its records kept it out. A bulk write of 8 records, for 15 s, against three transactions
+  that each updated one record and then bulk-wrote two others: in ES-NoProj it went through 2 times
+  in 21 attempts and was aborted 19 times (four runs), in ES-Async 50 times in 66 attempts, 16
+  aborted (three runs). A bulk write that holds no advisory lock of its own yet now keeps the locks
+  it took while it waits for the others, for at most 100 ms in all, and waits holding none for at
+  most half of `deadlock_timeout`; then it gives them back and tries again. No wait of its lasts as
+  long as `deadlock_timeout`, so PostgreSQL never reports it deadlocked, and a transaction that
+  holds one of its records and asks for another it took goes on once it gives way. The same runs:
+  ES-NoProj 7 of 8 attempts went through (the one aborted already held locks, in a later round of
+  the write), ES-Async 42 of 42 (four runs each); deadlocks in all, the three transactions' among
+  themselves included, 47 against 56 in ES-NoProj, and in ES-Async 29 in four runs against 43 in
+  three (the transactions' own: 46 against 37, and 29 against 27). A bulk write of 6 records, beside
+  one of 4 and a transaction like those, went through 62 and 88 times (two runs) instead of 24 to 30
+  in ES-Async, and 60 instead of 12 in ES-NoProj (the one of 4 records: 130 and 135 instead of 152
+  to 160, and 121 as before), with no deadlock before or after; the runs took longer (ES-Async 42 s
+  against 22 to 25, ES-NoProj 415 s against 236). It is no cure for starvation: in ES-NoProj a write
+  still waited 2 to 28 s, and in ES-Async its turns cost the three transactions about a third of
+  their throughput. A transaction that already holds locks of its own (it wrote a record, then
+  bulk-writes others) waits as before, holding none of the new ones: keeping them, or taking all in
+  sorted order and waiting, as Monitor's row locks do, made such a transaction deadlock nearly every
+  time (119 of 120 in that ES-Async run, against none). The lock limit is still checked before any
+  lock is taken, nothing is appended until every lock is held, and a write that finds its records
+  free takes them as before, in one statement in a savepoint. A `lock_timeout` of the caller's own
+  (session or transaction) shorter than the bounded wait stays in force, and its timeout raises
+  `ActiveRecord::LockWaitTimeout`, as before, instead of being taken for the bounded wait's own
+  limit and tried again.
 
 ### Changed
 - **The gems' MIT-LICENSE copyright line no longer names the University of the Aegean**, which is
@@ -577,6 +1499,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   corruption when compiling crafted regular expressions, Rails 8.1.4.1 fixes advisories in
   Active Support and Action View (Active Record unchanged). Lyra's requirements are unchanged
   (Ruby 4.0+, Rails 8.0+); the project and the example app now run these versions.
+- **Ruby 4.0.10.** The project and the example app run Ruby 4.0.10 (`.ruby-version`); Lyra's
+  requirement is unchanged (Ruby 4.0+).
 - **`config.erasure_max_copies`** (default 10) sets `everywhere`'s threshold for the application;
   `erase!(max_copies:)` and `lyra:erase MAX_COPIES=` still override it per call. Each value left
   as shared is reported in the new `result.shared` as `{ field:, type:, holders: }` (never the
@@ -896,6 +1820,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instance `touch` already did. Bulk bypass events (`update_all`, `upsert_all` and the like) now
   list `created_at` and `updated_at` among their changes when those moved, so an upsert's event
   carries `updated_at` beside the columns it set.
+- **A cheaper destroyed check.** Before every update and destroy in ES-NoProj, ES-Async and
+  ES-Lazy, the check that the record was not destroyed (0.9.3) read and deserialized the stream's
+  last event through Rails Event Store, its data and metadata, to learn its operation. It now
+  decides from the stream's last replayed event (Fixed, above), read with a query over the event
+  store's own tables (`Lyra::StreamTail`) that returns each event's id, type and stored data and
+  deserializes nothing. The usual update costs that one query: the last event is positively a
+  replayed create, import or update when its type ends in `Created`, `Updated` or `Imported` and
+  its data records no destroy's operation and no `replay: false`. Data in a `json` or `jsonb`
+  column comes back as a Hash and is decided from directly. Any other event is read through Rails
+  Event Store by its id, one query each, and an event that is not replayed sends the check to the
+  one before it. The walk back reads one event, then pages of 50, and skips in SQL the events Lyra
+  never replays (`AssociationLinked`, `AssociationUnlinked`, `ErasureApplied`), so a record linked
+  by hundreds of others still costs one query. Domain-event rules and `event_mapping` may no longer
+  use those three names (`ArgumentError`). The type alone cannot decide, since custom event names
+  and domain events can store a destroy under any name. The shortcut is taken only with
+  `RubyEventStore::ActiveRecord::EventRepository`, RES's default mapper and the YAML, JSON or
+  `Lyra::EventSerializer` serializer, and for those it gives the answer a read through Rails Event
+  Store gives. With a mapper that transforms records on load, another serializer or another
+  repository, the stream is read through Rails Event Store. The same happens when the query fails
+  the first time it is tried, for example after a Rails Event Store upgrade that changed its
+  tables. That first try runs during the first check, in a savepoint when a transaction is open,
+  so it cannot abort the write. The lock is unchanged. Locally (no YJIT), the check on a stream
+  ending in an update takes 0.9 ms and 43 allocations instead of 2.3 ms and about 900, and an
+  update or destroy in these three modes allocates about 860 fewer objects. Refusing a write to a
+  destroyed record costs about what it did.
+- **The bypass-write net (`Lyra::Verification::BypassWorkflow`) models the writes that skip
+  callbacks as 1.0.0 makes them.** A third store, a table that lags the event store (ES-Async,
+  ES-Lazy: `streams_checked` with `table_backed`, as `BypassEvents.checks_streams?` and
+  `locks_rows?`), whose writes read each record's stream under its aggregate lock as ES-NoProj's
+  do; a new ending, `unchanged`, for a write to a record destroyed since it was read (its stream
+  ends in a destroy, or, in ES-Sync, Hijack and Monitor, its row is gone: no write, no event);
+  the `Genesis::Refused` rejection of a row the model could not import, and the
+  `BulkWriteLockLimitError` of a bulk write or `dependent: :nullify` over
+  `bulk_write_lock_limit` or `upsert_all` where the streams are checked (and of `update_all`,
+  `insert_all(!)` and `upsert_all` whose unique values' locks exceed it, ES-Sync included), and that upsert's
+  `RecordDestroyedError` (see Fixed); and `insert_all(!)` as a class of its own (a new row:
+  nothing to admit, written to the table in ES-NoProj too; a key already there is skipped by
+  `insert_all`, unchanged, and fails `insert_all!`). `BypassWorkflow.coverage`
+  counts a dead marking as covered only when it ends in exactly one way: `rejected` alone,
+  `store_changed` with `event_logged`, or `unchanged` alone (and returns how many end
+  unchanged, `unchanged:`); a store change without an event, an event logged for an unchanged
+  write, or a rejection beside a write or an event is reported. `ROUTED` lists ES-NoProj's
+  class-level `update_counters`, `increment_counter` and `decrement_counter`, which write through
+  `update_all`. Rails' association writes (`Lyra::Associations::Maintenance`, see Fixed) enter
+  past the strict guard: `request_nullify` is the nullify Rails marked (an application's
+  `update_all(fk: nil)` is `request_bulk`), a `has_one`'s `dependent: :nullify` the column path
+  (`request_association_column`), removing records from a `has_many :through` over a monitored
+  model the bulk path (`request_through_delete`). `has_and_belongs_to_many` join-row deletes are
+  a class of their own, `link`: Rails' marked deletes are never refused (`request_unlink`), the
+  application's `delete_all` on a join model is guarded (`request_join`), and either writes the
+  table, in every store, then logs `AssociationUnlinked` (`write_unlink`, `publish_unlink`); the
+  application's `insert_all`, `insert_all!` and `upsert_all` of join rows are guarded the same
+  way (`request_join_insert`), write, then log `AssociationLinked` (`write_link`, `publish_link`),
+  or end unchanged (`skip_conflict_link`) or refused (`refuse_conflict_link`). Bulk inserts and
+  upserts are first brought to the rows Monitor's table would have where the streams are checked
+  (`bring_insert_keys_up_to_date`, `bring_upsert_rows_up_to_date`; `insert_as_given` and
+  `upsert_as_given` elsewhere), and a bulk insert's locks can exceed the limit
+  (`refuse_lock_limit_insert`); where it reads keys or unique values from the event store, Genesis
+  refuses it for a model whose import was refused (`refuse_genesis_insert`). An `update_column(s)` or `update_all` whose value a unique index
+  refuses is rejected, writing and logging nothing (`refuse_unique_column`, `refuse_unique_bulk`:
+  the table's `UPDATE` raises, and in ES-NoProj, ES-Async and ES-Lazy the event store is checked,
+  see Fixed), and so is an `upsert_all` whose value of an index other than its conflict columns
+  another record holds (`refuse_unique_upsert`: the table's statement, or in ES-Async and ES-Lazy
+  the event store). The net now has 38 places, 87 transitions and 181 reachable markings (was 25,
+  36 and 72); it is 1-bounded, has no dead transition, and all 18 dead markings (was 7) are
+  covered.
 
 ### Removed
 - **`Lyra::Associations::EventAware`** (`event_aware_belongs_to`, `event_aware_has_many`), an
@@ -911,6 +1901,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allow_for` names the purpose or the purpose's `requires`/`optionally` names the field
   (`Policy#allowed?` takes the union, as before). The PAM DSL README, PRIVACY_COMPLIANCE.md,
   API_REFERENCE.md and the methods' comments now say so. No behaviour change.
+
+ 
+### Known issues
+- **ES-Lazy: a transaction that reads and then takes a record's aggregate lock can deadlock against a
+  bulk write.** The catch-up a read begins with writes the rows of the records whose events it
+  applies without their aggregate locks, and inside a transaction those rows stay locked until it
+  ends. When the transaction then takes a record's aggregate lock (a write through callbacks,
+  `update_all`) that a bulk write holds while it waits for one of those rows (to bring it up to
+  date before writing it), the two wait for each other; PostgreSQL detects it and aborts one with
+  `ActiveRecord::Deadlocked`, and nothing of the aborted one is written or recorded. Retry the
+  transaction, or do the reads outside it (docs/TROUBLESHOOTING.md, Concurrency Issues). A
+  transaction that writes several records in an order of its own can deadlock against another, or
+  a bulk write, as plain Active Record's row locks do; take them in one order (by primary key) and
+  retry on `ActiveRecord::Deadlocked` (same section).
 
 ## [0.9.3] - 2026-11-04
 

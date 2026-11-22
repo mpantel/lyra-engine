@@ -61,6 +61,20 @@ module Lyra
           Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :lazy
         end
 
+        # Run the block with no catch-up before its reads (a write that
+        # caught up when it began: BypassEvents.atomically).
+        def without_catch_up
+          return yield unless active?
+
+          previous = Thread.current[:lyra_lazy_catching_up]
+          Thread.current[:lyra_lazy_catching_up] = true
+          begin
+            yield
+          ensure
+            Thread.current[:lyra_lazy_catching_up] = previous
+          end
+        end
+
         # Called before a read on +model_class+ (see Interceptors::LazyReads).
         def before_read(model_class)
           return unless active?
@@ -78,7 +92,7 @@ module Lyra
           return 0 unless force || active?
           return 0 if Thread.current[:lyra_lazy_catching_up]
 
-          Thread.current[:lyra_lazy_catching_up] = true
+          began = Thread.current[:lyra_lazy_catching_up] = true
           ActiveRecord::Base.with_connection do |connection|
             ensure_table!(connection)
             target = catch_up_target(connection)
@@ -87,7 +101,9 @@ module Lyra
             ActiveRecord::Base.transaction { catch_up_to(connection, target) }
           end
         ensure
-          Thread.current[:lyra_lazy_catching_up] = nil
+          # Only the call that set it (a call refused above left it to its
+          # owner: a catch-up under way, or LazyProjection.without_catch_up).
+          Thread.current[:lyra_lazy_catching_up] = nil if began
         end
 
         # The current checkpoint: [position, { gap_id => first_seen_epoch }].
@@ -99,6 +115,37 @@ module Lyra
           return [0, {}] unless row
 
           parse_checkpoint(row["position"], row["gaps"])
+        end
+
+        # Bring the rows of +ids+ (records of +model_class+) up to date with
+        # their streams, where a stream has an event the tables have not had
+        # yet (past the checkpoint, or among its gaps): that record is
+        # replayed onto its row (Rebuild.replay_record), as a catch-up would.
+        # For a write that skips callbacks, once it holds the records'
+        # aggregate locks (Lyra::BypassEvents): an update committed after the
+        # catch-up the write began with is then in the row it writes, not
+        # lost under it. One query when every row is up to date. Returns how
+        # many records were replayed.
+        def refresh_records(model_class, ids)
+          return 0 unless active? && ids.any?
+
+          ActiveRecord::Base.with_connection do |connection|
+            position, gaps = checkpoint(connection)
+            prefix = Lyra.stream_prefix(model_class)
+            streams = ids.map { |id| connection.quote("#{prefix}#{id}") }.join(", ")
+            pending = ["e.id > #{Integer(position)}"]
+            pending << "e.id IN (#{gaps.keys.map { Integer(_1) }.join(',')})" if gaps.any?
+            behind = connection.uncached do
+              connection.select_values(
+                "SELECT DISTINCT s.stream FROM event_store_events_in_streams s " \
+                "JOIN event_store_events e ON e.event_id = s.event_id " \
+                "WHERE s.stream IN (#{streams}) AND (#{pending.join(' OR ')})",
+                "Lyra ES-Lazy rows behind"
+              )
+            end
+            behind.each { |stream| Rebuild.replay_record(model_class, stream.delete_prefix(prefix)) }
+            behind.size
+          end
         end
 
         # Forget the checkpoint, e.g. after the tables were truncated or rebuilt.

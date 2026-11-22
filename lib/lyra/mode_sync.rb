@@ -50,6 +50,11 @@ module Lyra
       # Cheap when nothing is due: a clock read. Returns the label adopted, or
       # nil.
       def maybe_sync!
+        # A process that leaves touches out keeps its registry entry fresh from
+        # here, outside any transaction (nothing with config.record_touches true).
+        if Lyra.config.record_touches == false && !ActiveRecord::Base.with_connection(&:transaction_open?)
+          TouchRegistry.heartbeat_if_due
+        end
         return nil unless enabled?
         return nil if due_in.positive?
         return nil if ActiveRecord::Base.with_connection(&:transaction_open?)
@@ -74,6 +79,30 @@ module Lyra
           # The row counts as seen once it is decided: adopted, or refused (logged
           # once). An error while deciding leaves it unseen, so the next check tries
           # again rather than leave this process in its mode for good.
+          # The application runs in a mode whose log rebuilds rows, and this
+          # process leaves touches out: it must not go on that way. It refuses
+          # every touch it would leave out from now on (TouchRegistry.fence!),
+          # and each check raises, until it runs with record_touches on.
+          if Lyra.config.record_touches == false && TouchRegistry.authoritative?(row[:config])
+            TouchRegistry.fence!(row[:config])
+            message = TouchRegistry.process_refusal(row[:config])
+            Rails.logger.error(message)
+            raise ModeTransition::Refused, message
+          end
+
+          # Not while another process leaves touches out of the log: the row
+          # stays unseen, and this process adopts it once that process's entry
+          # has ended or expired (as a fenced process retries).
+          if TouchRegistry.authoritative?(row[:config]) &&
+             (touches = TouchRegistry.gate_refusal(ModeTransition.current, row[:config]))
+            if @touch_refused_id != row[:id]
+              @touch_refused_id = row[:id]
+              Rails.logger.error("Lyra: did not adopt the application's mode #{row[:config]} yet; this process stays " \
+                                 "in #{ModeTransition.current} and tries again: #{touches}")
+            end
+            return nil
+          end
+
           if (refusal = ModeTransition.adoption_refusal(row))
             @last_seen_id = row[:id]
             Rails.logger.error("Lyra: did not adopt the application's mode #{row[:config]}; this process stays in " \

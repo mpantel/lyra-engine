@@ -124,10 +124,113 @@ module Lyra
   #           └── InventoryReserved (causation_id: PaymentProcessed.id)
   #
   class Causation
+    # The cause a write scope (CrudInterceptor#lyra_write_scope) puts in scope
+    # for the writes made during the write (its callbacks, after_save and
+    # after_destroy included), decided when one of them needs it:
+    #
+    # - the write's own event id, once that event is in the log (appended);
+    # - the cause in scope when the write began, once the write is known to
+    #   record no event (decided without an event: a save that changes
+    #   nothing, a destroy or update that reached no row), or when its event
+    #   did not reach the log after all (lost: Monitor's logged append
+    #   failure, a Hijack row write that failed and took the event with it);
+    # - before either is known (the write's before_* callbacks: a belongs_to
+    #   autosave, a dependent: :destroy; or a refused command), the write's
+    #   own id as well, which it then owes: if the write ends without its
+    #   event in the log, it appends a SaveWithoutEffect marker with that id
+    #   (Lyra::SavesWithoutEffect).
+    #
+    # So the causation_id of every event a write scope gives names an event
+    # in the log once the transaction commits. The own id used to be the
+    # cause throughout, and from 1.0.0, when a save that changes nothing
+    # stopped recording an event, the writes its callbacks made (Solidus's
+    # Order#save updating its line items) named an event that never existed.
+    class WriteScope
+      attr_reader :event_id, :outer
+
+      def initialize(outer)
+        @outer = outer
+        @event_id = SecureRandom.uuid
+        @taken = false
+        @appended = false
+        @lost = false
+        @decided = false
+        @owed = false
+      end
+
+      # The write's own event id, for its own event: given once, so no two
+      # events can share it; nil once taken (the store then assigns one).
+      def take_event_id
+        return nil if @taken
+
+        @taken = true
+        @event_id
+      end
+
+      # The write's own event is in the log (in its transaction).
+      def appended!
+        @appended = true if @taken
+      end
+
+      # The write's own event is not in the log after all, and the write
+      # may stand: +reason+ is the marker's, if one is owed.
+      def lost!(reason = "append failed")
+        @lost = reason
+      end
+
+      # The write has reached its after_* callbacks: it has built its event,
+      # or it records none.
+      def decided!
+        @decided = true
+      end
+
+      def recorded? = @appended && !@lost
+
+      def lost? = !!@lost
+
+      def lost_reason = @lost || nil
+
+      def decided? = @decided
+
+      # Whether a cause handed out before the write's event was known still
+      # names no event: the marker is owed.
+      def owes_marker? = @owed && !recorded?
+
+      def cause_id
+        return @event_id if recorded?
+        return Causation.resolve(@outer) if @lost || (@decided && !@taken)
+
+        @owed = true
+        @event_id
+      end
+    end
+
     class << self
       # Current causation ID (the event that caused the current operation)
       def current_id
+        resolve(Thread.current[:lyra_causation_id])
+      end
+
+      # The cause in scope as set, a write scope unresolved: a scope opened
+      # inside another keeps it as its outer cause, and resolves it when its
+      # own event, or a write inside it, needs it.
+      def current
         Thread.current[:lyra_causation_id]
+      end
+
+      def resolve(cause)
+        cause.is_a?(WriteScope) ? cause.cause_id : cause
+      end
+
+      # The cause in scope outside every write scope of this thread: one set
+      # by the application or carried by a job (Correlation::Job), or nil.
+      # For an entry that commits on a connection of its own
+      # (Lyra::AccessLog): a write in scope may still roll back, and an entry
+      # naming it would then name no event.
+      def outside_write_scopes
+        cause = current
+        cause = cause.outer while cause.is_a?(WriteScope)
+        cause
       end
 
       # Set causation ID for current context (when processing/handling an event)
@@ -167,6 +270,24 @@ module Lyra
       # Get direct cause of an event
       def cause_of(event_id)
         causation_store[event_id]
+      end
+
+      # Whether every causation_id in +event_store+ names an event there: the
+      # number of events read and of those with a cause, and the events whose
+      # cause is not in the log (dangling: event_id, event_type,
+      # causation_id), none when the causal links are whole. A check for
+      # tests and replays (the Olist sweep); it reads the whole store.
+      def integrity(event_store = Lyra.config.event_store)
+        ids = Set.new
+        caused = []
+        event_store.read.in_batches(1000).each_batch do |batch|
+          batch.each do |event|
+            ids << event.event_id
+            cause = event.metadata[:causation_id]
+            caused << { event_id: event.event_id, event_type: event.event_type, causation_id: cause } if cause
+          end
+        end
+        { events: ids.size, caused: caused.size, dangling: caused.reject { ids.include?(_1[:causation_id]) } }
       end
 
       private

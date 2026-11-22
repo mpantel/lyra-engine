@@ -9,7 +9,8 @@ covered by [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md), and every option by
 
 ## Requirements
 
-- Ruby 4.0 or later and Rails 8.0 or later (from `lyra.gemspec`).
+- Ruby 4.0 or later and Rails 8.1 (`>= 8.1, < 8.2`, from `lyra.gemspec`;
+  tested on 8.1.4.1).
 - RailsEventStore 3 (`rails_event_store ~> 3.0`), pulled in by Lyra.
 - PostgreSQL. Lyra depends on the `pg` gem. Genesis and ES-Lazy take
   PostgreSQL advisory locks to stay correct under concurrency, and Hijack
@@ -35,7 +36,7 @@ or the engine straight from GitHub, for changes made since the release:
 gem "orfeas_lyra", git: "https://github.com/mpantel/lyra-engine", branch: "main", require: "lyra"
 ```
 
-The latest release on rubygems.org is 1.0.0 (17 November 2026, for all three
+The latest release on rubygems.org is 1.0.0 (22 November 2026, for all three
 gems; see the CHANGELOG). Each release from 0.8.0 on is built from the tag of its version
 (`v1.0.0` for 1.0.0) of
 https://github.com/mpantel/lyra-engine. The earlier 0.6.0 releases (January

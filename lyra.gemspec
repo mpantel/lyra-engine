@@ -5,7 +5,7 @@ Gem::Specification.new do |spec|
   spec.version     = Lyra::VERSION
   spec.authors     = ["Michail Pantelelis"]
   spec.email       = ["mpantel@aegean.gr"]
-  spec.homepage = "https://github.com/mpantel/lyra-engine"
+  spec.homepage    = "https://github.com/mpantel/lyra-engine"
   spec.summary     = "CRUD to Event Sourcing transformation engine"
   spec.description = "Non-intrusive Rails engine for monitoring CRUD operations and transforming them to event sourcing"
   spec.license     = "MIT"
@@ -23,7 +23,7 @@ Gem::Specification.new do |spec|
   spec.required_ruby_version = ">= 4.0"
 
   # Rails dependencies
-  spec.add_dependency "rails", ">= 8.0"
+  spec.add_dependency "rails", ">= 8.1", "< 8.2"
   spec.add_dependency "rails_event_store", "~> 3.0"
 
   # Database dependencies

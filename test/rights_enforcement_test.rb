@@ -40,7 +40,18 @@ class RightsEnforcementTest < Minitest::Test
     "where(title:).exists?" => ->(r) { r.where(title: "Ann's").exists? },
     "exists?" => ->(r) { r.exists? },
     "where(status:).size" => ->(r) { r.where(status: "draft").size },
-    "order(:id).pick(:id)" => ->(r) { r.order(:id).pick(:id) }
+    "order(:id).pick(:id)" => ->(r) { r.order(:id).pick(:id) },
+    # Batches (their sizes and their batches) and windows: ES-NoProj counted
+    # a restricted record in the batch enumerators' sizes.
+    "find_each.size" => ->(r) { r.find_each.size },
+    "find_in_batches.size" => ->(r) { r.find_in_batches(batch_size: 1).size },
+    "in_batches(of: 1).to_a.size" => ->(r) { r.in_batches(of: 1).to_a.size },
+    "limit(10).count" => ->(r) { r.limit(10).count },
+    "limit(10).sum(:id)" => ->(r) { r.limit(10).sum(:id) },
+    "limit(10).maximum(:id)" => ->(r) { r.limit(10).maximum(:id) },
+    "limit(1).exists?(title:)" => ->(r) { r.limit(1).exists?(title: "Ann's") },
+    "limit(10).ids" => ->(r) { r.limit(10).ids.sort },
+    "order(:id).limit(10).pluck(:id)" => ->(r) { r.order(:id).limit(10).pluck(:id) }
   }.freeze
 
   def setup
@@ -249,6 +260,78 @@ class RightsEnforcementTest < Minitest::Test
       assert_equal 3, Lyra.with_purpose(:publishing) { EnfArticle.count }, mode
       assert_equal 3, Lyra.with_purpose(:publishing) { EnfArticle.pluck(:title).size }, mode
       assert_equal [nil, nil], Lyra.with_purpose(:publishing) { EnfArticle.pluck(:body) }, "#{mode}: her body left out"
+    end
+  end
+
+  # Batches that load their records check each, as a load does: a
+  # restricted record raises in both modes (ES-NoProj's batches left it out
+  # silently once their sizes left it out).
+  BATCH_LOADS = {
+    "find_each" => ->(r) { r.find_each.map(&:id) },
+    "find_each(order: :desc)" => ->(r) { r.find_each(order: :desc).map(&:id) },
+    "find_in_batches" => ->(r) { r.find_in_batches(batch_size: 1).map { |b| b.map(&:id) } },
+    "in_batches(load: true)" => ->(r) { r.in_batches(of: 1, load: true).map { |b| b.to_a.map(&:id) } },
+    "in_batches { to_a }" => ->(r) { ids = []; r.in_batches(of: 1) { |b| ids.concat(b.to_a.map(&:id)) }; ids },
+    "in_batches.each_record" => ->(r) { r.in_batches(of: 1).each_record.map(&:id) },
+    # With a limit or offset (read as the loop reaches each batch), and the
+    # loads of load, reload, excluding and in_order_of.
+    "offset(1).find_each" => ->(r) { r.offset(1).find_each(batch_size: 1).map(&:id) },
+    "limit(2).find_in_batches" => ->(r) { r.limit(2).find_in_batches(batch_size: 1).map { |b| b.map(&:id) } },
+    "offset(1).in_batches(load: true)" => ->(r) { ids = []; r.offset(1).in_batches(of: 5, load: true) { |b| ids.concat(b.to_a.map(&:id)) }; ids },
+    "limit(3).in_batches(use_ranges: true) { to_a }" => lambda { |r|
+      ids = []
+      r.limit(3).in_batches(of: 1, use_ranges: true) { |b| ids.concat(b.to_a.map(&:id)) }
+      ids
+    },
+    "offset(1).in_batches.each_record" => ->(r) { r.offset(1).in_batches(of: 1).each_record.map(&:id) },
+    "load" => ->(r) { r.order(:id).load.records.map(&:id) },
+    "reload" => ->(r) { r.order(:id).reload.map(&:id) },
+    "excluding(nil).to_a" => ->(r) { r.excluding(nil).to_a.map(&:id) },
+    "in_order_of(:title)" => ->(r) { r.in_order_of(:title, ["Bob's", "Ann's"]).map(&:id) }
+  }.freeze
+
+  def test_batch_loads_raise_on_a_restricted_record
+    each_mode do |mode|
+      rights.restrict!(subject: "EnfArticle$#{@bobs.id}", ground: :needed_for_legal_claims)
+      BATCH_LOADS.each do |label, query|
+        assert_raises(Restricted, "#{mode} #{label}") { Lyra.with_purpose(:publishing) { query.call(EnfArticle.all) } }
+      end
+    end
+  end
+
+  # A window is taken after the records a right leaves out, as SQL takes its
+  # LIMIT and OFFSET after its WHERE: with the first record restricted, the
+  # second page starts later (ES-NoProj took the window first, and counted
+  # and plucked it short of the restricted record only).
+  WINDOWS = {
+    "offset(1).pluck(:id)" => ->(r) { r.order(:id).offset(1).pluck(:id) },
+    "limit(2).offset(1).count" => ->(r) { r.order(:id).limit(2).offset(1).count },
+    "limit(1).ids" => ->(r) { r.order(:id).limit(1).ids },
+    "limit(1).pick(:id)" => ->(r) { r.order(:id).limit(1).pick(:id) },
+    "offset(2).exists?" => ->(r) { r.order(:id).offset(2).exists? },
+    "limit(1).find_each.size" => ->(r) { r.order(:id).limit(1).find_each.size },
+    "in_batches(of: 1).to_a.size" => ->(r) { r.limit(2).in_batches(of: 1).to_a.size },
+    "offset(1).find_each.size" => ->(r) { r.offset(1).find_each.size },
+    "offset(1).in_batches ids" => ->(r) { r.order(:id).offset(1).in_batches(of: 1).map(&:ids) },
+    "limit(2).in_batches count" => ->(r) { r.limit(2).in_batches(of: 1).map(&:count) },
+    "offset(1).limit(1).in_batches ids" => ->(r) { r.order(:id).offset(1).limit(1).in_batches(of: 2).map(&:ids) },
+    "excluding.count" => ->(r) { r.excluding(nil).count },
+    # Batches of keys leave the restricted record out (their plucks are
+    # counted): the batch loads hold the others only.
+    "limit(3).in_batches { to_a }" => ->(r) { ids = []; r.limit(3).in_batches(of: 1) { |b| ids.concat(b.to_a.map(&:id)) }; ids },
+    "in_order_of.pluck(:id)" => ->(r) { r.in_order_of(:title, ["Nobody's", "Bob's", "Ann's"]).pluck(:id) }
+  }.freeze
+
+  def test_a_window_is_taken_after_the_records_a_right_leaves_out
+    each_mode do |mode|
+      rights.restrict!(subject: "EnfArticle$#{@anns.id}", ground: :needed_for_legal_claims)
+      WINDOWS.each do |label, query|
+        expected = query.call(EnfArticle.where.not(id: @anns.id))
+        assert_equal expected, Lyra.with_purpose(:publishing) { query.call(EnfArticle.all) }, "#{mode} #{label}"
+      end
+      assert_raises(Restricted, "#{mode}: a load of the window holding it") do
+        Lyra.with_purpose(:publishing) { EnfArticle.order(:id).limit(1).to_a }
+      end
     end
   end
 

@@ -30,10 +30,32 @@ module Lyra
 
     class Refused < StandardError; end
 
-    Result = Struct.new(:checked, :found, :repaired, :remaining, keyword_init: true) do
+    # Records whose repair event would hold a value their model cannot
+    # represent (Lyra::Genesis's check): nothing was repaired. +rows+: how many
+    # records; +values+: the first Genesis::LISTED Lyra::Genesis::Unrepresentable
+    # of the +found+ in all.
+    class Unrepresentable < Refused
+      attr_reader :rows, :values, :found
+
+      def initialize(rows:, values:, found:)
+        @rows = rows
+        @values = values
+        @found = found
+        super("lyra:repair will not write events for #{rows} record(s) whose rows hold values their model cannot " \
+              "represent, so the events would not match them; nothing was repaired. Fix the rows or the models; or " \
+              "skip those records (config.genesis_unrepresentable = :skip, or UNREPRESENTABLE=skip for lyra:repair). " \
+              "#{values.map(&:to_s).join('; ')}#{" (and #{found - values.size} more)" if found > values.size}")
+      end
+    end
+
+    # +unrepresentable+: the first Genesis::LISTED values the model cannot
+    # represent, of the +skipped+ records left out of line (with :skip) or
+    # that would be (a dry run).
+    Result = Struct.new(:checked, :found, :repaired, :remaining, :skipped, :unrepresentable, keyword_init: true) do
       def summary
         "checked #{checked} records: #{found.size} out of line, #{repaired.size} repaired, " \
-          "#{remaining.size} still out of line"
+          "#{remaining.size} still out of line" \
+          "#{", #{skipped} with values their model cannot represent (not repaired)" if skipped.to_i.positive?}"
       end
     end
 
@@ -41,7 +63,18 @@ module Lyra
       # Find, and unless +dry_run+, repair every out-of-line record of
       # +models+. Returns a Result whose found, repaired and remaining hold
       # ModeTransition::Discrepancy values.
-      def run(models: Lyra.config.monitored_models, dry_run: false, operator: nil)
+      #
+      # A repair writes the row as its model reads it. A record whose event
+      # would hold a value the model cannot represent (an enum value outside
+      # the mapping, read as nil; Lyra::Genesis's check, on the whole row for
+      # an Imported event, on the changed columns for an Updated one) follows
+      # +unrepresentable+, config.genesis_unrepresentable by default, as
+      # Genesis does: :refuse raises Unrepresentable before anything is
+      # written; :skip leaves those records out of line and repairs the rest.
+      # Either way the Result lists them (a dry run never raises).
+      def run(models: Lyra.config.monitored_models, dry_run: false, operator: nil,
+              unrepresentable: Lyra.config.genesis_unrepresentable)
+        skip = Lyra::Genesis.unrepresentable_choice(unrepresentable) == :skip
         unless Lyra.config.monitor_mode? || Lyra.config.disabled_mode?
           raise Refused, "lyra:repair writes the tables' state into the event log, so it runs only where the " \
                          "tables are authoritative (monitor or disabled). In #{ModeTransition.current} the events " \
@@ -56,25 +89,65 @@ module Lyra
           ids.each { |id| (problem = ModeTransition.discrepancy(model, id)) && found << [model, problem] }
         end
 
-        repaired = dry_run ? [] : found.filter_map { |model, problem| repair(model, problem.id, operator: operator) }
+        # Refusing (or a dry run): every record is checked before anything is
+        # written. Skipping: each repair checks its record, under its lock.
+        held = []
+        unless skip && !dry_run
+          found.each do |model, problem|
+            values = unrepresentable_values(model, problem, load_row(model, problem.id))
+            held << values if values.any?
+          end
+          if held.any? && !skip && !dry_run
+            values = held.flatten
+            raise Unrepresentable.new(rows: held.size, values: values.first(Lyra::Genesis::LISTED), found: values.size)
+          end
+        end
+
+        repaired = if dry_run
+                     []
+                   else
+                     found.filter_map { |model, problem| repair_record(model, problem.id, operator: operator, skip: true, held: held) }
+                   end
         remaining = found.filter_map { |model, problem| ModeTransition.discrepancy(model, problem.id) }
-        Result.new(checked: checked, found: found.map(&:last), repaired: repaired, remaining: remaining)
+        Result.new(checked: checked, found: found.map(&:last), repaired: repaired, remaining: remaining,
+                   skipped: held.size, unrepresentable: held.flatten.first(Lyra::Genesis::LISTED))
       end
 
       # Repair one record. Returns the Discrepancy it repaired, or nil if the
-      # record was (or had come) back in line.
-      def repair(model, id, operator: nil)
+      # record was (or had come) back in line, or holds a value its model
+      # cannot represent and +unrepresentable+ is :skip (:refuse raises
+      # Unrepresentable; see run).
+      def repair(model, id, operator: nil, unrepresentable: Lyra.config.genesis_unrepresentable)
+        repair_record(model, id, operator: operator, skip: Lyra::Genesis.unrepresentable_choice(unrepresentable) == :skip)
+      end
+
+      private
+
+      # repair; a record skipped for its values adds them to +held+ (run checks
+      # first only when refusing, so a record is never held twice).
+      def repair_record(model, id, operator:, skip:, held: nil)
         model.transaction do
-          row = Lyra::PurposeBoundReads.internal(INTERNAL) { model.unscoped.lock.find_by(model.primary_key => id) }
+          row = load_row(model, id, lock: true)
           problem = ModeTransition.discrepancy(model, id)
           next nil unless problem
+
+          # DualView's differences, computed once for the check and the event.
+          differs = problem.problem == "row differs from its events"
+          diffs = differences(model, row) if differs
+          values = unrepresentable_values(model, problem, row, diffs)
+          if values.any?
+            raise Unrepresentable.new(rows: 1, values: values.first(Lyra::Genesis::LISTED), found: values.size) unless skip
+
+            held&.push(values)
+            next nil
+          end
 
           case problem.problem
           when "row but no events", "row of a destroyed record"
             append(model, id, :imported, problem, attributes: row.attributes, operator: operator)
           when "row differs from its events"
             replayed = Lyra::DualView.new(model, id).event_sourced_state[:state] || {}
-            changes = changed_columns(model, row, replayed)
+            changes = changed_columns(row, replayed, diffs)
             append(model, id, :updated, problem, attributes: changes.transform_values(&:last), changes: changes, operator: operator)
           when "events but no row"
             replayed = Lyra::DualView.new(model, id).event_sourced_state[:state] || {}
@@ -84,12 +157,33 @@ module Lyra
         end
       end
 
-      private
+      def load_row(model, id, lock: false)
+        scope = lock ? model.unscoped.lock : model.unscoped
+        Lyra::PurposeBoundReads.internal(INTERNAL) { scope.find_by(model.primary_key => id) }
+      end
 
-      # Column => [replayed, row] for the columns DualView finds different.
-      def changed_columns(model, row, replayed)
-        differences = Lyra::PurposeBoundReads.internal(INTERNAL) { Lyra::DualView.new(model, row.id).compare[:differences] }
-        differences.keys.to_h do |column|
+      # The values of +row+ the repair of +problem+ would write that the model
+      # cannot represent: the whole row for an Imported event, the changed
+      # columns (+diffs+, DualView's differences, computed if not given) for an
+      # Updated one (Lyra::Genesis.unrepresentable).
+      def unrepresentable_values(model, problem, row, diffs = nil)
+        return [] if row.nil?
+
+        case problem.problem
+        when "row but no events", "row of a destroyed record" then Lyra::Genesis.unrepresentable(row)
+        when "row differs from its events"
+          Lyra::Genesis.unrepresentable(row, columns: (diffs || differences(model, row)).keys)
+        else []
+        end
+      end
+
+      def differences(model, row)
+        Lyra::PurposeBoundReads.internal(INTERNAL) { Lyra::DualView.new(model, row.id).compare[:differences] }
+      end
+
+      # Column => [replayed, row] for the columns DualView found different.
+      def changed_columns(row, replayed, diffs)
+        diffs.keys.to_h do |column|
           [column.to_s, [replayed.fetch(column.to_s) { replayed[column.to_sym] }, row.attributes[column.to_s]]]
         end
       end

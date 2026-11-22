@@ -4,7 +4,7 @@ All notable changes to the PetriFlow gem will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-17
+## [1.0.0] - 2026-11-22
 
 Released with Lyra 1.0.0 and PAM DSL 1.0.0.
 

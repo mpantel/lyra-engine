@@ -284,8 +284,12 @@ module Lyra
 
       # Every event in the log, read in batches: a report that must see all of it
       # (a subject's events, retention) holds a batch at a time, not the whole log.
-      def each_event(batch_size = EVENT_BATCH, &block)
-        Lyra.config.event_store.read.in_batches(batch_size).each(&block)
+      # SaveWithoutEffect markers hold no one's data and record no change
+      # (Lyra::SavesWithoutEffect): passed over.
+      def each_event(batch_size = EVENT_BATCH)
+        Lyra.config.event_store.read.in_batches(batch_size).each do |event|
+          yield event unless Lyra::SavesWithoutEffect.marker?(event)
+        end
       end
 
       # Whether an event holds the subject's data: an event of the subject's

@@ -8,13 +8,31 @@ module Lyra
     RIGHTS_REFRESH_MODES = %i[scope interval].freeze
 
     attr_reader :mode, :projection_mode
-    attr_accessor :event_store, :hijack_enabled, :retention_policy
+    attr_accessor :event_store, :retention_policy
+    attr_reader :hijack_enabled
     attr_accessor :strict_projections, :projection_error_handler, :async_projections_inline
     attr_accessor :strict_schema, :schema_path
     attr_accessor :strict_data_access  # Raise on callback-bypassing operations
     attr_accessor :metadata_proc  # Custom metadata proc for events
     attr_accessor :genesis  # Imported events for pre-existing rows (see Lyra::Genesis)
+    # What Genesis does with a row holding a value its model cannot represent
+    # (an enum value outside the mapping, ...): :refuse (default) refuses the
+    # model's import, listing the rows; :skip leaves them without a stream
+    # and imports the rest. Lyra::Repair follows it for what it would write.
+    # See Lyra::Genesis.
+    GENESIS_UNREPRESENTABLE = %i[refuse skip].freeze
+    attr_reader :genesis_unrepresentable
     attr_accessor :reference_links  # Foreign-key links for ES-NoProj lookups (see Lyra::Projections::ReferenceLinks)
+    # The secret the value streams of ES-NoProj's unique-index check and the
+    # value locks are keyed with (Lyra::Projections::ValueDigest): nil
+    # (default) derives one from the application's secret_key_base. Changing
+    # it relinks the value streams on their next use.
+    attr_accessor :value_digest_key
+    # Seconds after which a process reads a monitored model's unique indexes
+    # again (Lyra::Projections::UniqueIndexes), so an index added by a
+    # migration while it runs is enforced and its earlier writes linked:
+    # 60 (default), nil never (only reset_column_information does).
+    attr_accessor :unique_index_refresh
     attr_reader :monitored_models
     # Default privacy policy for monitored models that name none of their
     # own (monitor_with_lyra privacy_policy: ...). See Lyra::Privacy.policy_for.
@@ -107,6 +125,20 @@ module Lyra
     # ES-Sync (DualView detects it), no destroyed check, and ES-Async's job
     # replaying the whole stream every time.
     attr_accessor :lock_aggregate_before_append
+    # The most records a bulk write may lock: in ES-NoProj update_all,
+    # delete_all, touch_all, update_counters, a dependent: :delete_all or
+    # :nullify, and a destroy_all inside a transaction already open; in
+    # ES-Async and ES-Lazy update_all, delete_all, touch_all, upsert_all and
+    # a dependent: :nullify (BypassEvents.checks_streams?). It holds one
+    # aggregate lock per record until its
+    # transaction ends, and PostgreSQL's lock table, shared by every session,
+    # holds about max_locks_per_transaction × (max_connections + background
+    # processes) locks (about 12,800 with the defaults). Past it every
+    # session's writes fail ("out of shared memory"). A larger write raises
+    # Lyra::BulkWriteLockLimitError before it locks or writes anything. nil:
+    # no limit. Only with lock_aggregate_before_append on. At least 1, so a
+    # write of one record is never refused (bulk_write_lock_limit=).
+    attr_reader :bulk_write_lock_limit
     # Apply the privacy policy's retention rules (Lyra::Retention). Off by
     # default: deleting data on a timer is the deployment's decision.
     attr_accessor :retention_executor
@@ -132,6 +164,20 @@ module Lyra
     # actions, PII detection) read the most recent events up to it and say so
     # (window: { limit:, returned:, truncated: }); before 1.0.0 they read the whole log.
     attr_reader :dashboard_max_events
+    # Whether a touch whose only change is the model's update timestamp
+    # (updated_at, updated_on) is recorded as an event: an instance touch, a
+    # touch_all and a belongs_to ... touch: true cascade. True (the default)
+    # records every one, as before. False leaves those out of the log, in
+    # Monitor only, where the table is authoritative and the event a copy; a
+    # touch that also changes another column (touch(:completed_at), a
+    # lock_version) is recorded in full. DualView then ignores a difference
+    # confined to those columns. Refused with Hijack and event sourcing, whose
+    # log is the record of every change and is replayed to rebuild the rows: a
+    # missing touch would rebuild a stale updated_at. A process with it off
+    # registers (Lyra::TouchRegistry), and no process escalates while one is
+    # registered. Before escalating, restart every process with it true and
+    # run lyra:repair, which records the timestamps the log missed. From 1.0.0.
+    attr_reader :record_touches
 
     def initialize
       @mode = :monitor
@@ -158,9 +204,12 @@ module Lyra
       # Genesis: :auto (event-sourcing mode only), true (every event-producing
       # mode) or false. See Lyra::Genesis.
       @genesis = :auto
+      @genesis_unrepresentable = :refuse
       # Reference links: :auto (ES-NoProj only), true (every event-producing
       # mode) or false. See Lyra::Projections::ReferenceLinks.
       @reference_links = :auto
+      @value_digest_key = nil
+      @unique_index_refresh = 60
       @mode_transition_gate = nil
       @mode_transition_certificate_ttl = 3600
       @dual_view_sample_rate = 0.0
@@ -180,21 +229,30 @@ module Lyra
       @unrecorded_writes = :allow
       @monitor_append_failure = :log
       @lock_aggregate_before_append = true
+      @bulk_write_lock_limit = 5_000
       @retention_executor = false
       @retention_anchors = {}
       @dashboard_authorization = nil
       @dashboard_purpose = nil
       @dashboard_max_events = 10_000
+      @record_touches = true
     end
 
     # One of MODES; a string (from ENV, say) is taken as its symbol.
     def mode=(mode)
-      @mode = validate_choice!(:mode, mode, MODES)
+      mode = validate_choice!(:mode, mode, MODES)
+      refuse_unrecorded_touches!(mode)
+      @mode = mode
     end
 
     # One of PROJECTION_MODES; a string is taken as its symbol.
     def projection_mode=(mode)
       @projection_mode = validate_choice!(:projection_mode, mode, PROJECTION_MODES)
+    end
+
+    # One of GENESIS_UNREPRESENTABLE; a string is taken as its symbol.
+    def genesis_unrepresentable=(choice)
+      @genesis_unrepresentable = validate_choice!(:genesis_unrepresentable, choice, GENESIS_UNREPRESENTABLE)
     end
 
     def rights_refresh=(mode)
@@ -227,6 +285,74 @@ module Lyra
       raise ArgumentError, "unrecorded_writes must be :allow or :deny, not #{mode.inspect}" unless %i[allow deny].include?(mode)
 
       @unrecorded_writes = mode
+    end
+
+    # true or false (a string "true" or "false", from ENV, is taken as its
+    # value). False is refused outside Monitor and Disabled (touch_refusal).
+    def record_touches=(value)
+      value = { "true" => true, "false" => false }.fetch(value.strip.downcase, value) if value.is_a?(String)
+      raise ArgumentError, "record_touches must be true or false (got #{value.inspect})" unless [true, false].include?(value)
+
+      previous = @record_touches
+      @record_touches = value
+      refusal = touch_refusal(hijack_mode? ? :hijack : @mode)
+      if refusal
+        @record_touches = previous
+        raise ArgumentError, refusal
+      end
+      # This process registers as one that leaves touches out (after boot;
+      # at boot, Lyra::TouchRegistry.boot!), which is refused in an application
+      # whose latest applied mode is Hijack or event sourcing, and ends its
+      # entry when set back to true.
+      return unless defined?(Lyra::TouchRegistry) && value != previous
+      return Lyra::TouchRegistry.option_on! if value
+
+      begin
+        Lyra::TouchRegistry.option_off!
+      rescue StandardError
+        @record_touches = previous
+        raise
+      end
+    end
+
+    # Set by the mode helpers. Refused, like mode=, while record_touches is
+    # false: hijack_mode? is true whatever mode says.
+    def hijack_enabled=(value)
+      refuse_unrecorded_touches!(:hijack) if value
+      @hijack_enabled = value
+    end
+
+    # Why +mode+ (a mode, or a ModeTransition label such as
+    # "event_sourcing/lazy") cannot run with record_touches false, or nil when
+    # it can. Hijack and the event-sourcing modes take the log as the record of
+    # every change: the rows are rebuilt from it (a switch into event
+    # sourcing, which Hijack passes without a check, a Rebuild, ES-NoProj's
+    # reads). An unrecorded touch there would rebuild a stale updated_at.
+    def touch_refusal(mode)
+      return nil unless @record_touches == false
+      return nil if %w[disabled monitor].include?(mode.to_s.split("/").first)
+
+      "config.record_touches = false is refused in #{mode}: there the event log is the record of every change, " \
+        "and a touch left out of it would rebuild a stale updated_at. To escalate: restart every process with " \
+        "record_touches on, run `rake lyra:repair` in Monitor, then switch."
+    end
+
+    # Whether a touch whose only change is the update timestamp is left out
+    # of the log now: record_touches false, in Monitor.
+    def skip_touches?
+      @record_touches == false && monitor_mode? && !hijack_mode?
+    end
+
+    # nil (no limit) or a whole number of at least 1; a string (from ENV,
+    # say) is taken as its number. 0 refused every write that locks a
+    # record, update_columns, touch and delete included.
+    def bulk_write_lock_limit=(limit)
+      limit = Integer(limit, exception: false) || limit if limit.is_a?(String)
+      unless limit.nil? || (limit.is_a?(Integer) && limit >= 1)
+        raise ArgumentError, "bulk_write_lock_limit must be nil (no limit) or a whole number of at least 1, got #{limit.inspect}"
+      end
+
+      @bulk_write_lock_limit = limit
     end
 
     # One of MONITOR_APPEND_FAILURES; a string (from ENV, say) is taken as its symbol.
@@ -304,6 +430,9 @@ module Lyra
         @monitored_models.map! { |m| (m.name rescue m.object_id.to_s) == model_name ? model_class : m }
       end
       @model_configs[model_class] = ModelConfiguration.new(model_class, options)
+      # The join tables of the monitored models' has_and_belongs_to_many may
+      # have changed (a new model, or a class reloaded).
+      Lyra::Associations::HabtmLinks.reset_join_models! if defined?(Lyra::Associations::HabtmLinks)
     end
 
     # The monitored model an event's model_class names: a monitored model, or
@@ -359,6 +488,7 @@ module Lyra
     def enable_hijack!
       return Lyra::ModeTransition.to!(:hijack) if gated_switch?
 
+      refuse_unrecorded_touches!(:hijack)
       @hijack_enabled = true
       @mode = :hijack
     end
@@ -375,6 +505,7 @@ module Lyra
     def enable_event_sourcing!
       return Lyra::ModeTransition.to!(:event_sourcing) if gated_switch?
 
+      refuse_unrecorded_touches!(:event_sourcing)
       @mode = :event_sourcing
       @hijack_enabled = false
     end
@@ -386,6 +517,11 @@ module Lyra
     end
 
     private
+
+    def refuse_unrecorded_touches!(mode)
+      refusal = touch_refusal(mode)
+      raise ArgumentError, refusal if refusal
+    end
 
     def validate_choice!(name, value, valid)
       choice = value.is_a?(String) ? value.strip.to_sym : value
@@ -407,6 +543,10 @@ module Lyra
       @event_prefix = options[:event_prefix] || model_class.name
       @aggregate_class = options[:aggregate_class]
       @custom_event_mapping = options[:event_mapping] || {}
+      # Names Lyra keeps for its events that are never replayed (Lyra::StreamTail).
+      @custom_event_mapping.each_value do |name|
+        raise ArgumentError, "event_mapping: #{name} is reserved for Lyra's own events" if Lyra::StreamTail.reserved_name?(name)
+      end
       @privacy_policy = options[:privacy_policy]
       @domain_events = Lyra::DomainEvents.rules(options[:domain_events])
     end

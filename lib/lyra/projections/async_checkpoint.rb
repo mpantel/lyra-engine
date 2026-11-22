@@ -29,6 +29,38 @@ module Lyra
           SQL
         end
 
+        # write for each [stream, event id] of +pairs+, in one statement.
+        def write_all(connection, pairs)
+          pairs = pairs.to_h.to_a
+          return if pairs.empty?
+
+          ensure_table!(connection)
+          values = pairs.map { |stream, event_id| "(#{connection.quote(stream)}, #{connection.quote(event_id)}, CURRENT_TIMESTAMP)" }
+          connection.execute(<<~SQL.squish)
+            INSERT INTO #{TABLE} (stream, event_id, updated_at) VALUES #{values.join(', ')}
+            ON CONFLICT (stream) DO UPDATE SET event_id = EXCLUDED.event_id, updated_at = EXCLUDED.updated_at
+          SQL
+        end
+
+        # Of +streams+, those with an event past their checkpoint (in the
+        # stream's own order), or with events and no checkpoint: the streams
+        # whose rows a projection job has still to bring up to date. One
+        # query. A stream with no event is not behind.
+        def behind(connection, streams)
+          return [] if streams.empty?
+
+          ensure_table!(connection)
+          list = streams.map { connection.quote(_1) }.join(", ")
+          connection.uncached do
+            connection.select_values(<<~SQL.squish, "Lyra ES-Async rows behind")
+              SELECT DISTINCT s.stream FROM event_store_events_in_streams s
+              LEFT JOIN #{TABLE} c ON c.stream = s.stream
+              LEFT JOIN event_store_events_in_streams cs ON cs.stream = c.stream AND cs.event_id = c.event_id
+              WHERE s.stream IN (#{list}) AND (cs.id IS NULL OR s.id > cs.id)
+            SQL
+          end
+        end
+
         # Forget every checkpoint (tests; after the tables were truncated).
         def reset!(connection = nil)
           return ActiveRecord::Base.with_connection { |c| reset!(c) } unless connection

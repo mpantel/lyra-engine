@@ -25,7 +25,13 @@ module Lyra
       # Runs the block, on a connection of its own when +model_class+'s
       # connection has a transaction open. Yields +inline+; returns the block's
       # value.
-      def run(model_class = ActiveRecord::Base, &block)
+      #
+      # +wait_for_connection+ false: with no connection free in the pool
+      # (none idle, and the pool at its size), run inline at once rather
+      # than wait up to the checkout timeout, holding the caller's
+      # transaction and its locks (ReferenceLinks.catch_up, which does not
+      # wait inline either).
+      def run(model_class = ActiveRecord::Base, wait_for_connection: true, &block)
         where = model_class.with_connection do |connection|
           next :here unless connection.transaction_open?
 
@@ -35,10 +41,19 @@ module Lyra
         return yield(true) if where == :inline
 
         pool = model_class.connection_pool
+        unless wait_for_connection
+          stat = pool.stat
+          return yield(true) unless stat[:idle].to_i.positive? || stat[:connections].to_i < stat[:size].to_i
+        end
         begin
           # prevent_permanent_checkout: whatever the block leases is returned
           # with the connection, not left to the thread when it ends.
-          Thread.new { pool.with_connection(prevent_permanent_checkout: true) { block.call(false) } }.value
+          # The block's error is raised here, by value; the thread does not
+          # also report it (a refused Genesis import, say).
+          Thread.new do
+            Thread.current.report_on_exception = false
+            pool.with_connection(prevent_permanent_checkout: true) { block.call(false) }
+          end.value
         rescue ActiveRecord::ConnectionTimeoutError
           yield(true)
         end

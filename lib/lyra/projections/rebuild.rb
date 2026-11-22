@@ -22,6 +22,10 @@ module Lyra
     #   rake lyra:projections:rebuild                     # all monitored models
     #
     class Rebuild
+      # A rebuild that would undo what the log does not record
+      # (config.record_touches false).
+      class Refused < StandardError; end
+
       class << self
         # Rebuild a single model's read-model table from its event streams.
         #
@@ -30,6 +34,22 @@ module Lyra
         #   set false to reconstruct only the streamed rows in place
         # @return [Hash] statistics for the rebuild
         def rebuild(model_class, truncate: true)
+          # With touches left out of the log, the rows' updated_at is newer
+          # than the events say, and a rebuild would set every touched row back.
+          if Lyra.config.record_touches == false
+            raise Lyra::Projections::Rebuild::Refused,
+                  "Lyra refuses to rebuild #{model_class.name} from its events: config.record_touches is false, so " \
+                  "the log misses touches and the rebuild would set each touched row's updated_at back. Set " \
+                  "config.record_touches = true and run lyra:repair first."
+          end
+          live = Lyra::TouchRegistry.live_processes
+          if live.any?
+            raise Lyra::Projections::Rebuild::Refused,
+                  "Lyra refuses to rebuild #{model_class.name} from its events: processes leave touches out of the " \
+                  "log (config.record_touches = false): #{Lyra::TouchRegistry.describe(live)}. The rebuild would set " \
+                  "each touched row's updated_at back. #{Lyra::TouchRegistry::STEPS}"
+          end
+
           stats = {
             model: model_class.name,
             streams: 0, events: 0, records: 0, destroyed: 0

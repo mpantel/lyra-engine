@@ -388,13 +388,34 @@ live in `lib/lyra/verification/`:
   (`crud_lifecycle_workflow.rb`).
 - `Lyra::Verification::BypassWorkflow` (`bypass_workflow.rb`): the writes
   that skip ActiveRecord callbacks (`update_column(s)`, `delete`, `touch`,
-  `update_all`, `delete_all`, `insert_all(!)`, `upsert_all`, and
-  `dependent: :nullify`), as `StrictDataAccess` and `CachedRelation`
-  implement them, with strict mode on or off and a table-backed or
-  events-only store. `BypassWorkflow.coverage` checks Bypass Coverage: every
-  reachable marking in which nothing can fire is either a rejection or a
-  store change with an event logged; it returns `covered:`, `dead_markings:`
-  and `silent_writes:`. `BypassWorkflow::METHODS` is kept equal to the
+  `update_all`, `delete_all`, `touch_all`, `insert_all(!)`, `upsert_all`,
+  Rails' association nullify and `has_and_belongs_to_many` join-row deletes,
+  Rails' own never refused, the application's guarded), as `StrictDataAccess`, `BypassEvents` and
+  `CachedRelation` implement them, with strict mode on or off and one of
+  three stores: table-backed (ES-Sync, Hijack, Monitor), a table that lags
+  the event store and whose writes check each record's stream under its
+  aggregate lock (ES-Async, ES-Lazy), or events-only (ES-NoProj). Besides
+  the strict-mode rejection, a write can be refused by Genesis (a row the
+  model could not import, `insert_all` included where it reads the event
+  store) or by `config.bulk_write_lock_limit` (the records' locks, and the
+  unique values' in ES-Sync, ES-Async and ES-Lazy), an
+  ES-Lazy `upsert_all` reaching a destroyed record's row by
+  `RecordDestroyedError` (ES-Async brings the rows a bulk insert writes up
+  to date with their streams first), and an `update_column(s)`,
+  `update_all` or `upsert_all` of a value a unique index refuses by
+  `ActiveRecord::RecordNotUnique` (the table's, or in ES-NoProj, ES-Async
+  and ES-Lazy the event store's answer); a write to a destroyed record, or
+  `insert_all` of a key, a unique value or a join row already there, ends
+  with no write and no event (`unchanged`). The application's inserts of
+  join rows are guarded as its deletes of them are, and logged as links.
+  `BypassWorkflow.coverage` checks Bypass Coverage: every reachable marking
+  in which nothing can fire ends in exactly one way, a rejection alone, a
+  store change with an event logged, or unchanged with neither; it returns
+  `covered:`, `dead_markings:`, `unchanged:` and `silent_writes:`. For Lyra
+  1.0.0 the net has 38 places, 87 transitions and 181 reachable markings,
+  is 1-bounded, has no dead
+  transition, and its 18 dead markings (six configurations, three endings
+  each) are all covered. `BypassWorkflow::METHODS` is kept equal to the
   methods Lyra overrides by `test/verification/bypass_workflow_test.rb`.
 - `Lyra::Verification::CrudVerifier#verify_all` runs the lifecycle net, the
   three operation nets, the bypass net and every `*_workflow.rb` found in

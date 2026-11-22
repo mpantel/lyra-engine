@@ -56,12 +56,66 @@ module Lyra
         def for_association(klass, reflection, owner)
           return nil unless any?(klass)
 
-          scope = built do
-            default = klass.scope_for_association
-            unscoped = reflection.scope ? association_unscopes(klass, reflection, owner) : []
-            unscoped.any? ? default.unscope(*unscoped) : default
+          remembered([:association, klass, reflection]) do
+            scope = built do
+              default = klass.scope_for_association
+              unscoped = reflection.scope ? association_unscopes(klass, reflection, owner) : []
+              unscoped.any? ? default.unscope(*unscoped) : default
+            end
+            bare?(scope) ? nil : scope
           end
-          bare?(scope) ? nil : scope
+        end
+
+        # Run the block remembering in +store+ the default scopes it builds
+        # (for_association, for_through): run again with the same store, it
+        # uses them instead of running the scopes' bodies again. A :through
+        # association's relation is built again this way for a write
+        # (Rebuildable), so the application's default scopes run once, when
+        # the relation is built, as Active Record's do. An association read
+        # through it for another owner shares its model's scope, as the
+        # owner seldom changes what a default scope unscopes.
+        def remembering(store)
+          previous = Thread.current[REMEMBERED]
+          Thread.current[REMEMBERED] = store
+          yield
+        ensure
+          Thread.current[REMEMBERED] = previous
+        end
+
+        REMEMBERED = :lyra_default_scopes_remembered
+
+        def remembered(key)
+          store = Thread.current[REMEMBERED]
+          return yield unless store
+          return store[key] if store.key?(key)
+
+          store[key] = yield
+        end
+        private :remembered
+
+        # The default scopes of the target of a :through +reflection+ of
+        # +owner+ as Active Record's join applies them: less what any scope
+        # evaluated on the target's table unscopes, the source association's
+        # (belongs_to :variant, -> { with_discarded }) as well as the through
+        # association's own (has_one :x, -> { with_discarded }, through: ...).
+        # Active Record evaluates both with the owner (AssociationScope's
+        # add_constraints). nil when they select every record.
+        def for_through(reflection, owner)
+          remembered([:through, reflection]) do
+            klass = reflection.klass
+            return nil unless any?(klass)
+
+            scope = built do
+              unscoped = reflection.constraints.flat_map do |constraint|
+                relation = klass.unscoped
+                item = relation.instance_exec(owner, &constraint) || relation
+                item.respond_to?(:unscope_values) ? item.unscope_values : []
+              end
+              default = klass.scope_for_association
+              unscoped.any? ? default.unscope(*unscoped) : default
+            end
+            bare?(scope) ? nil : scope
+          end
         end
 
         # +relation+ (event-store records) narrowed by +scope+, an Active
@@ -73,7 +127,7 @@ module Lyra
         # (CachedRelation#unscope).
         def narrow(relation, scope, what = nil, base: relation, steps: [])
           narrowed = scope ? relation.narrowed_by(scope, what || description(relation.model_class)) : relation
-          narrowed = narrowed.spawn if narrowed.equal?(relation) && !base.equal?(relation)
+          narrowed = narrowed.spawn.inherit_rebuild(relation) if narrowed.equal?(relation) && !base.equal?(relation)
           default = scope ? [[:scope, scope, :default]] : []
           narrowed.plan = [base, default + steps]
           narrowed.default_scope_applied = scope

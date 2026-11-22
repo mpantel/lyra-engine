@@ -13,11 +13,12 @@ see [MIGRATION_GUIDE.md, Switching modes](MIGRATION_GUIDE.md#switching-modes).
 4. [State Consistency Issues](#state-consistency-issues)
 5. [Mode Switching Issues](#mode-switching-issues)
 6. [Event-Sourcing Configurations](#event-sourcing-configurations)
-7. [Performance Issues](#performance-issues)
-8. [Privacy and PII Issues](#privacy-and-pii-issues)
-9. [Debugging Techniques](#debugging-techniques)
-10. [Common Error Messages](#common-error-messages)
-11. [Getting Help](#getting-help)
+7. [Concurrency Issues](#concurrency-issues)
+8. [Performance Issues](#performance-issues)
+9. [Privacy and PII Issues](#privacy-and-pii-issues)
+10. [Debugging Techniques](#debugging-techniques)
+11. [Common Error Messages](#common-error-messages)
+12. [Getting Help](#getting-help)
 
 ---
 
@@ -415,7 +416,15 @@ async projections run inline unless `config.async_projections_inline = false`.
 
 **Cause**: By default a failed sync projection, or a failed enqueue of an
 async one, is logged and passed to `config.projection_error_handler`; the
-event stays stored.
+event stays stored. A database error in a sync projection (a unique index, a
+constraint) is not: it fails the write, whatever `strict_projections` says.
+A projected create that meets another record's value in a unique index
+brings that record's row up to date when its projection lags and nothing holds
+the row; a held row makes its job retry for about a day
+(`Lyra::Projections::ProjectionBehind`), then report it and give up (rebuild
+the model then). It is logged once and discarded when two live records of the
+log hold the value, or an index Lyra does not read refuses it
+(`DuplicateInLog`; ES-Lazy's catch-up logs it once and goes on).
 
 **Fix**: Set `config.strict_projections = true` to re-raise instead, or rebuild
 the affected table from the log with `bin/rails lyra:projections:rebuild
@@ -441,6 +450,83 @@ through the connection (`connection.select_all`) does not trigger it.
 
 ---
 
+## Concurrency Issues
+
+### `ActiveRecord::Deadlocked` in a transaction that writes several records
+
+**Symptom**: A transaction that writes several records one after another
+(`a.update!(...)`, then `b.update!(...)`, or a write followed by an
+`update_all` over other records) sometimes fails with
+`ActiveRecord::Deadlocked` ("deadlock detected") under concurrent load. The
+message names an `advisory lock`, a `transaction`, or both.
+
+**Cause**: Each write locks its record until the transaction ends. Monitor,
+Hijack and ES-Sync lock the row; ES-Async, ES-Lazy and ES-NoProj take the record's
+aggregate lock, a PostgreSQL advisory lock on its stream
+(`lyra_aggregate/<stream>`); a write that takes both takes the aggregate lock
+first, then the row (`Lyra::AdvisoryLock`). Lyra orders the locks of one write:
+a bulk write (`update_all`, `delete_all`, `touch_all`) takes all its records'
+aggregate locks together, in the order of their hashes. It does not order the writes of an application's transaction: a
+transaction that holds record A and then asks for record B waits for whoever
+holds B; if that one is waiting for A (another transaction that took B first,
+or a bulk write that holds B and waits for A), neither can go on. PostgreSQL
+detects the cycle after `deadlock_timeout` (1 s by default) and aborts one of
+them. Plain Active Record does the same with row locks: two transactions that
+update the same rows in opposite orders deadlock without Lyra too
+(`test/aggregate_lock_deadlock_test.rb`).
+
+A bulk write that holds no lock of its own yet keeps out of such cycles: while
+it waits for records other sessions hold, it keeps the others for at most 100
+ms, never as long as `deadlock_timeout`, then gives them back and tries again,
+so a transaction that holds one of its records and asks for another goes on,
+and PostgreSQL never aborts the bulk write (a `lock_timeout` of your own that
+is shorter still applies, and raises `ActiveRecord::LockWaitTimeout`). A
+transaction that already holds records (it wrote one, then bulk-writes others)
+waits holding none of the new ones, but it still holds the first. Two
+application transactions that take the same records in opposite orders cannot
+be helped that way. The price of the bulk write's turns: under contention, the
+transactions that share records with it wait while it holds them, and go through
+less often than when it gave its locks back at once.
+
+**Known issue (ES-Lazy): a transaction that reads, then writes.** A read in
+ES-Lazy first brings the tables up to date (the catch-up), and inside a
+transaction the rows it writes stay locked until the transaction ends. The
+catch-up writes those rows without the records' aggregate locks. When the
+transaction then takes a record's aggregate lock (a write through callbacks,
+`update_all`) that a bulk write holds while it waits for one of those rows (to
+bring it up to date before writing it), the two wait for each other.
+PostgreSQL detects it after `deadlock_timeout` and aborts one of them with
+`ActiveRecord::Deadlocked`; nothing of the aborted one is written or recorded.
+Retry the transaction, or do the reads outside it. The transaction's first
+read also takes the catch-up lock and holds it until the transaction ends, so
+a transaction that writes a record and then reads can wait for one that read
+first and then writes that record, with the same outcome.
+
+**Fix**:
+
+1. Take records in one order in every transaction, for example by primary key:
+   ```ruby
+   Order.transaction do
+     orders.sort_by(&:id).each { |order| order.update!(status: "shipped") }
+   end
+   ```
+2. Retry the whole transaction on `ActiveRecord::Deadlocked`, a few times; it
+   was rolled back, nothing of it was written or recorded:
+   ```ruby
+   attempts = 0
+   begin
+     Order.transaction { ... }
+   rescue ActiveRecord::Deadlocked
+     attempts += 1
+     retry if attempts < 3
+     raise
+   end
+   ```
+3. Keep transactions short. In ES-Lazy, read what you need before the
+   transaction, or before its first write.
+
+---
+
 ## Performance Issues
 
 ### Slow reads in ES-NoProj
@@ -459,6 +545,29 @@ For queries over large tables use ES-Lazy, which runs real SQL.
 row that has no stream.
 
 **Fix**: Run `bin/rails lyra:genesis` before enabling the mode.
+
+### `Lyra::Genesis::Refused` or `Lyra::Repair::Unrepresentable`: rows hold values the model cannot represent
+
+**Cause**: A row that predates Lyra holds a value its model reads as something
+else (an enum value outside the mapping is read as `nil`), so its `Imported`
+event would not match it. The message lists model, id, attribute, stored value
+and value read (the first 20, with the count). Nothing of the model was
+imported. `lyra:repair` checks what it would write the same way, and refuses
+before repairing anything.
+
+**Fix**: Correct the rows (or add the value to the model), then run
+`bin/rails lyra:genesis MODEL=...` (or `lyra:repair`) again. To import or
+repair the rest and leave those rows out, use `UNREPRESENTABLE=skip` or
+`config.genesis_unrepresentable = :skip`. A write to a skipped row (also
+`update_all` and other bulk writes) raises `Lyra::Genesis::Refused` naming
+it: fix that row in the database (SQL), not through the model; its next use,
+or `lyra:genesis`, imports it.
+
+A legacy `'--- {}'` row under `serialize :col, type: Hash` is such a value
+(read as `{}`, written back as `NULL`): set those rows to `NULL` by SQL, or
+skip them. In Monitor with `config.genesis = true`, `:skip` and
+`config.record_touches = false`, a timestamp-only `touch_all` that reaches a
+skipped row is refused too, though it would record no event.
 
 ### Bulk writes are slow
 
@@ -620,6 +729,7 @@ The full list of errors Lyra raises is in
 | `Lyra::StrictDataAccessViolation` | A callback-bypassing write with `config.strict_data_access` on. | Use `save`/`update`/`destroy`, or wrap deliberate bulk work in `Lyra.without_strict_access { ... }`. |
 | `Lyra::Temporal::HistoryNotRecorded` | A point-in-time read before an imported record's history begins. | The record was imported by Genesis; its history before the import was not recorded. |
 | `Lyra::MappingVerificationError` | `verify_mapping!` failed, or petri_flow is missing. | Read the failed checks in the message; add `orfeas_petri_flow` with `require: "petri_flow"`. |
+| `ActiveRecord::Deadlocked` | A transaction writing several records met another taking them in another order (as with plain Active Record's row locks). | [Concurrency Issues](#activerecorddeadlocked-in-a-transaction-that-writes-several-records) |
 | `ActiveRecord::RecordInvalid` | Model validations failed. | Validations run in every mode, before Lyra stores an event. |
 
 A command that fails in Hijack or event sourcing does not raise: it adds its

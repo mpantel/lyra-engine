@@ -37,7 +37,9 @@ seven configurations:
   `delete`, `update_all`, `delete_all`, `insert_all`, `insert_all!`, `upsert_all`,
   and the updates of `dependent: :nullify`) on a monitored model publish bypass
   events; with `config.strict_data_access = true` they raise instead (except
-  `touch` and the `dependent: :nullify` updates).
+  `touch` and Rails' own association writes, such as the `dependent: :nullify`
+  updates or removing a `has_and_belongs_to_many` link; the same writes made by
+  the application raise).
 - Each record has its own stream, named `"Model$id"` (for example `"Order$42"`).
 - **ES-NoProj** writes no rows; it answers a query exactly from the events or
   raises `Lyra::Projections::UnsupportedQuery`. Since it writes no rows to
@@ -52,11 +54,12 @@ seven configurations:
 
 ## Requirements and installation
 
-- Ruby >= 4.0, Rails >= 8.0, `rails_event_store` ~> 3.0 (from `lyra.gemspec`).
+- Ruby >= 4.0, Rails 8.1 (`>= 8.1, < 8.2`; tested on 8.1.4.1), `rails_event_store` ~> 3.0
+  (from `lyra.gemspec`). CI tests Ruby 4.0 on PostgreSQL 18.7.
 - PostgreSQL. Lyra depends on the `pg` gem; the advisory locks behind Genesis
   and ES-Lazy, and id reservation in Hijack mode, need PostgreSQL.
 
-The gems are on RubyGems, all three at 1.0.0 (17 November 2026):
+The gems are on RubyGems, all three at 1.0.0 (22 November 2026):
 `orfeas_lyra`, `orfeas_pam_dsl` and `orfeas_petri_flow`. Their names differ from the files to require:
 
 ```ruby

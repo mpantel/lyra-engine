@@ -4,7 +4,7 @@ All notable changes to PAM DSL will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-17
+## [1.0.0] - 2026-11-22
 
 ### Breaking
 - **`GDPRCompliance#data_export` no longer has `processing_activities`.** The key listed, per

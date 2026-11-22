@@ -196,4 +196,13 @@ class Minitest::Test
   def stub_recent_events(events)
     Lyra::EventWindow.stubs(:recent).returns([events, { limit: Lyra.config.dashboard_max_events, returned: events.size, truncated: false, skipped: 0 }])
   end
+
+  # Every causation_id in the store names an event in it
+  # (Lyra::Causation.integrity). Returns the check, for assertions on how
+  # many events name a cause.
+  def assert_no_dangling_causation(store = Lyra.config.event_store, message = nil)
+    check = Lyra::Causation.integrity(store)
+    assert_empty check[:dangling], message || "causation ids naming no event in the store"
+    check
+  end
 end

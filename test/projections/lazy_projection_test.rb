@@ -245,7 +245,7 @@ class LazyProjectionTest < Minitest::Test
     holder = hold_catch_up
     sql = name = nil
     reader = in_thread { sql = statements { name = LazyAuthor.find(ann.id).name } }
-    wait_until_waiting_on_the_lock
+    wait_until_waiting_on_the_lock(reader)
 
     holder.release
     reader.join
@@ -263,7 +263,7 @@ class LazyProjectionTest < Minitest::Test
     holder = hold_catch_up # has applied Ann, not yet committed
     LazyAuthor.create!(name: "Bea", email: "bea@example.com") # committed after it looked
     reader = in_thread { LazyAuthor.order(:name).pluck(:name) }
-    wait_until_waiting_on_the_lock
+    wait_until_waiting_on_the_lock(reader)
 
     holder.release
     assert_equal %w[Ann Bea], reader.value
@@ -291,7 +291,7 @@ class LazyProjectionTest < Minitest::Test
     LazyAuthor.create!(name: "Bea", email: "bea@example.com") # a later id, committed
     holder = hold_catch_up # passes the reader's event, listed as missing
     go << true
-    wait_until_waiting_on_the_lock
+    wait_until_waiting_on_the_lock(reader)
 
     holder.release
     assert_equal %w[Ann Bea Own], reader.value
@@ -325,8 +325,15 @@ class LazyProjectionTest < Minitest::Test
     ActiveSupport::Notifications.unsubscribe(subscription)
   end
 
+  # A thread on a connection of its own. Its server process id is kept in
+  # the thread variable :pid before the block runs (outside +statements+).
   def in_thread(&block)
-    Thread.new { ActiveRecord::Base.connection_pool.with_connection(&block) }.tap { |t| t.report_on_exception = false }
+    Thread.new do
+      ActiveRecord::Base.connection_pool.with_connection do |connection|
+        Thread.current.thread_variable_set(:pid, connection.select_value("SELECT pg_backend_pid()").to_i)
+        block.call
+      end
+    end.tap { |t| t.report_on_exception = false }
   end
 
   # A reader in another connection that has caught up in its own transaction
@@ -352,13 +359,26 @@ class LazyProjectionTest < Minitest::Test
     Holder.new(thread, go)
   end
 
-  # Until some session waits for an advisory lock it has not been granted.
-  def wait_until_waiting_on_the_lock
+  # Until +reader+'s session waits for an advisory lock it has not been
+  # granted. Only that session, in this database: pg_locks lists the waits
+  # of the whole cluster, and another session's wait (another test run,
+  # another database) must not count as the reader's.
+  def wait_until_waiting_on_the_lock(reader)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
-    until raw("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted").to_i.positive?
+    until waiting_on_an_advisory_lock?(reader.thread_variable_get(:pid))
       flunk "no reader waits on the catch-up lock" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
       sleep 0.01
     end
+  end
+
+  def waiting_on_an_advisory_lock?(pid)
+    return false unless pid
+
+    raw(<<~SQL).to_i.positive?
+      SELECT count(*) FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted AND pid = #{Integer(pid)}
+        AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+    SQL
   end
 
   def event_ids = ActiveRecord::Base.connection.select_values("SELECT id FROM event_store_events").map(&:to_i)

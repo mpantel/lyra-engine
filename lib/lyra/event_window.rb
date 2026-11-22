@@ -10,7 +10,8 @@ module Lyra
   # fill the window and push out the events it is for. Skipping them costs a
   # scan, so the scan stops after SCAN_FACTOR x limit events: a log that is
   # mostly access entries still bounds the work, and the window then says it
-  # stopped early.
+  # stopped early. SaveWithoutEffect markers (Lyra::SavesWithoutEffect), which
+  # record no change, are skipped too.
   module EventWindow
     SCAN_FACTOR = 10
     # Lyra::AccessLog's event types, named here because the access log loads
@@ -19,12 +20,14 @@ module Lyra
       Lyra::Events::DataAccessed Lyra::Events::DataAccessDenied
       Lyra::Events::DashboardRead Lyra::Events::AccessLogErased
     ].freeze
+    SKIPPED_TYPES = (ACCESS_LOG_TYPES + [Lyra::SavesWithoutEffect::TYPE]).freeze
     BATCH = 1_000
 
     module_function
 
     # [events, window]. window: limit, returned, truncated (older events may
-    # exist that were not read) and skipped (access-log entries passed over).
+    # exist that were not read) and skipped (access-log entries and markers
+    # passed over).
     def recent(limit)
       cap = limit * SCAN_FACTOR
       events = []
@@ -38,7 +41,7 @@ module Lyra
           truncated = true
           break
         end
-        if ACCESS_LOG_TYPES.include?(event.event_type)
+        if SKIPPED_TYPES.include?(event.event_type)
           skipped += 1
           next
         end

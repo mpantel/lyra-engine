@@ -42,9 +42,10 @@ module Lyra
         Thread.current[:lyra_skip_insert] = nil
       end
 
-      def _update_record(*)
+      def _update_record(*args)
         lyra_genesis_first_use
         return super unless lyra_takes_over_write_here?
+        return lyra_hijack_with_row_write { lyra_hijack_update ? super(*args) : false } if lyra_hijack_atomically?
         return false unless lyra_hijack_mode? ? lyra_hijack_update : lyra_prepare_event_source_update
 
         super
@@ -58,6 +59,7 @@ module Lyra
         # Otherwise _delete_row counts the rows its DELETE reached.
         @lyra_rows_deleted = persisted? ? nil : 0 if respond_to?(:lyra_events_enabled?, true)
         return super unless lyra_takes_over_write_here? && persisted?
+        return lyra_hijack_with_row_write { lyra_hijack_destroy ? super() : false } if lyra_hijack_atomically?
         return false unless lyra_hijack_mode? ? lyra_hijack_destroy : lyra_prepare_event_source_destroy
 
         super
@@ -65,13 +67,35 @@ module Lyra
 
       private
 
+      # Hijack appends a write's event before its row write. With optimistic
+      # locking the row write can raise (StaleObjectError, the row's version
+      # moved on) after the append; a caller that rescues inside an enclosing
+      # transaction then commits the event of an update that never happened,
+      # and the log and the row part. The append and the row write go in one
+      # savepoint, so they commit or roll back together. The row lock taken
+      # before the append is held to the end of the transaction when the
+      # write succeeds (Assumption L); a savepoint rolled back releases it
+      # with the write. Without optimistic locking an update or destroy that
+      # reaches no row does not raise, and no savepoint is taken.
+      def lyra_hijack_atomically?
+        lyra_hijack_mode? && Lyra::OptimisticLocking.enabled?(self.class)
+      end
+
+      def lyra_hijack_with_row_write(&)
+        self.class.transaction(requires_new: true, &)
+      rescue StandardError
+        # The savepoint took the event with it.
+        @lyra_write_scope&.lost!("not saved")
+        raise
+      end
+
       # Before the model's first write in this process, give its pre-existing
       # rows their Imported events (Lyra::Genesis), so this write's event never
       # starts a stream without a head.
       def lyra_genesis_first_use
         return unless respond_to?(:lyra_events_enabled?, true) && lyra_events_enabled?
 
-        Lyra::Genesis.first_use(self.class)
+        Lyra::Genesis.first_use(self.class, (id if persisted?))
       end
 
       def lyra_takes_over_write_here?
@@ -79,7 +103,59 @@ module Lyra
       end
     end
 
+    # Where a write scope opens (CrudInterceptor#lyra_write_scope): around
+    # the whole save or destroy callback chain, inside the write's
+    # transaction. Prepended to ActiveRecord::Callbacks, so these methods sit
+    # above Callbacks#create_or_update and Callbacks#destroy (which run the
+    # callbacks) and below Transactions (which opens the transaction).
+    #
+    # The scope used to be an around_save/around_destroy callback, first in
+    # its chain. Active Model prepends after_* callbacks, so a model's own
+    # after_save and after_destroy ran outside it, and the writes they make
+    # (Solidus's Payment#update_order) had no cause. Wrapping the chain from
+    # outside adds no callback, so the application's callbacks keep their
+    # order.
+    #
+    # A destroy chain run without Callbacks#destroy (a soft delete:
+    # paranoia's paranoia_destroy runs run_callbacks(:destroy) itself, in
+    # with_transaction_returning_status) gets its scope from run_callbacks;
+    # a normal destroy, whose chain runs inside the scope destroy opened,
+    # does not open a second one.
+    module WriteScopeHooks
+      def destroy
+        return super unless lyra_write_scope_here?
+
+        lyra_destroy_scope { super }
+      end
+
+      def run_callbacks(kind, type = nil, &block)
+        return super unless kind.to_sym == :destroy && !@lyra_destroy_scope_open && lyra_write_scope_here?
+
+        lyra_destroy_scope { super(kind, type, &block) }
+      end
+
+      private
+
+      def create_or_update(**options)
+        return super unless lyra_write_scope_here?
+
+        lyra_write_scope(new_record? ? :create : :update) { super(**options) }
+      end
+
+      def lyra_destroy_scope
+        open, @lyra_destroy_scope_open = @lyra_destroy_scope_open, true
+        lyra_write_scope(:destroy) { yield }
+      ensure
+        @lyra_destroy_scope_open = open
+      end
+
+      def lyra_write_scope_here?
+        respond_to?(:lyra_events_enabled?, true) && lyra_events_enabled?
+      end
+    end
+
     module CrudInterceptor
+
       extend ActiveSupport::Concern
 
       included do
@@ -96,12 +172,13 @@ module Lyra
 
         # Every event-producing write runs in a write scope
         # (config.correlate_writes): its event id is fixed before any of its
-        # callbacks, so the writes they make record it as their cause, and the
-        # outermost write opens the correlation when none is in scope. First
-        # in each chain, so it wraps the model's own callbacks, whatever order
-        # the model declares them in.
-        around_save :lyra_write_scope, if: :lyra_events_enabled?, prepend: true
-        around_destroy :lyra_write_scope, if: :lyra_events_enabled?, prepend: true
+        # callbacks, so the writes they make record it as their cause, or the
+        # cause in scope when the write records no event (Causation::
+        # WriteScope, Lyra::SavesWithoutEffect), and the outermost write opens
+        # the correlation when none is in scope. The scope wraps the whole
+        # callback chain, after_save and after_destroy included
+        # (WriteScopeHooks).
+        ActiveRecord::Callbacks.prepend(WriteScopeHooks) unless ActiveRecord::Callbacks.ancestors.include?(WriteScopeHooks)
 
         # Hijack and event-sourcing modes build their event in WriteHooks, after
         # every before_* callback and just before the row write (see below).
@@ -126,6 +203,10 @@ module Lyra
         # Purpose-bound reads (Lyra::PurposeBoundReads): a loaded record is
         # checked against its policy for the purpose in scope.
         after_find :lyra_check_read_purpose, if: :lyra_monitored?
+
+        # ES-NoProj: a validated update locks its record before its
+        # uniqueness validation locks the value (lyra_lock_aggregate_before_validation).
+        before_validation :lyra_lock_aggregate_before_validation, prepend: true, if: :lyra_event_sourcing_mode?
       end
 
       # Override _update_row to skip SQL UPDATE in event_sourcing mode.
@@ -176,7 +257,7 @@ module Lyra
           correlation_id: Lyra::Correlation.current_id,
           # Inside its own write scope the current cause is this write itself;
           # its own cause is the one in scope when the write began.
-          causation_id: @lyra_in_write_scope ? @lyra_write_cause_id : Lyra::Causation.current_id,
+          causation_id: @lyra_write_scope ? Lyra::Causation.resolve(@lyra_write_scope.outer) : Lyra::Causation.current_id,
           action_id: lyra_current_action_id,
           user_action: lyra_current_user_action
         }
@@ -190,30 +271,85 @@ module Lyra
 
       # The event id fixed for this write by its write scope, for the write's
       # own event: given once, so no two events can share it; nil outside a
-      # scope or once taken (the store then assigns one).
+      # scope or once taken (the store then assigns one). From then on the
+      # writes its callbacks make name it as their cause
+      # (Causation::WriteScope).
       def lyra_take_own_event_id
-        return nil unless @lyra_in_write_scope && !@lyra_write_event_id_taken
-
-        @lyra_write_event_id_taken = true
-        @lyra_write_event_id
+        @lyra_write_scope&.take_event_id
       end
 
-      # around_save/around_destroy (see the callbacks above). Nested scopes of
-      # the same record (a save inside its own callbacks) restore the outer
-      # one on the way out.
-      def lyra_write_scope
+      # Around a save's or a destroy's callback chain (WriteScopeHooks).
+      # Nested scopes of the same record (a save inside its own callbacks)
+      # restore the outer one on the way out.
+      #
+      # A write that ends without its own event in the log after its id was
+      # handed out (to a write in its before_* callbacks) appends a
+      # SaveWithoutEffect marker with that id, in its transaction
+      # (Lyra::SavesWithoutEffect). Also when it raises: a caller that rescues
+      # inside an enclosing transaction keeps the writes made before the
+      # error, and their cause. That marker is appended in a savepoint, best
+      # effort: a failure there (the transaction aborted by the error) is
+      # ignored, so the original error propagates; and if the enclosing
+      # transaction rolls back, the marker goes with the writes that named it.
+      #
+      # The correlation the outermost write opens is its event id even when
+      # that write records nothing: a correlation_id is a group's label, which
+      # names an event only by convention (a request's or a job's id names
+      # none), so the writes inside still share it.
+      def lyra_write_scope(operation)
         return yield unless Lyra.config.correlate_writes
 
-        outer = [@lyra_in_write_scope, @lyra_write_event_id, @lyra_write_cause_id, @lyra_write_event_id_taken]
-        @lyra_write_cause_id = Lyra::Causation.current_id
-        @lyra_write_event_id = SecureRandom.uuid
-        @lyra_write_event_id_taken = false
-        @lyra_in_write_scope = true
-        Lyra::Correlation.with_id(Lyra::Correlation.current_id || @lyra_write_event_id) do
-          Lyra::Causation.with_id(@lyra_write_event_id) { yield }
+        outer = @lyra_write_scope
+        scope = @lyra_write_scope = Lyra::Causation::WriteScope.new(Lyra::Causation.current)
+        Lyra::Correlation.with_id(Lyra::Correlation.current_id || scope.event_id) do
+          Lyra::Causation.with_id(scope) do
+            result = yield
+            if scope.owes_marker?
+              Lyra::SavesWithoutEffect.record(scope, self, operation: operation,
+                                                           reason: lyra_reason_without_effect(scope, operation, result))
+            end
+            result
+          rescue StandardError
+            lyra_marker_after_error(scope, operation) if scope.owes_marker?
+            raise
+          end
         end
       ensure
-        @lyra_in_write_scope, @lyra_write_event_id, @lyra_write_cause_id, @lyra_write_event_id_taken = outer if outer
+        @lyra_write_scope = outer if scope
+      end
+
+      # The owed marker of a write that raised, in a savepoint; nothing if it
+      # cannot be appended (lyra_write_scope).
+      def lyra_marker_after_error(scope, operation)
+        ActiveRecord::Base.transaction(requires_new: true) do
+          Lyra::SavesWithoutEffect.record(scope, self, operation: operation, reason: scope.lost_reason || "not saved")
+        end
+      rescue StandardError => e
+        Rails.logger.error("Lyra: could not record a save without effect after #{self.class.name} #{id} raised - #{e.message}")
+      end
+
+      # The write's own event is in the log: the writes made from now on name
+      # it (Causation::WriteScope). Monitor and Hijack call it once the append
+      # returns, event sourcing once lyra_finalize_event_source has stored it.
+      def lyra_own_event_appended!
+        @lyra_write_scope&.appended!
+      end
+
+      # Called as Lyra's after_create, after_update and after_destroy end
+      # (lyra_intercept_*, the first in each chain; in Hijack and event
+      # sourcing the event was built before): the write has built its own
+      # event, or it records none.
+      def lyra_write_decided
+        @lyra_write_scope&.decided!
+      end
+
+      # Why a write recorded no event (Lyra::SavesWithoutEffect).
+      def lyra_reason_without_effect(scope, operation, result)
+        if scope.lost? then scope.lost_reason
+        elsif result == false || !scope.decided? then "not saved"
+        elsif operation == :update && saved_changes.empty? then "no change"
+        else "no row"
+        end
       end
 
       class_methods do
@@ -441,7 +577,72 @@ module Lyra
           Lyra::Projections::EventStoreReader.relation(self)
         end
 
+        # Model.insert_all and the other inserts on the model itself, in
+        # ES-NoProj and outside a scoping block: sent to the table relation
+        # as a relation of the event store sends them
+        # (CachedRelation#insert_through_table: unscoped, where
+        # StrictDataAccessRelation records them), without building that
+        # relation first. Active Record delegates them to Model.all, which
+        # here rebuilt every record of the model: a cold insert_all of two
+        # rows took 33 s at 10,000 records, its unique-index check 20 ms.
+        %i[insert insert! insert_all insert_all! upsert upsert_all].each do |name|
+          define_method(name) do |*args, **kwargs, &block|
+            return super(*args, **kwargs, &block) unless lyra_read_from_events? && current_scope.nil?
+
+            begin
+              previous = Thread.current[:lyra_bypass_read_override]
+              Thread.current[:lyra_bypass_read_override] = true
+              unscoped.public_send(name, *args, **kwargs, &block)
+            ensure
+              Thread.current[:lyra_bypass_read_override] = previous
+            end
+          end
+        end
+
+        # Model.update_counters(id, ...), increment_counter, decrement_counter
+        # and a record's increment! and decrement! (which Active Record runs
+        # through update_counters): in ES-NoProj, the records with those keys
+        # read from the event store, written as a relation's update_counters
+        # writes them (CachedRelation#update_counters: locks, current values,
+        # an event each, touch: included), and the number written returned.
+        # They went to Active Record's SQL on an empty table: 0, no event.
+        # A counter cache, which Active Record's associations keep through
+        # these, is still left as it is: ES-NoProj does not keep counter
+        # caches (AssociationInterceptor).
+        def update_counters(id, counters)
+          return super unless lyra_counters_from_events?(caller_locations(1, 12))
+
+          lyra_update_counters_from_events(id, counters)
+        end
+
+        def increment_counter(counter_name, id, by: 1, touch: nil)
+          return super unless lyra_counters_from_events?(caller_locations(1, 12))
+
+          lyra_update_counters_from_events(id, { counter_name => by, touch: touch })
+        end
+
+        def decrement_counter(counter_name, id, by: 1, touch: nil)
+          return super unless lyra_counters_from_events?(caller_locations(1, 12))
+
+          lyra_update_counters_from_events(id, { counter_name => -by, touch: touch })
+        end
+
         private
+
+        def lyra_counters_from_events?(locations)
+          lyra_read_from_events? &&
+            locations.none? { |frame| frame.path&.include?("/active_record/associations/") }
+        end
+
+        # The records with those keys only (EventStoreReader.keyed): the
+        # cost is theirs, not the model's size. With optimistic locking the
+        # lock version moves too, as Active Record's
+        # Locking::Optimistic.update_counters moves it, so a copy read
+        # before raises StaleObjectError on save.
+        def lyra_update_counters_from_events(id, counters)
+          counters = counters.merge(locking_column => 1) if locking_enabled?
+          Lyra::Projections::EventStoreReader.keyed(self, Array(id)).update_counters(counters)
+        end
 
         # The ActiveRecord relation reads select through: the current scope
         # of an unscoped { ... } block, else the default scopes; nil for
@@ -522,6 +723,8 @@ module Lyra
 
         event_data = build_event_data(:created)
         publish_event(:created, event_data)
+      ensure
+        lyra_write_decided
       end
 
       def lyra_intercept_update
@@ -537,6 +740,8 @@ module Lyra
 
         event_data = build_event_data(:updated)
         publish_event(:updated, event_data)
+      ensure
+        lyra_write_decided
       end
 
       def lyra_intercept_destroy
@@ -553,6 +758,8 @@ module Lyra
 
         event_data = build_event_data(:destroyed)
         publish_event(:destroyed, event_data)
+      ensure
+        lyra_write_decided
       end
 
       # HIJACK MODE: called from WriteHooks, after every before_* callback and
@@ -573,6 +780,7 @@ module Lyra
           # (Solidus's StockItem#count_on_hand=).
           key = lyra_key_column.to_sym
           self.id = result.attributes[key] if result.attributes.key?(key)
+          lyra_own_event_appended!
           true
         else
           errors.add(:base, result.error)
@@ -620,9 +828,7 @@ module Lyra
         return unless lyra_hijack_mode? || es_sync || es_async || checks_version
         return :row if (lyra_hijack_mode? || es_sync) && lyra_lock_own_row(operation)
 
-        self.class.with_connection do |connection|
-          Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
-        end
+        lyra_aggregate_advisory_lock
         :advisory
       end
 
@@ -632,23 +838,57 @@ module Lyra
       # back to the advisory lock and appended after the Destroyed event,
       # leaving a stream that brings the record back (state_at, DualView).
       # Where the record's row was found and locked it exists, so there is
-      # nothing to check. Elsewhere the stream's last event is read under the
-      # advisory lock, which this takes in ES-NoProj and ES-Lazy too, for
-      # updates and destroys only. With lock_aggregate_before_append off, as
+      # nothing to check. Elsewhere the stream's last replayed event is read
+      # (Lyra::StreamTail) under the advisory lock, which this takes in
+      # ES-NoProj and ES-Lazy too, for updates and destroys only. A destroy
+      # followed by events that are not replayed (an also: domain event, an
+      # ErasureApplied, a habtm link) is still a destroy. With
+      # lock_aggregate_before_append off, as
       # in the benchmarks' no-lock controls, nothing is checked.
       def lyra_lock_aggregate_unless_destroyed!(operation = :update)
         locked = lyra_lock_aggregate!(operation)
         return if locked == :row || id.nil? || !Lyra.config.lock_aggregate_before_append
 
-        unless locked == :advisory
-          self.class.with_connection do |connection|
-            Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
-          end
-        end
-        last = Lyra.config.event_store.read.stream(lyra_stream_name).backward.limit(1).to_a.first
-        return unless last && Lyra::Event.operation_of(last) == :destroyed
+        lyra_aggregate_advisory_lock unless locked == :advisory
+        # One query when the last event is a replayed create, import or update.
+        return unless Lyra::StreamTail.destroyed?(lyra_stream_name)
 
         raise Lyra::RecordDestroyedError, "#{self.class.name} #{id} was destroyed; its #{operation} is refused"
+      end
+
+      # The advisory lock on the record's stream, once per save: not again
+      # when the save took it before its validations
+      # (lyra_lock_aggregate_before_validation), in the transaction it is in.
+      def lyra_aggregate_advisory_lock
+        self.class.with_connection do |connection|
+          early, @lyra_aggregate_locked_in = @lyra_aggregate_locked_in, nil
+          next if early && early.equal?(connection.current_transaction) && early.open?
+
+          Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
+        end
+      end
+
+      # ES-NoProj: an update of a model with a uniqueness validation takes the
+      # record's aggregate lock before its validations, so the value lock the
+      # validation takes (Projections::Uniqueness.lock!) comes after it, as
+      # every other write of one record takes them (the aggregate, then the
+      # value: Projections::UniqueIndexes): a validated save and an update_all
+      # (or update_columns, or update_counters) of the record and value no
+      # longer deadlock, nor two transactions crossing two records and one
+      # value. The save's own lock (lyra_lock_aggregate_unless_destroyed!)
+      # is then not taken again; the statements are the same, in another
+      # order. A create has no stream to lock.
+      def lyra_lock_aggregate_before_validation
+        return unless persisted? && Lyra::Projections::Uniqueness.reads_events?(self.class)
+        return unless Lyra.config.lock_aggregate_before_append
+        return unless self.class.validators.any? { _1.is_a?(ActiveRecord::Validations::UniquenessValidator) }
+
+        self.class.with_connection do |connection|
+          next unless connection.transaction_open?
+
+          Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{lyra_stream_name}", purpose: "aggregate write")
+          @lyra_aggregate_locked_in = connection.current_transaction
+        end
       end
 
       # True when the record's row was found and locked.
@@ -687,7 +927,10 @@ module Lyra
         command.record = self
         result = Lyra::CommandHandler.handle(command)
 
-        return true if result.success?
+        if result.success?
+          lyra_own_event_appended!
+          return true
+        end
 
         errors.add(:base, result.error)
         false
@@ -702,7 +945,10 @@ module Lyra
         command.record = self
         result = Lyra::CommandHandler.handle(command)
 
-        return true if result.success?
+        if result.success?
+          lyra_own_event_appended!
+          return true
+        end
 
         errors.add(:base, result.error)
         false
@@ -716,6 +962,14 @@ module Lyra
       def lyra_prepare_event_source_create
         @lyra_hijacked = true
         lyra_disable_paper_trail!
+        # The table's unique indexes, as its INSERT would check them, before
+        # the event is built (Projections::UniqueIndexes): every
+        # event-sourcing mode appends first, and ES-NoProj writes no row.
+        claims = lyra_unique_claims(:create)
+        if claims.present?
+          Lyra::Projections::UniqueIndexes.lock!(self.class, claims)
+          Lyra::Projections::UniqueIndexes.refuse_taken!(self.class, claims)
+        end
 
         command = Lyra::Commands::CreateCommand.new(self.class, attributes)
         command.record = self
@@ -750,6 +1004,17 @@ module Lyra
         # Active Record checks and increments lock_version only when it writes
         # the row, that is when something changed.
         lock_was = lyra_take_lock_version!("update")
+        # The values the update claims in the table's unique indexes, under
+        # the record's aggregate lock (as Monitor's UPDATE locks the row, then
+        # the index entries) and once its version is known current, the
+        # columns it does not write as the record's stream (ES-Sync: its row)
+        # has them: locked, then checked before the event is built
+        # (Projections::UniqueIndexes).
+        claims = lyra_unique_claims(:update)
+        if claims.present?
+          Lyra::Projections::UniqueIndexes.lock!(self.class, claims)
+          Lyra::Projections::UniqueIndexes.refuse_taken!(self.class, claims, except: id)
+        end
 
         command = Lyra::Commands::UpdateCommand.new(self.class, id, changes)
         command.record = self
@@ -768,6 +1033,29 @@ module Lyra
       rescue Exception # as Active Record restores the version
         lyra_restore_lock_version(lock_was)
         raise
+      end
+
+      # The values this save claims in the table's unique indexes
+      # (Lyra::Projections::UniqueIndexes), in the event-sourcing modes, where
+      # the event is appended before the projection writes a row for the
+      # index to refuse (ES-Sync, ES-Async, ES-Lazy), or no row is written
+      # (ES-NoProj): those of every index on a create; on an update, of the
+      # indexes whose columns it changes, the other columns of each as the
+      # record's stream (ES-Sync: its locked row) has them (a copy read
+      # before another writer changed them claims the tuple the row would
+      # hold). nil elsewhere, or for a model without such an index.
+      def lyra_unique_claims(operation)
+        return nil unless Lyra::Projections::UniqueIndexes.enforced?(self.class)
+        return nil if Lyra::Projections::UniqueIndexes.of(self.class).empty?
+        return Lyra::Projections::UniqueIndexes.claims(self.class) { |column| read_attribute(column) } if operation == :create
+        return nil unless has_changes_to_save?
+
+        changed = changed_attribute_names_to_save
+        # Nothing built for an update that sets no indexed column.
+        return nil unless changed.intersect?(Lyra::Projections::UniqueIndexes.columns(self.class))
+
+        written = changed.to_h { |name| [name, read_attribute(name)] }
+        Lyra::Projections::UniqueIndexes.update_claims(self.class, id_in_database, written)
       end
 
       # Optimistic locking in the event-sourcing modes (Lyra::OptimisticLocking):
@@ -840,6 +1128,7 @@ module Lyra
         # Store events to the event store
         if @lyra_event_result.events&.any?
           lyra_store_events(@lyra_event_result.events)
+          lyra_own_event_appended!
         end
 
         # Run projection based on configured mode
@@ -866,14 +1155,24 @@ module Lyra
       end
 
       # Run synchronous projection (update model table from event)
+      #
+      # Inside ReadYourWrites.with_guaranteed_read too (from 1.0.0): the block
+      # used to defer the row to its end, so reads inside it missed the
+      # write, and the unique-index check of every write (which reads the
+      # table in ES-Sync: Projections::UniqueIndexes) missed its value: two
+      # creates of one email in a block were both saved, the second row
+      # dropped. ES-Sync's row is the writer's own, written now.
+      #
+      # A database error raises whatever strict_projections says: it aborted
+      # the transaction (PostgreSQL), so the write cannot go on, and logging
+      # it let the save report success while its COMMIT rolled everything
+      # back, the event included (a unique index the check could not see,
+      # under REPEATABLE READ). It now fails the write, as Monitor's INSERT
+      # or UPDATE fails it.
       def lyra_run_sync_projection(operation, result)
-        # Record for read-your-writes consistency if in guaranteed block
-        if Lyra::Consistency::ReadYourWrites.in_guaranteed_block?
-          Lyra::Consistency::ReadYourWrites.record_write(self.class, operation, result)
-          return  # Will be projected at end of block
-        end
-
         Lyra::Projections::ModelProjection.project(self.class, operation, result, INTERNAL)
+      rescue ActiveRecord::StatementInvalid
+        raise
       rescue => e
         if Lyra.config.strict_projections
           raise
@@ -1027,7 +1326,11 @@ module Lyra
         )
 
         Lyra.append_events(events, stream_name: lyra_stream_name)
+        lyra_own_event_appended!
       rescue => e
+        # Its event is not in the log, so the writes made next do not name it
+        # as their cause, and one named before is owed a marker.
+        @lyra_write_scope&.lost!
         # Monitor with monitor_append_failure :fail_write: fail the write, which
         # rolls back with its transaction, as Hijack and event sourcing do.
         raise if Lyra.config.events_required?

@@ -75,6 +75,10 @@ module Lyra
         if klass && !(klass.is_a?(Class) && klass <= RubyEventStore::Event)
           raise ArgumentError, "class: for #{name} must be a RubyEventStore::Event subclass"
         end
+        # Names Lyra keeps for its events that are never replayed (Lyra::StreamTail).
+        if klass ? Lyra::StreamTail::NEVER_REPLAYED.include?(klass.name) : Lyra::StreamTail.reserved_name?(name)
+          raise ArgumentError, "#{name} is reserved for Lyra's own events"
+        end
 
         operations = Array(definition.fetch(:on) { %i[create update destroy] }).map do |op|
           OPERATIONS.fetch(op.to_sym) { raise ArgumentError, "on: #{op.inspect} for #{name} is not create, update or destroy" }

@@ -115,116 +115,50 @@ module Lyra
         # owner's was the answer.
         def lyra_scoped_has_one(klass, conditions, default)
           relation = Lyra::Projections::DefaultScopes.narrow(Lyra::Projections::EventStoreReader.where(klass, conditions), default)
-          lyra_scoped(relation, reflection.scope).first
-        end
-
-        # +relation+ narrowed by an association +scope+ (a scope returning
-        # nil leaves it as it is, as in Active Record).
-        def lyra_scoped(relation, scope)
-          result = scope.arity.zero? ? relation.instance_exec(&scope) : relation.instance_exec(owner, &scope)
-          result || relation
-        end
-
-        # Whether narrowing +before+ by a scope into +after+ ordered it.
-        def lyra_orders?(before, after)
-          after.respond_to?(:ordering) && after.ordering != before.ordering
+          record = AssociationInterceptor.scoped(relation, reflection.scope, owner).first
+          Lyra::PurposeBoundReads.check(record, Array(reflection.foreign_key).map(&:to_s)) if record
+          record
         end
 
         # The foreign key of a has_one :through is on the intermediate record,
         # not on the target. Solidus's InventoryUnit has_one :order, through:
         # :shipment was looked up as Spree::Order.find_by(order_id: <the
         # unit's id>), a column only the shipment has: 0.9.x answered nil, so
-        # carton.orders was empty and no shipped email went out. The target
-        # is read through the intermediate record and then the source
-        # association (AssociationInterceptor.records_through), each as that
-        # association reads (from the event store when its model is
-        # monitored, through its default scopes, checked as a loaded row),
-        # and then narrowed by this association's own scope, which raises
-        # UnsupportedQuery where it cannot be evaluated.
+        # carton.orders was empty and no shipped email went out.
         #
-        # Known differences from Active Record's join, left as they are:
-        # - an association scope that unscopes (-> { with_discarded }) cannot
-        #   bring back a target the source reader's default scope left out;
-        # - through a has_one that is itself :through, only the intermediate
-        #   record that association reads is followed, where the join
-        #   chooses among all candidates (through a plain has_one, the
-        #   candidates are read: lyra_through_has_one);
-        # - an intermediate record already loaded on the owner is used even
-        #   if stale, and reading the target leaves it loaded there (as the
-        #   has_many :through path does).
+        # The targets are those Active Record's join reaches, in its order
+        # (AssociationInterceptor.through_scoped): through every intermediate
+        # record (every one a has_one selects, not only the one it reads),
+        # read afresh, and narrowed as the join narrows them. When a scope in
+        # the chain orders, the first target in that order is the answer;
+        # otherwise none or one target is, and more than one is refused
+        # (UnsupportedQuery): the join would choose among them. What a scope
+        # holds that CachedRelation cannot evaluate raises UnsupportedQuery.
+        # Only the answer is checked as a loaded row: the join loads nothing
+        # else.
         def lyra_find_target_through
-          answer = lyra_through_has_one
-          return answer.first if answer
-
-          records = AssociationInterceptor.records_through(owner, reflection)
-          return records.first unless reflection.scope
-
-          lyra_scoped(Lyra::Projections::CachedRelation.new(reflection.klass, records), reflection.scope).first
+          relation, ordered = AssociationInterceptor.through_scoped(owner, reflection)
+          joined = relation.is_a?(ThroughRelation)
+          targets = (joined ? relation.join_records : Lyra::PurposeBoundReads.internal(INTERNAL) { relation.to_a }).uniq
+          if targets.size > 1 && !ordered
+            raise Lyra::Projections::UnsupportedQuery.new(
+              owner.class, "#{reflection.name} (a has_one :through #{reflection.through_reflection.name}, reaching " \
+                           "#{targets.size} #{reflection.klass.name} records for this owner in no order: " \
+                           "Active Record's join would choose among them)"
+            )
+          end
+          if targets.size > 1 && joined && relation.unordered_reason
+            raise Lyra::Projections::UnsupportedQuery.new(owner.class, relation.unordered_reason)
+          end
+          # Delivered alone, as the join's LIMIT 1 row: checked as a
+          # loaded row, and as a query through the intermediate models.
+          targets.empty? ? nil : relation.spawn_records(targets.first(1)).first
         end
 
         # The key (and, for a polymorphic as: association, the owner's type)
-        # a direct has_one reads its record by, as the has_many path reads
-        # its records. Without the type, an owner read a record of another
-        # type of owner with the same id.
+        # a direct has_one reads its record by.
         def lyra_has_one_conditions(has_one, owner_key_value)
-          conditions = { has_one.foreign_key => owner_key_value }
-          conditions[has_one.type] = owner.class.polymorphic_name if has_one.type
-          conditions
-        end
-
-        # Through a plain has_one, Active Record's join reaches the target
-        # through every intermediate record the owner has (those the through
-        # association's scope selects, in its order), not only the one the
-        # has_one reads. Those intermediate records are read here, as Lyra's
-        # own read (the join reads them in SQL, unchecked), and the targets
-        # they reach, narrowed by this association's own scope. When either
-        # scope, or the intermediate model's default scope, orders, the first
-        # target in that order is the join's answer; otherwise none or one
-        # target is, and more than one is refused
-        # (UnsupportedQuery): the join would choose among them, where the
-        # reader would answer with the one its has_one read. Returns the
-        # answer as [] or [target], or nil when the through association is
-        # not a plain has_one, or its model is not read from events.
-        def lyra_through_has_one
-          through = reflection.through_reflection
-          return nil unless through.macro == :has_one && !through.through_reflection?
-
-          klass = through.klass
-          return nil unless klass.respond_to?(:lyra_monitored) && klass.lyra_monitored
-
-          owner_key_value = owner.read_attribute(through.active_record_primary_key)
-          return [] if owner_key_value.nil?
-
-          ordered = false
-          candidates = Lyra::PurposeBoundReads.internal(INTERNAL) do
-            found = Lyra::Projections::EventStoreReader.where(klass, lyra_has_one_conditions(through, owner_key_value))
-            relation = Lyra::Projections::DefaultScopes.narrow(
-              found, Lyra::Projections::DefaultScopes.for_association(klass, through, owner)
-            )
-            # A default scope that orders (order(:position)) orders the
-            # join too: its order first, then the association scope's.
-            ordered = lyra_orders?(found, relation)
-            if through.scope
-              scoped = lyra_scoped(relation, through.scope)
-              ordered ||= lyra_orders?(relation, scoped)
-              relation = scoped
-            end
-            relation.to_a
-          end
-          targets = AssociationInterceptor.records_through(owner, reflection, candidates)
-          if reflection.scope
-            relation = Lyra::Projections::CachedRelation.new(reflection.klass, targets)
-            scoped = lyra_scoped(relation, reflection.scope)
-            ordered ||= lyra_orders?(relation, scoped)
-            targets = scoped.to_a
-          end
-          return targets.first(1) if ordered || targets.size <= 1
-
-          raise Lyra::Projections::UnsupportedQuery.new(
-            owner.class, "#{reflection.name} (a has_one :through #{through.name}, which has #{candidates.size} " \
-                         "#{klass.name} records for this owner, reaching #{targets.size} #{reflection.klass.name} " \
-                         "records in no order: Active Record's join would choose among them)"
-          )
+          AssociationInterceptor.has_one_conditions(owner, has_one, owner_key_value)
         end
       end
 
@@ -315,39 +249,52 @@ module Lyra
         # The foreign key of a :through association lives on the intermediate
         # records, not on the target (shipment.orders was filtered on an
         # order_id Spree::Order does not have): they are read through that
-        # association and its source. A polymorphic (as:) association matches
-        # the owner's type too. The target's default scopes apply, less what
-        # the association's scope unscopes, and then the association's own
-        # scope, as in ActiveRecord's association scope; reading, counting,
-        # plucking and the collection's queries all start here.
+        # association and its source, afresh, as Active Record's join reads
+        # them, narrowed by the target's default scopes as the join applies
+        # them, in its order and narrowed by the association's own scope
+        # (AssociationInterceptor.through_scoped). A direct polymorphic (as:)
+        # association matches the owner's type too. The
+        # target's default scopes apply, less what the association's scope
+        # unscopes, and then the association's own scope, as in
+        # ActiveRecord's association scope; reading, counting, plucking and
+        # the collection's queries all start here.
         def lyra_get_cached_relation
-          relation =
-            if reflection.through_reflection?
-              lyra_records_through
-            else
-              owner_key_value = owner.read_attribute(reflection.active_record_primary_key)
-              return Lyra::Projections::CachedRelation.new(reflection.klass, []) if owner_key_value.nil?
-
-              conditions = { reflection.foreign_key => owner_key_value }
-              conditions[reflection.type] = owner.class.polymorphic_name if reflection.type
-              # Read when first needed, so that a narrowing where made on it
-              # (stock_items.where(variant_id: ...)) reaches the reference
-              # links with all its keys. As ActiveRecord does for what an
-              # association loads, the records point back at this owner, not
-              # at a copy of it read from the events: a child asks its
-              # parent in memory (shipment.order.paid?), and the copy was the
-              # parent before the change under way was recorded.
-              Lyra::Projections::DeferredRelation.new(
-                reflection.klass, conditions: conditions,
-                on_load: ->(records) { records.each { |record| set_inverse_instance(record) } }
-              )
+          if reflection.through_reflection?
+            # A write reads the join again (Lyra::Projections::Rebuildable)
+            # with the default scopes built now (DefaultScopes.remembering),
+            # where that runs none of the application's code again: no
+            # association on the way has a scope. Otherwise it writes the
+            # records the relation holds.
+            scopes = {}
+            relation = Lyra::Projections::DefaultScopes.remembering(scopes) do
+              AssociationInterceptor.through_scoped(owner, reflection).first
             end
+            if relation.is_a?(Lyra::Projections::CachedRelation) && AssociationInterceptor.plain_through?(reflection)
+              relation.rebuild_recipe = [lambda {
+                Lyra::Projections::DefaultScopes.remembering(scopes) { AssociationInterceptor.through_scoped(owner, reflection).first }
+              }, []]
+            end
+            return relation
+          end
+
+          owner_key_value = owner.read_attribute(reflection.active_record_primary_key)
+          return Lyra::Projections::CachedRelation.new(reflection.klass, []) if owner_key_value.nil?
+
+          conditions = { reflection.foreign_key => owner_key_value }
+          conditions[reflection.type] = owner.class.polymorphic_name if reflection.type
+          # Read when first needed, so that a narrowing where made on it
+          # (stock_items.where(variant_id: ...)) reaches the reference
+          # links with all its keys. As ActiveRecord does for what an
+          # association loads, the records point back at this owner, not
+          # at a copy of it read from the events: a child asks its
+          # parent in memory (shipment.order.paid?), and the copy was the
+          # parent before the change under way was recorded.
+          relation = Lyra::Projections::DeferredRelation.new(
+            reflection.klass, conditions: conditions,
+            on_load: ->(records) { records.each { |record| set_inverse_instance(record) } }
+          )
           relation = Lyra::Projections::DefaultScopes.narrow(relation, lyra_target_default_scope)
           lyra_apply_reflection_scope(relation)
-        end
-
-        def lyra_records_through
-          Lyra::Projections::CachedRelation.new(reflection.klass, AssociationInterceptor.records_through(owner, reflection))
         end
 
         def lyra_apply_reflection_scope(relation)
@@ -357,6 +304,8 @@ module Lyra
           scope.arity.zero? ? relation.instance_exec(&scope) : relation.instance_exec(owner, &scope)
         end
 
+        # The records are checked as loaded rows as the relation delivers
+        # them (CachedRelationDelivery), those returned only.
         def lyra_find_target_from_cache
           lyra_get_cached_relation.to_a
         end
@@ -381,8 +330,11 @@ module Lyra
         # stale ones), so the children were left alive in the log, and a
         # nullify found them by foreign key alone, past the association's
         # scope. Each child gets the event delete_all or update_all writes for
-        # it there. A nullify is the dependent_association bypass, outside
-        # strict mode, wherever StrictDataAccessRelation counts it as one.
+        # it there. A nullify is Rails' own write, the dependent_association
+        # bypass, outside strict mode, whatever its columns (a polymorphic
+        # key's type, a key not named *_id), as StrictDataAccessRelation
+        # takes the marked nullify (Lyra::Associations::Maintenance); a
+        # polymorphic one was an update_all, refused in strict mode.
         #
         # The owner's counter cache is left as it is: ES-NoProj does not
         # maintain counter caches, so the log still holds the old count, and
@@ -391,12 +343,10 @@ module Lyra
           relation = Lyra::Projections::CachedRelation.new(reflection.klass, children)
           if method == :delete_all
             relation.delete_all
-          elsif Lyra::StrictDataAccessRelation.nullify_update?(nullified_owner_attributes)
+          else
             Lyra.without_strict_access do
               relation.send(:bulk_mutate_as, :update_all, "dependent_association", nullified_owner_attributes)
             end
-          else
-            relation.update_all(nullified_owner_attributes)
           end
         end
 
@@ -444,12 +394,45 @@ module Lyra
       # order.line_items.pluck(:id)) ran ActiveRecord's SQL against the table,
       # which under ES-NoProj is empty, or failed asking the event-backed scope
       # for relation internals. They go to that scope, as reading does.
+      #
+      # update_all (author.articles.update_all(author_id: nil)) is Active
+      # Record's on the association's scope; it was the table's under
+      # ES-NoProj, and refused. It goes to the event-backed scope too, which
+      # records an event for each record the association selects
+      # (CachedRelation#update_all). delete_all and destroy_all go through
+      # the association (HasManyAssociationPatch#delete_or_nullify_all_records,
+      # and each record's destroy).
       module CollectionProxyPatch
-        %i[calculate pluck ids pick exists?].each do |name|
+        %i[calculate pluck ids pick exists? update_all].each do |name|
           define_method(name) do |*args, **kwargs, &block|
             return super(*args, **kwargs, &block) unless lyra_events_only_association?
 
             scope.public_send(name, *args, **kwargs, &block)
+          end
+        end
+
+        # first, last and take on a :through association not loaded: Active
+        # Record's query orders by the join's orders (the intermediate
+        # records' among them), which the event-backed scope holds in its
+        # records' order; the proxy's own query ordered by the target's
+        # primary key alone.
+        # length on a :through association not loaded counts what the
+        # event-backed scope holds, as size does, without loading the target:
+        # a target loaded where the join's order cannot be reproduced would
+        # list the records in another order (ThroughRelation).
+        def length
+          return super if @association.send(:find_from_target?) || !lyra_events_only_association?
+          return super unless scope.is_a?(ThroughRelation)
+
+          scope.length
+        end
+
+        %i[first last take].each do |name|
+          define_method(name) do |*args|
+            return super(*args) if @association.send(:find_from_target?) || !lyra_events_only_association?
+            return super(*args) unless scope.is_a?(ThroughRelation)
+
+            scope.public_send(name, *args)
           end
         end
 
@@ -493,22 +476,452 @@ module Lyra
         end
       end
 
-      # The records a :through +reflection+ of +owner+ reaches: each
-      # intermediate record's source association, read as that association
-      # reads. With source_type: (a polymorphic source), only the
-      # intermediate records whose type column holds that name are followed,
-      # as Active Record's join selects them (where(thing_type: "A")); the
-      # source reader would return a record of whatever class the column
-      # names.
-      # +through+: the intermediate records, when not those the through
-      # association reads (HasOneAssociationPatch#lyra_through_has_one).
-      def self.records_through(owner, reflection, through = nil)
-        through ||= Array(owner.association(reflection.through_reflection.name).reader)
-        if (source_type = reflection.options[:source_type])
-          type_column = reflection.source_reflection.foreign_type
-          through = through.select { |record| record.read_attribute(type_column) == source_type.to_s }
+      # The relation a :through association's targets come in under ES-NoProj
+      # (AssociationInterceptor.through_scoped).
+      #
+      # - Active Record's unscope(where: :col) on such an association drops
+      #   the predicate on +col+ from every table of the join, the
+      #   intermediate tables' default scopes included:
+      #   owner.tags.unscope(where: :deleted_at) also follows a soft-deleted
+      #   intermediate record. The intermediate records here were read through
+      #   their default scopes already, so an unscope of a column one of them
+      #   conditions is refused rather than answered short.
+      # - Where the join's order cannot be reproduced (+unordered_reason+), a
+      #   read that depends on it (loading, first, last, take, a limit or
+      #   offset, pluck and ids, which list in that order) is refused when
+      #   there is more than one record; counts, sums, length and exists?
+      #   answer, as they do not depend on it.
+      # - A bulk write writes each record once: the join may reach a record
+      #   through two intermediate records, and SQL updates or deletes the row
+      #   once.
+      class ThroughRelation < Lyra::Projections::CachedRelation
+        # Its own query methods come before CachedRelation's recording
+        # (Lyra::Projections::Rebuildable).
+        prepend Lyra::Projections::Rebuildable.wrappers
+
+        # Columns the intermediate models' default scopes condition.
+        attr_accessor :intermediate_columns
+        # Why the join's order cannot be reproduced, if it cannot.
+        attr_accessor :unordered_reason
+        # While the association's own scope is applied: the records are in
+        # the join's order already, which its order is part of.
+        attr_accessor :keep_order
+
+        ORDER_DEPENDENT = %i[to_a to_ary each records first last take second third [] find_each
+                             find_in_batches in_batches limit offset pluck ids].freeze
+
+        ORDER_DEPENDENT.each do |name|
+          define_method(name) do |*args, **kwargs, &block|
+            refuse_join_order!
+            super(*args, **kwargs, &block)
+          end
         end
-        through.flat_map { |record| Array(record.association(reflection.source_reflection.name).reader) }.compact.uniq
+
+        %i[update_all delete_all touch_all destroy_all].each do |name|
+          define_method(name) do |*args, **kwargs, &block|
+            unique = @records.uniq
+            return super(*args, **kwargs, &block) if unique.size == @records.size
+
+            # The same selection, each record once: built again as this one is.
+            spawn_records(unique).inherit_rebuild(self).public_send(name, *args, **kwargs, &block)
+          end
+        end
+
+        def order(*args)
+          keep_order ? self : super
+        end
+
+        # As size: how many records, which does not depend on their order
+        # (they are loaded, and checked, as Active Record loads them).
+        def length
+          @order_free = true
+          to_a.length
+        ensure
+          @order_free = false
+        end
+
+        def reorder(*args)
+          relation = super
+          relation.unordered_reason = nil if relation.respond_to?(:unordered_reason=)
+          relation
+        end
+
+        def unscope(*args)
+          hit = through_unscoped_columns(args.flatten)
+          if hit.any?
+            raise Lyra::Projections::UnsupportedQuery.new(
+              model_class, "unscope(#{args.inspect[1..-2]}) on a :through association: Active Record's join drops " \
+                           "#{hit.join(', ')} from the intermediate tables' default scopes too, and ES-NoProj read " \
+                           "the intermediate records through them"
+            )
+          end
+          super
+        end
+
+        def spawn_records(records)
+          relation = super
+          if relation.is_a?(ThroughRelation)
+            relation.intermediate_columns = intermediate_columns
+            relation.unordered_reason = unordered_reason
+            relation.keep_order = keep_order
+          end
+          relation
+        end
+
+        # The records in the join's order as far as it is known, for Lyra's
+        # own use (AssociationInterceptor): no order check, no purpose check.
+        def join_records = @records.dup
+
+        private
+
+        def refuse_join_order!
+          return if @order_free || unordered_reason.nil? || @records.size < 2
+
+          raise Lyra::Projections::UnsupportedQuery.new(model_class, unordered_reason)
+        end
+
+        def through_unscoped_columns(args)
+          columns = Array(intermediate_columns)
+          return [] if columns.empty?
+
+          args.flat_map do |arg|
+            case arg
+            when :where, "where" then columns
+            when Hash then Array(arg[:where] || arg["where"]).map { |c| c.to_s.split(".").last.delete('"') } & columns
+            else []
+            end
+          end.uniq
+        end
+      end
+
+      class << self
+        # Whether reading a :through +reflection+'s join again runs none of
+        # the application's code: no association on the way has a scope (the
+        # default scopes are remembered: DefaultScopes.remembering).
+        def plain_through?(reflection)
+          return false unless reflection.scope.nil?
+
+          reflection.chain.all? { |step| step.scope.nil? }
+        rescue StandardError
+          false
+        end
+
+        # +relation+ narrowed by an association +scope+ evaluated with +owner+
+        # (a scope returning nil leaves it as it is, as in Active Record).
+        def scoped(relation, scope, owner)
+          result = scope.arity.zero? ? relation.instance_exec(&scope) : relation.instance_exec(owner, &scope)
+          result || relation
+        end
+
+        # Whether narrowing +before+ by a scope into +after+ ordered it.
+        def orders?(before, after)
+          after.respond_to?(:ordering) && after.ordering != before.ordering
+        end
+
+        # The key (and, for a polymorphic as: association, the owner's type)
+        # a direct +has_one+ of +owner+ reads its record by, as the has_many
+        # path reads its records. Without the type, an owner read a record
+        # of another type of owner with the same id.
+        def has_one_conditions(owner, has_one, owner_key_value)
+          conditions = { has_one.foreign_key => owner_key_value }
+          conditions[has_one.type] = owner.class.polymorphic_name if has_one.type
+          conditions
+        end
+
+        # The targets of a :through +reflection+ of +owner+, as Active
+        # Record's join reaches them, as [relation, ordered]: a
+        # ThroughRelation, and whether a scope on the way orders them.
+        #
+        # Every record on the way is read afresh, on an association object of
+        # its own (join_candidates: the join reads the tables), as Lyra's own
+        # read: the join loads no intermediate record, so none is checked
+        # here. The records returned are checked where they are returned
+        # (HasOneAssociationPatch, HasManyAssociationPatch#find_target), and a
+        # query on the relation is checked as a query through the
+        # intermediate models (joined_classes), as the join's SQL is. Through
+        # a has_one, every record it selects counts, not only the one it
+        # reads.
+        #
+        # The targets are read without their default scope and then narrowed
+        # by it as the join applies it (DefaultScopes.for_through: less what
+        # the source's scope or the association's own unscopes, so that
+        # -> { with_discarded } brings back a soft-deleted target), ordered as
+        # the join orders them (join_order), and narrowed by the association's
+        # own scope. In no order at all, they are in primary key order, as
+        # Active Record's first takes them.
+        #
+        # An intermediate model on the target's own table is aliased in the
+        # join, which applies no default scope to it (cat.grandchildren
+        # through a soft-deleted child): it is read without its default
+        # scope too.
+        #
+        # With source_type: (a polymorphic source), only the intermediate
+        # records whose type column holds that name are followed, as the
+        # join selects them (where(thing_type: "A")). A target reached
+        # through two intermediate records is there twice, as in the join.
+        def through_scoped(owner, reflection, head = reflection.klass)
+          klass = reflection.klass
+          source = reflection.source_reflection
+          through = reflection.through_reflection
+          pairs, inner_reason = Lyra::PurposeBoundReads.internal(INTERNAL) do
+            found, _, reason = aliased(through.klass, head) { join_candidates(owner, through, head) }
+            if (source_type = reflection.options[:source_type])
+              found = found.select { |record| record.read_attribute(source.foreign_type) == source_type.to_s }
+            end
+            reason = nil if found.size < 2
+            reached = without_default_scope(klass) do
+              found.flat_map { |record| join_candidates(record, source, head).first.compact.map { [_1, record] } }
+            end
+            [reached, reason]
+          end
+
+          default = Lyra::Projections::DefaultScopes.for_through(reflection, owner)
+          keys, reason = join_order(owner, reflection, head, default)
+          pairs = Lyra::PurposeBoundReads.internal(INTERNAL) { sort_pairs(pairs, keys, klass, through.klass) } if reason.nil?
+          targets = pairs.map(&:first)
+          targets = by_primary_key(klass, targets) if keys.empty?
+
+          base = ThroughRelation.new(klass, targets)
+          base.intermediate_columns = intermediate_columns(reflection, head)
+          base.unordered_reason = reason || inner_reason
+          # The intermediate models, joined as in the SQL: a query on the
+          # relation is checked as the join is (a right in force for them).
+          base.joined_classes = reflection.chain.drop(1).map(&:klass).uniq
+          relation = Lyra::Projections::DefaultScopes.narrow(base, default)
+          if reflection.scope
+            # The association's own unscope is the target table's alone in
+            # the join (DefaultScopes.for_through has taken it into account),
+            # and its order is in the records' order already.
+            relation.keep_order = true
+            columns = relation.intermediate_columns
+            relation.intermediate_columns = nil
+            relation = scoped(relation, reflection.scope, owner)
+            if relation.is_a?(ThroughRelation)
+              relation.intermediate_columns = columns
+              relation.keep_order = nil
+            end
+          end
+          [relation, keys.any? || !inner_reason.nil?]
+        end
+
+        # The records Active Record's join reaches through +reflection+ of
+        # +owner+, as [records, ordered, reason]: +ordered+ when a scope on
+        # the way (an association's, or a model's default scope) orders them,
+        # +reason+ when that order cannot be reproduced (ThroughRelation).
+        # +head+ is the model the whole join reads.
+        #
+        # - A :through association: through_scoped.
+        # - A has_one: every record it selects, in its order (the join does
+        #   not stop at the first: has_one_candidates).
+        # - A belongs_to or has_many: what it reads.
+        def join_candidates(owner, reflection, head = reflection.klass)
+          if reflection.through_reflection?
+            relation, ordered = through_scoped(owner, reflection, head)
+            [relation.join_records, ordered, relation.unordered_reason]
+          elsif reflection.macro == :has_one
+            has_one_candidates(owner, reflection)
+          elsif reflection.collection?
+            relation = fresh_association(owner, reflection).scope
+            [relation.to_a, ordered?(relation), nil]
+          else
+            [Array(fresh_association(owner, reflection).reader), false, nil]
+          end
+        end
+
+        # Every record a direct +has_one+ of +owner+ selects, as
+        # [records, ordered]: those of the owner's (its type too, for as:),
+        # through the target's default scopes and then the has_one's own
+        # scope, in their order. A model read from events is read from the
+        # event store; any other with the association's own SQL, less the
+        # LIMIT 1 a has_one reads with (the join keeps every row).
+        def has_one_candidates(owner, has_one)
+          klass = has_one.klass
+          unless klass.respond_to?(:lyra_monitored) && klass.lyra_monitored
+            relation = fresh_association(owner, has_one).scope.except(:limit, :offset)
+            return [relation.to_a, ordered?(relation), nil]
+          end
+
+          owner_key_value = owner.read_attribute(has_one.active_record_primary_key)
+          return [[], false, nil] if owner_key_value.nil?
+
+          found = Lyra::Projections::EventStoreReader.where(klass, has_one_conditions(owner, has_one, owner_key_value))
+          relation = Lyra::Projections::DefaultScopes.narrow(
+            found, Lyra::Projections::DefaultScopes.for_association(klass, has_one, owner)
+          )
+          # A default scope that orders (order(:position)) orders the
+          # join too: its order first, then the association scope's.
+          ordered = orders?(found, relation)
+          if has_one.scope
+            scoped = scoped(relation, has_one.scope, owner)
+            ordered ||= orders?(relation, scoped)
+            relation = scoped
+          end
+          [relation.to_a, ordered, nil]
+        end
+
+        # A new association object for +reflection+ of +owner+: what it
+        # reads is read afresh (from the event store, or the table) and is
+        # not left loaded on the owner.
+        def fresh_association(owner, reflection)
+          reflection.association_class.new(owner, reflection)
+        end
+
+        private
+
+        # Whether +relation+ (Active Record's, or a CachedRelation) orders.
+        def ordered?(relation)
+          if relation.respond_to?(:ordering)
+            relation.ordering.any?
+          else
+            relation.respond_to?(:order_values) && relation.order_values.any?
+          end
+        end
+
+        # The order values of +scopes+ (association scope procs, in the
+        # order the join takes them) evaluated with +owner+ on Active
+        # Record's relation of +klass+, as AssociationScope evaluates them.
+        def order_values(klass, scopes, owner)
+          Lyra::Projections::DefaultScopes.built do
+            scopes.flat_map do |scope|
+              relation = klass.unscoped
+              item = relation.instance_exec(owner, &scope) || relation
+              item.respond_to?(:order_values) ? item.order_values : []
+            end
+          end
+        end
+
+        # The join's order for a :through +reflection+ of +owner+, as
+        # [keys, reason]: +keys+ is [side, order value] pairs, most
+        # significant first, side :target or :intermediate (the record of
+        # the step next to the target), or [:inner, nil] for steps further
+        # on, whose order the intermediate records came in already. Active
+        # Record's join orders by the target's default scope, the
+        # intermediate models' default scopes, then the association scopes on
+        # the target (its own, then the source's) and then the intermediate
+        # steps' scopes; an unscope(:order) in a scope on the target takes the
+        # default scopes' and the steps' orders off. +reason+, when the order
+        # cannot be reproduced here: an order on a table that is neither the
+        # target's nor the next step's, or a default scope ordering a step
+        # further on while an association scope orders too.
+        def join_order(owner, reflection, head, default)
+          klass = reflection.klass
+          first, *further = reflection.chain.drop(1)
+          unordered = unscopes_order?(klass, reflection.constraints, owner)
+          target_default = default ? default.order_values : []
+          first_default = unordered || same_table?(first.klass, head) ? [] : default_order_values(first.klass)
+          first_scope = unordered ? [] : order_values(first.klass, first.scopes, owner)
+          on_target = order_values(klass, reflection.constraints.reverse, owner)
+
+          keys = target_default.map { [:target, _1] } + first_default.map { [:intermediate, _1] } +
+                 on_target.map { [side_of(_1, klass, first.klass), _1] } + first_scope.map { [:intermediate, _1] }
+          further_default = !unordered && further.any? { !same_table?(_1.klass, head) && default_orders?(_1.klass) }
+          further_scope = !unordered && further.any? { order_values(_1.klass, _1.scopes, owner).any? }
+          keys << [:inner, nil] if further_default || further_scope
+
+          reason =
+            if keys.any? { _1.first.nil? }
+              "#{reflection.name} (an order on a table other than the target's and the next step's)"
+            elsif further_default && (on_target.any? || first_scope.any?)
+              "#{reflection.name} (a default scope orders a step past the first, and an association scope orders too)"
+            end
+          reason &&= "#{reason}: ES-NoProj cannot order its records as Active Record's join does"
+          [keys, reason]
+        end
+
+        # +pairs+ ([target, intermediate record]) sorted by +keys+
+        # (join_order), stably, one key at a time from the least significant.
+        def sort_pairs(pairs, keys, klass, through_klass)
+          return pairs if pairs.size < 2
+
+          keys.reverse_each do |side, value|
+            next if side == :inner
+
+            index = side == :target ? 0 : 1
+            copies = pairs.map { |pair| pair[index].clone }
+            back = {}.compare_by_identity
+            copies.each_with_index { |copy, i| back[copy] = pairs[i] }
+            sorted = Lyra::Projections::CachedRelation.new(index.zero? ? klass : through_klass, copies).order(value).to_a
+            pairs = sorted.map { |copy| back[copy] }
+          end
+          pairs
+        end
+
+        # Which record an order value of a scope on the target reads: the
+        # target's (its table, or a string, which CachedRelation reads as
+        # the target's), the next step's, or neither (nil).
+        def side_of(value, klass, first_klass)
+          return :target unless value.is_a?(Arel::Nodes::Ordering) && value.expr.is_a?(Arel::Attributes::Attribute)
+
+          table = value.expr.relation.respond_to?(:name) ? value.expr.relation.name.to_s : nil
+          return :target if table == klass.table_name
+          return :intermediate if table == first_klass.table_name
+
+          nil
+        end
+
+        # Whether one of +scopes+ takes the order off (unscope(:order)).
+        def unscopes_order?(klass, scopes, owner)
+          Lyra::Projections::DefaultScopes.built do
+            scopes.any? do |scope|
+              relation = klass.unscoped
+              item = relation.instance_exec(owner, &scope) || relation
+              item.respond_to?(:unscope_values) && item.unscope_values.include?(:order)
+            end
+          end
+        end
+
+        def default_order_values(klass)
+          return [] unless Lyra::Projections::DefaultScopes.any?(klass)
+
+          Lyra::Projections::DefaultScopes.built { klass.scope_for_association }.order_values
+        end
+
+        # The columns the intermediate models' default scopes condition
+        # (ThroughRelation#unscope).
+        def intermediate_columns(reflection, head)
+          reflection.chain.drop(1).flat_map do |step|
+            next [] if same_table?(step.klass, head) || !Lyra::Projections::DefaultScopes.any?(step.klass)
+
+            scope = Lyra::Projections::DefaultScopes.built { step.klass.scope_for_association }
+            names = []
+            scope.where_clause.send(:predicates).each do |node|
+              Arel.fetch_attribute(node) { |attribute| names << attribute.name.to_s }
+            end
+            names
+          end.uniq
+        end
+
+        # +records+ in primary key order (left as they are if the keys do
+        # not compare).
+        def by_primary_key(klass, records)
+          key = klass.primary_key
+          return records unless key.is_a?(String)
+
+          records.sort_by { |record| record.read_attribute(key) }
+        rescue ArgumentError, NoMethodError
+          records
+        end
+
+        def default_orders?(klass)
+          Lyra::Projections::DefaultScopes.any?(klass) &&
+            Lyra::Projections::DefaultScopes.built { klass.scope_for_association }.order_values.any?
+        end
+
+        def same_table?(klass, head) = klass.table_name == head.table_name
+
+        # The block run with +klass+'s default scopes off when +klass+ is on
+        # +head+'s table, where the join aliases it and applies none.
+        def aliased(klass, head, &block)
+          same_table?(klass, head) ? without_default_scope(klass, &block) : yield
+        end
+
+        # The block run with +klass+'s default scopes off, as
+        # Model.unscoped { } turns them off: the source associations read
+        # every target, and through_scoped narrows them by the default
+        # scopes as the join applies them.
+        def without_default_scope(klass, &block)
+          Lyra::Projections::DefaultScopes.any?(klass) ? klass.unscoped(&block) : yield
+        end
       end
 
       def self.install!
@@ -519,6 +932,7 @@ module Lyra
         ActiveRecord::Associations::HasManyAssociation.prepend(HasManyAssociationPatch)
         ActiveRecord::Associations::Association.prepend(ScopeForCreatePatch)
         ActiveRecord::Associations::CollectionProxy.prepend(CollectionProxyPatch)
+        Lyra::Associations::Maintenance.install!
 
         @installed = true
       end

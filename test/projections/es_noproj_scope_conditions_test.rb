@@ -177,13 +177,14 @@ class EsNoprojScopeConditionsTest < Minitest::Test
     end
   end
 
-  # only(:where) answers in Active Record (the order and limit dropped);
-  # ES-NoProj refuses it (it used to keep them, silently).
-  def test_only_is_refused
-    assert_equal %w[a1 a2 a3 a4], run_in(:monitor) { codes(ScondItem.order(code: :desc).limit(1).only(:where)).sort }
-    run_in(:es_noproj) do
-      assert_raises(UnsupportedQuery) { ScondItem.order(code: :desc).limit(1).only(:where) }
-      assert_equal %w[a4], codes(ScondItem.order(code: :desc).limit(1).only(:joins)), "only the joins: kept"
+  # only keeps the parts named and drops the rest, as Active Record's
+  # (ES-NoProj refused it, and before that kept the order and limit,
+  # silently; only(:joins) kept everything).
+  def test_only
+    assert_same_answer do
+      rel = ScondItem.where(qty: 2..).order(code: :desc).limit(1)
+      [codes(rel.only(:where)).sort, codes(rel.only(:joins)).sort, codes(rel.only(:where, :order)),
+       codes(rel.only(:order, :limit))]
     end
   end
 
@@ -212,9 +213,6 @@ class EsNoprojScopeConditionsTest < Minitest::Test
     end
   end
 
-  # page(n) read before per(m) would be every record (Kaminari gives page n
-  # of its default size): refused. page no longer changes the relation it is
-  # called on.
   # As Kaminari 1.2's per: nil, a negative or a non-numeric size keeps the
   # default page size (25 here); 0 is an empty page.
   def test_per_without_a_usable_size_keeps_the_default_page_size
@@ -229,17 +227,22 @@ class EsNoprojScopeConditionsTest < Minitest::Test
     end
   end
 
-  def test_page_without_per_is_refused
-    run_in(:es_noproj) do
+  # page(n) without per is page n of the default size (25 here), as
+  # Kaminari's: limit(25).offset((n - 1) * 25). It was refused, and before
+  # that gave every record.
+  def test_page_without_per_is_the_default_page_size
+    expected = run_in(:monitor) do
       rel = ScondItem.order(:code)
-      paged = rel.page(2)
-      %i[to_a count first exists? total_count].each do |read|
-        assert_raises(UnsupportedQuery, read.to_s) { paged.public_send(read) }
-      end
-      assert_raises(UnsupportedQuery) { paged.where(status: "draft").to_a }
-      assert_raises(UnsupportedQuery) { paged.update_all(name: "x") }
-      assert_equal 4, rel.count, "the relation page was called on"
+      [codes(rel.limit(25)), codes(rel.limit(25).offset(25)), rel.limit(25).offset(25).count, rel.count,
+       codes(rel.where(status: "draft").limit(25))]
     end
+    got = run_in(:es_noproj) do
+      rel = ScondItem.order(:code)
+      page = rel.page(2)
+      assert_equal [25, 25, 2, 4, 1], [page.limit_value, page.offset_value, page.current_page, page.total_count, page.total_pages]
+      [codes(rel.page(1)), codes(page), page.count, rel.count, codes(rel.page(1).where(status: "draft"))]
+    end
+    assert_equal expected, got
   end
 
   # --- exists? -------------------------------------------------------------

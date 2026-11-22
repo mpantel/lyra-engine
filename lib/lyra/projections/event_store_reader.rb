@@ -14,7 +14,9 @@ module Lyra
     #
     # Every read first runs Genesis.first_use: on the model's first read in the
     # process, rows that predate Lyra get their Imported events, so the answer
-    # -- aggregates included -- comes from streams alone and covers them.
+    # -- aggregates included -- comes from streams alone and covers them. A
+    # find or exists? of a row Genesis skipped (genesis_unrepresentable :skip)
+    # imports it if it has become representable, or raises Genesis::Refused.
     class EventStoreReader
       class << self
         # Find a record by ID (cached)
@@ -23,7 +25,7 @@ module Lyra
         # @param id [Integer, String] The record ID
         # @return [ActiveRecord::Base, nil] The reconstructed record or nil
         def find(model_class, id)
-          Genesis.first_use(model_class)
+          Genesis.first_use(model_class, id)
           attributes = CachedProjection.find(model_class, id)
           return nil unless attributes
 
@@ -43,13 +45,22 @@ module Lyra
           build_instance(model_class, result)
         end
 
+        # The live records with these ids, in the order given, as their
+        # streams have them now: the streams' last events are read afresh,
+        # and a cached entry is used only when it is stamped with that event
+        # (CachedProjection.find_many).
+        def find_many(model_class, ids)
+          Genesis.first_use(model_class)
+          CachedProjection.find_many(model_class, ids).map { |attrs| build_instance(model_class, attrs) }.compact
+        end
+
         # Check if a record exists (cached)
         #
         # @param model_class [Class] The ActiveRecord model class
         # @param id [Integer, String] The record ID
         # @return [Boolean] True if record exists and is not destroyed
         def exists?(model_class, id)
-          Genesis.first_use(model_class)
+          Genesis.first_use(model_class, id)
           CachedProjection.exists?(model_class, id)
         end
 
@@ -61,7 +72,14 @@ module Lyra
           Genesis.first_use(model_class)
           results = CachedProjection.all(model_class)
           records = results.map { |attrs| build_instance(model_class, attrs) }.compact
-          CachedRelation.new(model_class, records)
+          # A write on it, or on a relation made from it, reads it again
+          # (Rebuildable).
+          # Not loaded (false, as Active Record's Model.all; a relation
+          # derived from it answers nil).
+          CachedRelation.new(model_class, records).tap do |relation|
+            relation.rebuild_recipe = [Rebuildable::AllRecords.new(model_class), []]
+            relation.instance_variable_set(:@loaded_records, false)
+          end
         end
 
         # Load all records of a given type (cached)
@@ -92,7 +110,24 @@ module Lyra
           return nil unless candidates
 
           records = candidates.map { |attrs| build_instance(model_class, attrs) }.compact
-          CachedRelation.new(model_class, records).where(conditions)
+          found = CachedRelation.new(model_class, records).where(conditions)
+          # Read again by the same lookup (Rebuildable), with the conditions
+          # as they are now: a copy, which the caller's changes do not reach.
+          copied = Rebuildable.copy(conditions)
+          unless copied.equal?(Rebuildable::UNSAFE)
+            found.rebuild_recipe = [-> { where(model_class, Rebuildable.copy(copied, freeze: false)) }, []]
+          end
+          found
+        end
+
+        # The live records with these primary keys, as a relation that a
+        # write reads again the same way (Rebuildable::Keyed): its cost is
+        # that of the records, not of the model's size.
+        def keyed(model_class, ids)
+          ids = Array(ids).uniq
+          CachedRelation.new(model_class, find_many(model_class, ids)).tap do |found|
+            found.rebuild_recipe = [Rebuildable::Keyed.new(model_class, ids.map { Rebuildable.copy(_1) }.freeze), []]
+          end
         end
 
         # Count records (cached)

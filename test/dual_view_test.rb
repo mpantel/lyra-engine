@@ -432,6 +432,74 @@ end
 
       assert_equal({}, differences)
     end
+
+    # Test Date normalization
+    def test_normalize_value_with_date
+      def @dual_view.crud_state
+        { exists: true, attributes: { birthday: Date.new(2024, 6, 15) } }
+      end
+
+      def @dual_view.event_sourced_state
+        { exists: true, state: { birthday: "2024-06-15" } }
+      end
+
+      differences = @dual_view.calculate_differences
+
+      assert_equal({}, differences)
+    end
+
+    # Test time parsing rescue branch
+    def test_normalize_value_with_invalid_timestamp_string
+      def @dual_view.crud_state
+        { exists: true, attributes: { weird_date: "2024-invalid-date" } }
+      end
+
+      def @dual_view.event_sourced_state
+        { exists: true, state: { weird_date: "2024-invalid-date" } }
+      end
+
+      differences = @dual_view.calculate_differences
+
+      assert_equal({}, differences)
+    end
+
+    # Test else branch with custom object
+    def test_normalize_value_with_custom_object
+      custom_obj = Object.new
+      def custom_obj.to_s
+        "custom_string_value"
+      end
+
+      # We can't easily inject custom object, but we can test with a symbol
+      # which will fall through to else branch
+      def @dual_view.crud_state
+        { exists: true, attributes: { status: :pending } }
+      end
+
+      def @dual_view.event_sourced_state
+        { exists: true, state: { status: "pending" } }
+      end
+
+      differences = @dual_view.calculate_differences
+
+      # Symbol :pending.to_s == "pending", so should match
+      assert_equal({}, differences)
+    end
+
+    # Test with actual Date object difference detection
+    def test_date_difference_detection
+      def @dual_view.crud_state
+        { exists: true, attributes: { birthday: Date.new(2024, 6, 15) } }
+      end
+
+      def @dual_view.event_sourced_state
+        { exists: true, state: { birthday: "2024-07-15" } }  # Different date
+      end
+
+      differences = @dual_view.calculate_differences
+
+      assert differences.key?("birthday")
+    end
   end
 
   # Tests for compare, crud_state, event_sourced_state, and helper methods

@@ -131,6 +131,10 @@ module Lyra
         config.after_initialize do
           Lyra.booted!
           Lyra.verify_mapping! if Lyra.config.verify_mapping_at_boot?
+          # config.record_touches = false: refused in an application that runs
+          # in Hijack or event sourcing, otherwise registered (every process,
+          # rake tasks included). Nothing with the option on.
+          Lyra::TouchRegistry.boot!
           # Mode Transition Safety at boot, for the processes that serve the
           # application. Rake tasks (migrations, rake lyra:mode:check itself)
           # boot too, and must not be refused by the switch they prepare.

@@ -183,15 +183,33 @@ class EsNoprojDefaultScopeTest < Minitest::Test
     assert_kind_of Lyra::Projections::CachedRelation, DsBook.unscoped
   end
 
-  # An unscope after a query method that keeps only part of the selection
-  # (a limit) cannot bring back the records the default scope already took
-  # out: refused rather than answered short. Active Record would answer;
-  # ES-NoProj asks for the unscope first.
-  def test_unscope_of_the_default_scope_after_a_limit_is_refused_in_es_noproj
+  # An unscope after a limit is taken off the relation the limit was taken
+  # from, as Active Record applies the limit after the conditions: the
+  # records the default scope took out come back (it was refused).
+  def test_unscope_of_the_default_scope_after_a_limit_in_es_noproj
     seed(:es_noproj)
 
     assert_equal 3, DsBook.with_deleted.limit(5).count
-    error = assert_raises(Lyra::Projections::UnsupportedQuery) { DsBook.limit(5).with_deleted.to_a }
+    assert_equal 3, DsBook.limit(5).with_deleted.to_a.size
+    assert_equal 2, DsBook.limit(2).with_deleted.count
+  end
+
+  # A where.not continues the plan: the default scope is taken off after
+  # it as Active Record takes it off (it was refused).
+  def test_unscope_of_the_default_scope_after_a_where_not_in_es_noproj
+    seed(:es_noproj)
+
+    assert_equal 3, DsBook.where.not(title: "x").with_deleted.to_a.size
+    assert_equal 2, DsBook.where.not(title: "Live").with_deleted.count
+  end
+
+  # After an SQL fragment the relation has no plan to replay: an unscope
+  # that would bring back what the default scope took out is refused rather
+  # than answered short.
+  def test_unscope_of_the_default_scope_after_an_sql_fragment_is_refused_in_es_noproj
+    seed(:es_noproj)
+
+    error = assert_raises(Lyra::Projections::UnsupportedQuery) { DsBook.where("title = ?", "Live").with_deleted.to_a }
     assert_match(/unscope/, error.message)
   end
 
@@ -204,10 +222,12 @@ class EsNoprojDefaultScopeTest < Minitest::Test
 
     [-> { DsBook.unscoped.where(title: "Gone").to_sql }, -> { DsBook.where(title: "Live").regroup(:title) },
      -> { DsBook.where(title: "Live").invert_where }, -> { DsBook.unscoped.where!("title = 'Gone'") },
-     -> { DsBook.all.merge(DsAuthor.where(name: "Ann")) }, -> { DsBook.all.merge(DsBook.unscoped.limit(1)) }].each do |call|
+     -> { DsBook.all.merge(DsAuthor.where(name: "Ann")) }].each do |call|
       assert_raises(Lyra::Projections::UnsupportedQuery) { call.call }
     end
     assert_equal before, book_state
+    # A limited relation merges as Active Record merges it: its limit.
+    assert_equal DsBook.order(:id).limit(1).to_a, DsBook.order(:id).merge(DsBook.unscoped.limit(1)).to_a
   end
 
   # A find by primary key reads one record, whatever the default scope's

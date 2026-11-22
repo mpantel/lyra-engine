@@ -9,6 +9,7 @@ class AdvisoryLockTest < Minitest::Test
     def execute(sql) = (executed << sql)
     def select_value(sql) = (executed << sql) && true
     def quote(value) = "'#{value}'"
+    def transaction_open? = false
   end
 
   def setup
@@ -23,6 +24,28 @@ class AdvisoryLockTest < Minitest::Test
     connection = FakeConnection.new("PostgreSQL", [])
     assert Lyra::AdvisoryLock.xact_lock(connection, "lyra_genesis/User", purpose: "Genesis")
     assert_equal ["SELECT pg_advisory_xact_lock(hashtext('lyra_genesis/User'))"], connection.executed
+  end
+
+  # Several locks in one statement, each key once, held by the transaction
+  # until it ends, as xact_lock holds one.
+  def test_postgresql_takes_several_locks_in_one_statement
+    keys = %w[lyra_test/all/a lyra_test/all/b lyra_test/all/c]
+    connection = FakeConnection.new("PostgreSQL", [])
+    assert Lyra::AdvisoryLock.xact_lock_all(connection, keys + keys.first(1), purpose: "aggregate write")
+    assert_equal 1, connection.executed.size
+    assert_equal 3, connection.executed.first.scan("'lyra_test/all/").size
+    refute Lyra::AdvisoryLock.xact_lock_all(connection, [], purpose: "aggregate write")
+
+    holder = ActiveRecord::Base.connection_pool.checkout
+    other = ActiveRecord::Base.connection_pool.checkout
+    holder.transaction do
+      Lyra::AdvisoryLock.xact_lock_all(holder, keys, purpose: "aggregate write")
+      keys.each { |key| refute other.select_value("SELECT pg_try_advisory_xact_lock(hashtext('#{key}'))"), key }
+    end
+    keys.each { |key| assert other.select_value("SELECT pg_try_advisory_lock(hashtext('#{key}'))"), key }
+    keys.each { |key| other.select_value("SELECT pg_advisory_unlock(hashtext('#{key}'))") }
+  ensure
+    [holder, other].compact.each { ActiveRecord::Base.connection_pool.checkin(_1) }
   end
 
   def test_postgresql_tries_the_lock

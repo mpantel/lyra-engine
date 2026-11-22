@@ -51,6 +51,7 @@ class EsNoprojHasOneTest < Minitest::Test
     Object.const_set(:HoOwner, Class.new(ActiveRecord::Base) do
       self.table_name = "lyra_ho_owners"
       has_one :item, as: :owner, class_name: "HoItem"
+      has_one :item_tag, through: :item, source: :ho_tag
       has_one :own_item, class_name: "HoItem", foreign_key: :ho_owner_id
       has_one :tag, through: :own_item, source: :ho_tag
       has_one :latest_item, -> { order(id: :desc) }, class_name: "HoItem", foreign_key: :ho_owner_id
@@ -65,6 +66,7 @@ class EsNoprojHasOneTest < Minitest::Test
     Object.const_set(:HoOther, Class.new(ActiveRecord::Base) do
       self.table_name = "lyra_ho_others"
       has_one :item, as: :owner, class_name: "HoItem"
+      has_one :item_tag, through: :item, source: :ho_tag
     end)
     MODELS.each do |name|
       model = Object.const_get(name)
@@ -96,6 +98,18 @@ class EsNoprojHasOneTest < Minitest::Test
       lonely = HoOther.create!(id: 8, name: "no item")
       HoItem.create!(label: "an owner's 8", owner_id: 8, owner_type: "HoOwner")
       [HoOwner.find(7).item&.label, HoOther.find(7).item&.label, HoOther.find(lonely.id).item&.label]
+    end
+  end
+
+  # Through a polymorphic has_one: each owner reaches its own item's tag.
+  def test_a_has_one_through_a_polymorphic_has_one_matches_the_owner_s_type
+    assert_same_answer do
+      owner = HoOwner.create!(id: 7, name: "owner")
+      other = HoOther.create!(id: 7, name: "other")
+      { owner => "the owner's tag", other => "the other's tag" }.each do |whose, label|
+        HoTag.create!(label: label, ho_item_id: HoItem.create!(label: label, owner: whose).id)
+      end
+      [HoOwner.find(7).item_tag&.label, HoOther.find(7).item_tag&.label]
     end
   end
 

@@ -81,15 +81,23 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `event_store` | `nil` | The RailsEventStore client. Set by the engine at boot if still `nil`. Also `Lyra.event_store` / `Lyra.event_store=`. |
 | `hijack_enabled` | `false` | Set by the mode helpers. When true, `hijack_mode?` is true whatever `mode` says. |
 | `metadata_proc` | `nil` | `->(record, operation) { Hash }`, merged into the metadata of every event a monitored record's write produces, in every mode. A proc that raises is logged and skipped. |
+| `correlate_writes` | `true` | Group writes into causal chains: the writes of one HTTP request share the request id as their correlation (a generated id when the request has none), a job's writes the correlation in scope where it was enqueued (its own job id when there was none), and a write outside both opens one named after its own event; a write made inside another write's callbacks records that write's event as its cause. A correlation set with `Lyra::Correlation.with_id` is kept. `false` leaves both to the application. See [Correlation and causation](#correlation-and-causation). |
 | `monitor_append_failure` | `:log` | What Monitor does when a write's event cannot be stored: `:log` lets the write stand and logs the failure; `:fail_write` raises `EventStoreUnavailableError` and rolls the write back, as Hijack and event sourcing always do (bulk writes included). Validated on assignment. |
 | `lock_aggregate_before_append` | `true` | Hijack and ES-Sync lock the record's row before appending an update's or destroy's event (PostgreSQL: `FOR NO KEY UPDATE` for an update, `FOR UPDATE` for a destroy, the strength the write takes anyway), so two writers of one record append and write its row in the same order, and a write takes the locks plain ActiveRecord takes, in the same order (no deadlock against `with_lock`; `test/aggregate_lock_deadlock_test.rb`). A record with no row gets an advisory lock on its stream instead. ES-Async writers take the advisory lock on the stream (they do not write the row; the job does), so a record's events commit in the order they were appended, which lets the projection job apply only the events after its checkpoint. Costs three SQL statements per update and one per destroy (the lock, and on an update the savepoint pair the append then needs). `false` restores the earlier order, with a row/log divergence possible under same-record races in Hijack and ES-Sync that DualView detects, and makes ES-Async's job replay the whole stream every time. SQLite needs no lock (it serialises writers from the first write, which is the append; `test/sqlite_same_record_test.rb`); other adapters warn once and are safe in a single process only. |
-| `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. |
+| `bulk_write_lock_limit` | `5_000` | ES-NoProj, ES-Async and ES-Lazy: the most records one bulk write may lock. In ES-NoProj, `update_all`, `delete_all`, `touch_all` and `update_counters` on a relation or batch, and a `dependent: :delete_all` or `:nullify`, take the aggregate lock (advisory, on its stream) of each record the relation selects when the write is called, and in ES-Async and ES-Lazy `update_all`, `delete_all` and `touch_all` take those of the rows they reach, to leave out a record whose stream ends in a destroy, holding the locks until the write's transaction ends; `destroy_all` locks each record in its destroy's own transaction, so the limit applies to it only inside a transaction already open. PostgreSQL's lock table, shared by every session, holds about `max_locks_per_transaction` × (`max_connections` + `max_prepared_transactions` + background processes) locks (measured: about 12,800 with the default 64 and `max_connections` 100, about 23,200 with 200); past it every session's writes fail with "out of shared memory". A larger write raises `Lyra::BulkWriteLockLimitError` (its `count` and `limit`) before it locks or writes anything. Write such a set with `in_batches(of: n) { \|batch\| batch.update_all(...) }`: each batch commits and gives its locks back on its own, except inside a transaction already open, which holds them all until it ends. `nil` removes the limit. Not applied with `lock_aggregate_before_append` off, when nothing is locked. |
+| `strict_projections` | `false` | Re-raise a failed sync projection, or a failed enqueue of an async one, instead of logging it. A database error in a sync projection fails the write either way (PostgreSQL has aborted the transaction). |
 | `projection_error_handler` | `nil` | `->(error, record, operation)`, called when a projection fails and `strict_projections` is off. |
 | `async_projections_inline` | `nil` | ES-Async: `nil` projects inline in the test environment only; `true` always; `false` never. |
 | `strict_schema` | `false` | Enforce the stored event schema at boot: raises `Lyra::Schema::SchemaValidationError` when the drift includes a breaking change (model or column removed, column type or event name changed); warning- and info-level drift is logged. |
 | `schema_path` | `nil` | Where schema versions are stored; `nil` means `db/lyra_schemas`. |
 | `strict_data_access` | `false` | Raise `Lyra::StrictDataAccessViolation` on callback-bypassing writes to monitored models. |
+| `record_touches` | `true` | Record a touch (instance `touch`, `touch_all`, `belongs_to ... touch: true`) whose only changes are the update timestamps. `false` leaves those out of the log, in Monitor only, and DualView then ignores differences confined to them; refused in Hijack and event sourcing, and no process escalates while any runs with it off (`Lyra::TouchRegistry`). A string `"true"`/`"false"` is taken as its value. See [Touches](#touches). From 1.0.0. |
+| `unrecorded_writes` | `:allow` | Whether `Lyra.unrecorded_write(reason:) { ... }` may run: `:allow` (each use is recorded as an `UnrecordedWrite` event in the stream `Lyra::UnrecordedWrites`, with the reason, who ran it and where it was called from, never the rows) or `:deny` (it raises). See [Callback-bypassing writes](#callback-bypassing-writes). |
 | `genesis` | `:auto` | Import rows that predate Lyra: `:auto` in event-sourcing mode only, `true` in every event-producing mode, `false` never. See [Genesis](#genesis). |
+| `genesis_unrepresentable` | `:refuse` | What Genesis does with a row holding a value its model cannot represent (an enum value outside the mapping, ...): `:refuse` raises `Lyra::Genesis::Refused`, listing the rows, and imports nothing of the model; `:skip` leaves those rows without a stream and imports the rest; a write to one is refused until it is fixed in the database. A gated mode switch refuses either way. `Lyra::Repair` follows the same setting. Validated on assignment. See [Genesis](#genesis). |
+| `reference_links` | `:auto` | Link each event that sets a `belongs_to` key into a stream named after the key (`Model.foreign_key$value`), so ES-NoProj answers a lookup by foreign key from one stream instead of rebuilding every record of the model. `:auto` writes them in ES-NoProj only, `true` in every mode but Disabled, `false` (or `nil`) never; the switch into ES-NoProj first links the events the earlier modes stored. The same switch writes the value streams of the unique-index check (`Model!column$<digest>`), which `:auto` and `true` also write in ES-Async and ES-Lazy (their check reads them; the foreign-key links stay as above). See [ES-NoProj](#es-noproj-projection_mode-disabled). |
+| `value_digest_key` | `nil` | The secret the value streams and the unique-value lock keys are keyed with (HMAC-SHA256, `Lyra::Projections::ValueDigest`); `nil` derives one from the application's `secret_key_base`. Changing it relinks the value streams on their next use; every process of an installation must use the same. |
+| `unique_index_refresh` | `60` | Seconds after which a process reads a monitored model's unique indexes again, so an index a migration adds is enforced (and its column linked) in a running process; `nil` reads them only once (and after `reset_column_information`). |
 | `retention_policy` | `nil` | Default retention used by `Lyra::Privacy::GDPRCompliance` reports and recorded in the event schema. Does not delete anything. |
 | `privacy_policy` | `nil` | Default privacy policy name for monitored models that name none. |
 | `mode_transition_gate` | `nil` | Gate mode switches: `nil` everywhere but the test environment; `true` always; `false` never. |
@@ -109,7 +117,7 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `reads_without_purpose` | `:allow` | Reads of a policy-covered model with no declared purpose: `:allow`, `:audit` or `:deny`. Validated on assignment. |
 | `retention_executor` | `false` | Allow `Lyra::Retention.apply!` to change data (opt-in). |
 | `retention_anchors` | `{}` | Column each model's retention period runs from, keyed by model name (a String); `created_at` when absent. |
-| `dashboard_max_events` | `10_000` | The most events a dashboard page or JSON route reads from the log in one request; `?limit=` may only lower it. The routes that look across the log (the CRUD summary, a correlation, a user's actions, PII detection) read the most recent events up to it, leaving out the access log's own entries, and report `window: { limit:, returned:, truncated:, skipped: }` (`truncated`: older events were not read; `skipped`: access-log entries passed over; at most ten times the limit is scanned). A subject's timeline (`flow/timeline`, `privacy/pii_inventory`) reads the newest events of that record's stream, at most the limit. Before 1.0.0 they read the whole log. |
+| `dashboard_max_events` | `10_000` | The most events a dashboard page or JSON route reads from the log in one request; `?limit=` may only lower it. The routes that look across the log (the CRUD summary, a correlation, a user's actions, PII detection) read the most recent events up to it, leaving out the access log's own entries, and report `window: { limit:, returned:, truncated:, skipped: }` (`truncated`: older events were not read; `skipped`: access-log entries and `SaveWithoutEffect` markers passed over; at most ten times the limit is scanned). A subject's timeline (`flow/timeline`, `privacy/pii_inventory`) reads the newest events of that record's stream, at most the limit. Before 1.0.0 they read the whole log. |
 | `dashboard_authorization` | `nil` | Who may use the engine's dashboard: a proc run on the controller before each action; truthy allows, falsy answers 403. `nil` allows development and test only. See [Dashboard](#dashboard). |
 | `dashboard_purpose` | `nil` | The purpose the dashboard reads under when a request names none (`?purpose=`), one the policy declares for oversight. With neither, it reads without a purpose, as `reads_without_purpose` decides; a read the policy refuses answers 403 and says how to name one. |
 
@@ -230,7 +238,161 @@ Lyra.without_strict_access do
 end
 ```
 
-`dependent: :nullify` updates are always allowed and recorded.
+Rails' own association writes are always allowed and recorded: a `has_many`'s nullify
+(`dependent: :nullify`, and removing children from the collection, whatever the key's columns),
+a `has_one`'s `dependent: :nullify`, a `has_many :through`'s `dependent: :nullify` of its through
+records and the delete of its through records when records are removed from it, and the deletes
+of `has_and_belongs_to_many` join rows (recorded as `AssociationUnlinked`). A `has_many`'s
+`dependent: :delete_all` is refused. Lyra tells them by a mark Rails' association code puts on the
+one relation or record it writes, just before the write
+(`Lyra::Associations::Maintenance`).
+The same writes made by the application (`Article.where(...).update_all(author_id: nil)`, a
+`delete_all` on the join table's model) are refused like any other. So are the application's
+`insert_all`, `insert_all!` and `upsert_all` (and `insert`, `insert!`, `upsert`) of join rows,
+through Rails' join model (`Item::HABTM_Tags`) or a model of its own on the join table; where
+they run they are recorded as `AssociationLinked` (see below).
+
+`insert_all`, `insert_all!` and `upsert_all` conflict as Monitor's table would, in every mode.
+In ES-Async the rows of the primary keys the rows give are first brought up to date with their
+streams, under the records' aggregate locks (a record whose destroy is still waiting for its
+projection job is inserted again, a `Created` after the `Destroyed`, with the column defaults;
+one whose create is waiting conflicts), and the waiting jobs then find nothing to apply. In
+ES-NoProj the primary key and every other unique index (not partial, not an expression, on no
+column with a nondeterministic collation; NULLS NOT DISTINCT honoured) are checked against the
+event store under their locks: `insert_all` leaves a row out (or, with `unique_by:`, raises
+`ActiveRecord::RecordNotUnique` for a conflict on another index), `insert_all!` raises. A row
+Genesis left without a stream conflicts as in Monitor. In ES-Sync, ES-Async and ES-Lazy the
+same unique indexes' values are locked, and in ES-Async and ES-Lazy looked up in the event store
+too (a record whose create is not projected yet holds its value), with the same outcomes;
+`upsert_all` there raises for a conflict on an index other than its conflict columns. Those locks (one per row and index, plus
+one per key) count together against `config.bulk_write_lock_limit`, so a model with several
+unique indexes reaches it at fewer rows. A model whose primary key has several columns is
+refused these writes in the event-sourcing modes (`ArgumentError`), before anything is written.
+A `create` or `update` through callbacks, `update_columns`, `update_column` and `update_all` are
+checked against the same indexes (see "Unique indexes" under ES-NoProj below). The result of
+`returning:` is Active Record's own (its column types included), whatever key Lyra adds to read
+the rows back.
+
+### Touches
+
+An instance `touch` and a `belongs_to ... touch: true` cascade (Rails's
+`touch_later`, run at commit) are recorded with `bypass_source: "touch"`; a
+`touch_all` is Rails's `update_all` of the timestamps and is recorded as
+`update_all`. Each changes `updated_at` (and any column it names), and the event
+carries the change, so the log replays to the row and DualView compares the
+timestamps like any other column.
+
+An application that touches a lot (cache-busting `touch: true` chains) can
+leave those out:
+
+```ruby
+config.record_touches = false   # default true
+```
+
+What it does, per mode:
+
+| | `record_touches = true` (default) | `record_touches = false` |
+|---|---|---|
+| Monitor | Every touch is an event. | A touch whose only changes are the model's update timestamps (`updated_at`, `updated_on`) appends nothing, once the process's entry in the registry below is written (when it cannot be, the touch is recorded); the row's `updated_at` moves, its stream's does not. A touch that changes another column too (`touch(:completed_at)`, a `lock_version` increment, `touch_all(:published_at)`) is recorded in full. `update_all(updated_at: ...)` and `update_columns(updated_at: ...)` are not touches and are recorded. |
+| Hijack, event sourcing | Every touch is an event. | Refused. These modes take the log as the record of every change and rebuild rows from it (a switch into event sourcing, which Hijack passes unchecked, a Rebuild, ES-NoProj's reads); a missing touch would rebuild a stale `updated_at`. `record_touches = false` raises `ArgumentError` there. While it is false, `mode=`, `hijack_enabled = true`, `ModeTransition.apply_label` and, before boot or with the gate off, `enable_hijack!` and `enable_event_sourcing!` raise `ArgumentError`; after boot with the gate on, those two go through `ModeTransition.to!` and raise `ModeTransition::Refused`. |
+| Disabled | Nothing is recorded. | Nothing is recorded. |
+
+With the option off:
+
+- **DualView** (`calculate_differences`, the sampler, the gate's check, `lyra:repair`)
+  takes a difference confined to the update timestamps as agreement. A
+  difference in any other column is reported with the timestamps beside it,
+  and `lyra:repair` then records both.
+- **The registry.** A process with the option off registers in
+  `lyra_mode_transitions` (a row of kind `touch_skipping`: host, pid, when it
+  began, Lyra's version, last seen), at boot or when the option is set false,
+  and before its first touch is left out in any case; a touch is left out only
+  once the entry is committed. It refreshes the entry at most every
+  `Lyra::TouchRegistry::HEARTBEAT` seconds (60), from the touch path and from
+  ModeSync's check before requests, jobs and writes (outside transactions),
+  and ends it when the option is set back to `true` and at exit, best effort.
+  An entry not refreshed for `EXPIRY` seconds (180) is no longer live. Times
+  are the database's clock (`clock_timestamp()` on PostgreSQL). With the option
+  `true` no write path reads or writes the registry; each `to!` or `check` into
+  Hijack or event sourcing, each ModeSync adoption of such a mode and each
+  `Rebuild.rebuild` runs one registry `SELECT`, and `to!` and `check` also take
+  the registry's advisory lock in a short transaction.
+- **Registry writes never join the caller's transaction.** Each commits on its
+  own: on the thread's connection when it has no transaction open, else on a
+  second connection checked out for at most one second
+  (`Lyra::TouchRegistry::CHECKOUT_TIMEOUT`), with a two-second `lock_timeout`.
+  When no such connection can be had (every one is in use, or the connection
+  is pinned, as in Rails' transactional tests), the touch is recorded and the
+  heartbeat waits for the next chance. No thread waits on a lock its own
+  transaction holds. What a touching thread may wait for: up to about one
+  second for a second connection, when a heartbeat falls due inside a
+  transaction while the pool is full, and up to two seconds (`lock_timeout`)
+  when the registry's lock is held, for example by a `to!` or `check` running
+  inside an outer transaction; in both cases the touch is then recorded. With
+  pinned connections (Rails' transactional tests) every touch is recorded, with
+  a warning, so the option off cannot be exercised there.
+- **The mode gate** refuses every way into Hijack or event sourcing while
+  touches are left out: by this process (the option off here), or by any
+  process with a live entry. `Lyra::ModeTransition.to!` (`force: true`
+  included), `check` (at its start and again before it certifies), ModeSync's
+  adoption of a switch made elsewhere, and a boot into such a mode raise or
+  log `ModeTransition::Refused`, naming each live process (host, pid, since,
+  last seen) and the way up. `rake lyra:mode:check` prints it and exits
+  non-zero; `rake lyra:mode:status` lists the live processes. The raw
+  setters (`config.mode =`, and `enable_*!` with the gate off), which skip
+  the gate by design, check only this process's option.
+- **Registration and a switch are serialized.** Every registry write takes
+  the registry's PostgreSQL advisory lock and, under it, reads the
+  application's latest applied mode; a switch into Hijack or event sourcing
+  takes the same lock for its last look at the registry and its record
+  (`to!`), as a check does for its last look and its certificate. So either
+  the switch sees the new entry and is refused, or the registering process
+  sees the switch: it ends its entry at once, records the touch, and is
+  fenced (below). No touch is left out in a mode whose log rebuilds rows. On
+  adapters other than PostgreSQL, `Lyra::AdvisoryLock` takes no lock (it warns
+  once, except on SQLite), so this race is closed only on PostgreSQL.
+- **ModeSync**: a process with the option on that finds a switch into Hijack
+  or event sourcing while another process has a live entry does not adopt
+  it yet (logged once); the switch stays unseen, and the process adopts it at
+  a later check, once that entry has ended or expired.
+- **Certificates**: a certificate counts only if it was issued after every
+  entry's latest refresh or end, so nothing certified before or during a
+  period in which a process left touches out is taken afterwards; the switch
+  runs a full check instead. With no live entry the check compares
+  timestamps strictly, finds each touch that was left out, and refuses until
+  `lyra:repair` has recorded them.
+- **An application already in Hijack or event sourcing**: a process with the
+  option off does not boot into it (`Lyra::TouchRegistry.boot!` raises
+  `ModeTransition::Refused`), cannot set the option false in it at runtime
+  (the setter raises and leaves the option `true`), and one that finds it in
+  such a mode later (ModeSync, after its entry expired; or its own next
+  registry write) is fenced: each ModeSync check raises, and so does every
+  touch it would have left out, and with it every save that cascades such a
+  touch (a child's `save` under `belongs_to ... touch: true` fails and rolls
+  back), until it runs with the option on. Failing closed is deliberate: such a
+  process must be restarted with the option on, not left writing.
+- **A warning**, once per process, when it registers: "Lyra: record_touches is
+  off — touches that change only update timestamps are not recorded;
+  escalation to Hijack or event sourcing is refused while any process runs
+  this way. To escalate: restart every process with record_touches on, run
+  `rake lyra:repair` in Monitor, then switch."
+- **Rebuild** (`Lyra::Projections::Rebuild.rebuild`, `rake lyra:projections:rebuild`)
+  is refused while the option is off here or a process has a live entry
+  (`Rebuild::Refused`; the task prints it and exits non-zero): it would set
+  every touched row's `updated_at` back to what the log says.
+- **To escalate**, restart every process with `record_touches = true` (their
+  entries end), and run `bin/rails lyra:repair` in Monitor: the check now sees
+  each stale `updated_at`, the repair appends one
+  `Updated` event per record with the row's value (metadata `source:
+  "lyra_repair"`), and the switch then passes.
+- **Genesis**: a row without a stream that is touched with the option off gets
+  no event; Genesis imports it later as it then is, timestamps included.
+- **Strict mode** is unchanged: a `touch` is allowed (Rails calls it for
+  `touch: true`), `touch_all` is refused as `update_all`.
+- **Causation**: a touch runs no write scope, so it is never a cause; an
+  unrecorded one has no event id, and nothing names it.
+- **History**: `Lyra.state_at`, `as_of` and the audit trail show the
+  `updated_at` of the last recorded write, not of the last touch.
 
 ### Optimistic locking
 
@@ -271,6 +433,17 @@ association's links (`{ "tags" => { crud: [...], event_sourced: [...] } }`),
 links a row already had. The join table is read as a set: a pair linked twice
 is one link.
 
+The application's own writes of join rows are recorded the same way: a
+`delete_all`, `insert_all`, `insert_all!` or `upsert_all` through the join model
+or a model it declared on the join table records, for each row written (read
+back with `RETURNING`; a row `ON CONFLICT` skipped records nothing), the link or
+unlink Rails' own from each side records, on every monitored owner's stream the
+row names (an upsert that moves a row to another pair unlinks the old pair). A
+table is a join table when a `has_and_belongs_to_many` whose links Lyra records
+names it, whether its owner's model is monitored or only the associated
+records'. A `has_many :through` over a model Lyra does not monitor is not one:
+its rows are that model's, and no link is recorded for them from either side.
+
 ### Who wrote it
 
 Events take `user_id` from `Current.user` and `request_id` from
@@ -300,7 +473,7 @@ Lyra::ModeTransition.to!(:hijack, force: true)      # no check
 | Method | Description |
 |---|---|
 | `to!(mode, projection_mode: nil, force: false, rebuild: false)` | Switch, gated. Runs a check when the switch changes the authoritative store (escalation from Disabled/Monitor, or leaving ES-NoProj/ES-Lazy/ES-Async for a table-reading mode), unless a fresh certificate covers it. Raises `ModeTransition::Refused` (with `#report`) on discrepancies, and, entering ES-NoProj, when a monitored model has a default scope ES-NoProj cannot evaluate or an unmonitored table has a database foreign key into a monitored one. Records the switch so other processes adopt it. Returns the check's `Report`, or `nil`. |
-| `check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)` | Compare every row with its stream; imports pre-Lyra rows first on escalation; stores a certificate when clean. Returns a `Report`. |
+| `check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)` | Compare every row with its stream; imports pre-Lyra rows first on escalation (a row holding a value its model cannot represent is a discrepancy and its model is not imported); stores a certificate when clean. Returns a `Report`. |
 | `current` | This process's configuration as a label: `"monitor"`, `"event_sourcing/lazy"`. |
 | `label(mode, projection_mode = nil)` | Build such a label. |
 | `gate_enabled?` | Whether switches are gated (`config.mode_transition_gate`). |
@@ -309,7 +482,9 @@ Lyra::ModeTransition.to!(:hijack, force: true)      # no check
 
 `Report` fields: `from`, `to`, `checked`, `rechecked`, `imported`, `rebuilt`,
 `discrepancies` (`Discrepancy` with `model`, `id`, `problem`, `details`),
-`position`, `started_at`, `finished_at`; methods `clean?` and `summary`.
+`position`, `started_at`, `finished_at`, `unrepresentable` (rows Genesis would not import,
+holding values their model cannot represent; each listed one is also a discrepancy, see
+[Genesis](#genesis)); methods `clean?` and `summary`.
 
 At boot the engine refuses to start a process in a mode that the last applied
 one cannot switch to without a certificate (`LYRA_FORCE_MODE_TRANSITION=1`
@@ -352,10 +527,21 @@ result.summary   # "checked 1200 records: 3 out of line, 0 repaired, 3 still out
 
 | Method | Description |
 |---|---|
-| `run(models: Lyra.config.monitored_models, dry_run: false)` | Find out-of-line records and, unless `dry_run`, repair them. Returns a `Result` (`checked`, `found`, `repaired`, `remaining`, `summary`). |
-| `repair(model, id)` | Repair one record: an `Imported` event for a row without events, an `Updated` event for a row that differs, a `Destroyed` event for events without a row. Returns the `Discrepancy` repaired, or `nil`. |
+| `run(models: Lyra.config.monitored_models, dry_run: false, operator: nil, unrepresentable: config.genesis_unrepresentable)` | Find out-of-line records and, unless `dry_run`, repair them. Returns a `Result` (`checked`, `found`, `repaired`, `remaining`, `skipped`, `unrepresentable`, `summary`). |
+| `repair(model, id, operator: nil, unrepresentable: config.genesis_unrepresentable)` | Repair one record: an `Imported` event for a row without events, an `Updated` event for a row that differs, a `Destroyed` event for events without a row. Returns the `Discrepancy` repaired, or `nil`. |
 
 Repair events carry `source: "lyra_repair"` in their metadata.
+
+A repair writes the row as its model reads it, so it applies Genesis's check
+([Genesis](#genesis), `Genesis.unrepresentable(record, columns:)`): on the
+whole row for an `Imported` event, on the changed columns for an `Updated` one.
+A record whose event would hold a value its model cannot represent (an enum
+value outside the mapping, read as `nil`) follows the same setting as Genesis
+(from 1.0.0): with `:refuse` (default) `run` raises `Lyra::Repair::Unrepresentable`
+(a `Repair::Refused`; `rows`, `values`, `found`, the same listing, personal
+values not shown) before anything is written; with `:skip` those records stay
+out of line (in `remaining`), the rest is repaired, and `Result#skipped` and
+`#unrepresentable` list them. A dry run lists them and never raises.
 
 ### Genesis
 
@@ -365,12 +551,89 @@ in ES-NoProj also its first read) when `Genesis.enabled?` (`config.genesis`).
 
 | Method | Description |
 |---|---|
-| `import_all(model_class)` | Import every row without a stream now, whatever the mode. Returns the count. |
+| `import(model_class, unrepresentable: config.genesis_unrepresentable)` | Import every row without a stream now, whatever the mode, in one transaction. Returns a `Result` (`model`, `imported`, `skipped`, `unrepresentable`: the first `LISTED` values of the skipped rows, `summary`). Raises `Refused` for rows the model cannot represent unless `unrepresentable: :skip` (see below). From 1.0.0. |
+| `import_all(model_class, unrepresentable: config.genesis_unrepresentable)` | The same; returns the count imported. |
 | `import_one(model_class, id)` | Import that one row now, whatever the mode, if it still has no stream, under the model's Genesis lock; returns whether it did. `Lyra::Erasure` uses it for a row it erased that had no stream (from 1.0.0). Genesis's lock is per table, named after its stream owner (the STI base class) since 1.0.0. |
-| `first_use(model_class)` | Import once per process, if enabled. |
+| `first_use(model_class, id = nil)` | Import once per process, if enabled; with `id`, `admit!` that row. |
 | `enabled?`, `imported?(model_class)`, `reset!` | |
 
 For a large table run `bin/rails lyra:genesis` before enabling a mode.
+
+**Values the model cannot represent** (from 1.0.0). The `Imported` event holds
+the row as the model reads it, so a stored value the model cannot read would
+give an event that disagrees with its row: `status = '2'` under
+`enum :status, { requested: "requested", approved: "approved" }` is read as
+`nil`, and the disagreement surfaced later (ES-Lazy's catch-up writing `NULL`
+into a `NOT NULL` column). Genesis checks every attribute of every row first:
+the value read, written back by the model's type, must be the value stored,
+compared as the column's own type reads both (or as the database would be
+sent them). `'1'` and `1`, time zones and timestamp precision, a time of day,
+a decimal's trailing zeros, jsonb key order, arrays, booleans, money,
+intervals, ranges and a `normalizes` attribute's legacy value are no
+difference. Found: an enum value outside the mapping; a type that reads a
+value lossily (`attribute :amount, :integer` over `10.50`, `:date` over a
+timestamp); an inet value's host bits, which Rails drops (`192.168.1.5/24` is
+read as `192.168.1.0/24`; in `inet[]` arrays element by element); a value out
+of the model's integer range ("out of range for the model's type").
+
+Whatever the type, a stored value the model writes back as `NULL` is lost,
+in a nullable column too ("which would be written back as NULL"): a JSON
+`null` in a json/jsonb column, an empty range, a blank or `'null'` JSON text
+or an empty YAML hash in a serialized column (read as `nil` or `{}`). In a
+`NOT NULL` column a rebuild would fail on it; in a nullable one
+`where(col: nil)` would find the row afterwards. A serialized, encrypted or
+JSON attribute's stored text is otherwise one of many encodings of its value
+(JSON whitespace, a fresh ciphertext), so its text is not compared; a value
+of another class is. Columns the model ignores (`ignored_columns`) are
+imported as stored and not checked.
+
+- `:refuse` (default): every row is checked before anything is written, then
+  `Lyra::Genesis::Refused` (`model`, `rows`, `values`: the first
+  `Genesis::LISTED`, 20, `Unrepresentable` values with `model`, `id`,
+  `attribute`, `stored`, `read_as`, `reason`; `found`: all of them). Nothing of
+  the model is imported; inside a caller's transaction the import is a
+  savepoint, so a caller that rescues the refusal commits nothing of it. On
+  first use the write or read that triggered it fails with it. A refused first
+  use is remembered for `Genesis::REFUSAL_RECHECK` (30) seconds from the scan
+  that found it: the uses meanwhile raise it again without scanning the table;
+  `import`, `import_all` and `lyra:genesis` always scan.
+- `:skip`: those rows keep no stream; the rest is imported; the log warns. A
+  write to a skipped row, through callbacks (`update!`, `destroy!`) or
+  bypassing them (`update_columns`, `touch`, `update_all`, `touch_all`,
+  `delete_all`, `upsert_all`, ...), or an ES-NoProj `find`/`exists?` of it,
+  imports it if the model can now represent it, and raises `Refused` (`id`:
+  the row, or the rows of a bulk write) while it cannot, so its stream never
+  begins with the write's event (`Genesis.admit!`, `Genesis.admit_all!`,
+  `Genesis.skipped?`). A query over many records (`where`, `count`) does not
+  see it. **To fix a skipped row** in event sourcing, correct it in the
+  database (SQL), since writes through the model are refused; the next use
+  of it imports it, or run `bin/rails lyra:genesis MODEL=...`.
+
+Cases to know:
+
+- A legacy empty YAML hash, `'--- {}\n'`, under `serialize :col, type: Hash`
+  is read as `{}` and written back as `NULL`, so by default it refuses the
+  model (`UNREPRESENTABLE=skip`, or set those rows to `NULL` by SQL).
+- In Monitor with `config.genesis = true`, `:skip` and
+  `config.record_touches = false`, a timestamp-only `touch_all` reaching a
+  skipped row is refused, though no event would have been recorded for it.
+- `dependent: :nullify` over children one of which was skipped: where events
+  are required the parent's destroy is refused; in Monitor that child's
+  event is left out (logged) and every other child gets its event.
+
+A process imports on its own first use of a model, and knows the rows it
+skipped itself. A row written outside Lyra (SQL) after that first use, or
+skipped by another process, is unknown to it until `lyra:genesis` imports
+it. A write that bypasses callbacks runs the model's first use too.
+
+The value of an attribute the model's privacy policy declares, or of an
+encrypted one, is not shown (`code (a personal value, not shown)`). At a gated
+switch into Hijack or event sourcing (`ModeTransition.to!`, `lyra:mode:check`)
+the rows refuse the switch whatever the setting, as discrepancies
+(`a value the model cannot represent`), counted in `Report#unrepresentable`;
+the refused model's rows are not compared. `import_one` (erasure) logs such a
+value and imports the row. `Genesis.unrepresentable(record, columns: nil)`
+runs the check on a record loaded from its row (`Lyra::Repair` uses it).
 
 ---
 
@@ -612,14 +875,40 @@ Ruby:
   `where.not`, `where.missing`, `where.associated`, `or`, and SQL fragments made
   only of `"column OP ?"` terms joined all by `AND` or all by `OR` (`OP` one of
   `= != <> < <= > >= LIKE ILIKE`);
+- `excluding`/`without` (`where.not` of the records' primary keys; a record or
+  relation of another model is Active Record's `ArgumentError`) and
+  `in_order_of(column, values, filter: true)` on a column of the model (a
+  `where` of the values, which `rewhere` and `unscope` take off, the values
+  cast as Active Record casts them, `nil` a position, ordered after any order
+  the relation already has); an SQL expression as the column raises
+  `UnsupportedQuery`;
 - `order`, `reorder`, `reverse_order`, `limit`, `offset`, `page`/`per`,
   `distinct` (removes repeated records);
+- `load` (with a block: each record), `loaded?`, `records`, `reset` and
+  `reload` (read again from the event store, as a relation built at that
+  moment; a relation that cannot be built again, one of given records,
+  raises `UnsupportedQuery`). A loaded relation's `destroy_all` and `update`
+  work on its loaded records (`destroy_all` then resets it), its
+  `update_all`, `delete_all` and `touch_all` select at write time, and a bang
+  query method raises `ActiveRecord::UnmodifiableRelation`, as in Active
+  Record;
 - `joins`, `left_joins`, `left_outer_joins` on direct associations, evaluated
   in memory: an inner join drops records without a partner, a has_many join
   repeats the record per partner as SQL does;
 - `count`, `sum`, `average`, `minimum`, `maximum`, `group` with grouped
   calculations, `pluck`, `pick`, `ids`, `find_each`, `find_in_batches`,
-  `in_batches`;
+  `in_batches` (each batch read from the event store when the loop reaches
+  it, a limit and an offset included: the batches stop after the limit's
+  records, and the offset skips records in every batch's query, as Active
+  Record applies it; `in_batches` of a relation with an offset and no order
+  raises `UnsupportedQuery` (Active Record's batch query has the `OFFSET` and
+  no `ORDER BY`, so the records it skips are the database plan's), as do the
+  queries of its `load: true` batches and `use_ranges: true` with an offset;
+  `find_each` and `find_in_batches` answer; a batch that holds its records
+  (`load: true`, or a batch of a loaded relation) runs its query methods,
+  aggregates, finders and `update_all`/`delete_all`/`touch_all` as its
+  query's, as in Active Record; a loaded relation's batches are its loaded
+  records, as Active Record's);
 - scopes whose relation reduces to hash conditions, order and limit; a
   model's other class methods run with the relation as the current scope;
 - `merge`/`merge!` with a relation of the same model, `where!` with hash
@@ -704,6 +993,141 @@ REPEATABLE READ or SERIALIZABLE transaction whose snapshot predates the other
 writer's commit; adapters other than PostgreSQL. Two transactions that each
 claim the same two values in opposite orders deadlock, as inserting them into a
 unique index does, and PostgreSQL fails one of them (`ActiveRecord::Deadlocked`).
+
+Unique indexes (`Lyra::Projections::UniqueIndexes`). The table's unique
+indexes are enforced on the writes that record one record's change: `create`,
+`save` and `update` through callbacks, `update_columns`, `update_column` and
+`update_all` (which `update_counters` reaches); `insert_all` and `insert_all!`
+check the same indexes (above). A value a live record holds raises
+`ActiveRecord::RecordNotUnique`, with PostgreSQL's message (`duplicate key value
+violates unique constraint "<index>"`, `Key (<columns>)=(<values>) already
+exists`), where the table modes' `INSERT` or `UPDATE` raises it: after the
+`before_*` callbacks, before the event is built, so no `after_*` callback runs
+and nothing is appended; `update_columns` after the destroyed-record check, as
+its `UPDATE` would reach no row of a destroyed record; `update_all` before any
+of its events, two of its records given one value conflicting with each other.
+
+The same check runs in ES-Sync, ES-Async and ES-Lazy, which append the event
+before their projection writes the row: a duplicate there appended its event
+and the projection's `INSERT` or `UPDATE` then failed, logged (with
+`strict_projections` off), and ES-Lazy's next catch-up failed on it for every
+model's reads. Now it raises `ActiveRecord::RecordNotUnique` (the message names
+the mode) with no event, no projection job, no row. ES-Sync looks the value up
+in its table under the value's lock (its projection writes the row in the
+writer's transaction); ES-Async and ES-Lazy, whose tables lag, in the value
+streams, which are linked in these two modes as well (the foreign-key links
+are not). `update_columns`, `update_column`, `update_all`, `insert_all`,
+`insert_all!` and `upsert_all` take the values' locks in all three, and in
+ES-Async and ES-Lazy are checked against the value streams before their table
+write (a holder not yet projected; `upsert_all` raises for a conflict on an
+index other than its conflict columns, and updates the holder on them). A
+holder destroyed or moved away whose row is still in the table holds no value;
+ES-Async brings such a row up to date in the write's transaction where that
+waits for no lock. A write that sets no column of a checked index costs
+nothing more. In ES-Sync a write inside `ReadYourWrites.with_guaranteed_read`
+writes its row at once, as outside the block (it was deferred to the block's
+end, which hid its value from the check). A projected create that meets
+another record's value raises instead of inserting nothing (both errors are
+`ActiveRecord::RecordNotUnique`s): `Lyra::Projections::ProjectionBehind` when
+that record's stream gave the value up and only its row lags, and the row is
+held by another transaction (an ES-Async job first brings such rows up to date
+itself, where nothing holds them, so a holder whose own job was lost does not
+block it, and inserts again): the job retries it at most every five minutes,
+for about a day (`AsyncProjectionJob::BEHIND_ATTEMPTS`, 300), then reports it
+(log, `projection_error_handler`) and gives up, leaving the record to a
+rebuild; `Lyra::Projections::DuplicateInLog` when a live record holds the
+value in the log too (a duplicate the log already has), a row with no stream
+holds it, or no holder is found (an expression index, which Lyra does not
+read): logged once per record and process (up to 10,000 remembered) and passed
+to `projection_error_handler`, and the job discarded. A tuple with a NULL
+holds nothing unless its index is `NULLS NOT DISTINCT`.
+ES-Sync's write fails with either; ES-Lazy's catch-up logs it (once) and goes on. In ES-Sync a database error in the
+projection fails the write whatever `strict_projections` says (PostgreSQL has
+aborted the transaction). Not covered, in any event-sourcing mode:
+transactions at `REPEATABLE READ` or `SERIALIZABLE`, whose snapshot misses a
+value committed after they began (as for a uniqueness validation). ES-Sync's
+write then fails at its projection, as Monitor's would; ES-Async and ES-Lazy
+save both records, and the second's projection fails with `DuplicateInLog`
+(logged once; the job discarded, the catch-up going on).
+
+Which: the indexes that are unique, on columns, not partial, other than the
+primary key, and on no column with a nondeterministic collation (an ICU
+collation with `deterministic = false`: its equality is the database's alone,
+and a uniqueness validation refuses such a column too). A partial, expression
+or nondeterministic index is not enforced in ES-NoProj. They are read from the
+database once per model and process, again after `reset_column_information`,
+and every `config.unique_index_refresh` seconds (60; `nil`: never), so an index
+a migration adds is enforced in a process that started before it. An index is
+checked when the write sets one of its columns (an update, a column it
+changes); the columns it does not write are taken from the record's stream,
+read under its aggregate lock, so a copy read before another writer changed
+them claims the tuple the row would hold. NULL conflicts with nothing unless
+the index is `NULLS NOT DISTINCT`; a value is compared as the column holds it
+(`"250"` and `250.00` on a decimal are one value), a `citext` column's by
+`LOWER` as the database computes it (as `citext` compares); a destroyed record
+holds no value, and a record keeps its own. A uniqueness validation still runs
+first, and answers as before.
+
+Locks: each claimed value takes the advisory lock a uniqueness validation of
+the index's first column takes (`insert_all` takes it too), so a second writer
+of the value waits for the first's commit and then raises. An update,
+`update_columns` and `update_all` take it after the records' aggregate locks,
+as Monitor's `UPDATE` takes the row and then the index entry: writers of one
+record, or of two records and one value, wait for each other where Monitor's
+do and do not deadlock where Monitor's do not. An update of a model with a
+uniqueness validation takes the record's aggregate lock before its
+validations (the same lock, taken once, earlier), so the validation's value
+lock comes after it as well; a create has no record to lock. The key holds a
+keyed digest of the value, never the value: lock statements reach the
+database's log, and the `LOWER` a `citext` value is compared by is asked for
+with the value bound (named after its column, so the statement log filters it
+where the application filters that column).
+
+The links are caught up without waiting: a write that finds another thread or
+process linking the model, or no connection free in the pool and the links'
+lock taken, checks against every record of the model instead (as a uniqueness
+validation does), once; a thread that caught up in its own transaction takes
+the model for linked until that transaction ends. So a model's first use with
+every connection of the pool taken by its writers (Puma's default: five
+threads, a pool of five) finishes. The digest key: `config.value_digest_key`,
+else one derived from `secret_key_base` (the same in every process of an
+application); without either, every environment but development and test (staging and
+preview included) raises `Lyra::Projections::ValueDigest::KeyMissing` at first
+use, and development and test use a fixed key with a warning. Applications that share an event
+store set `config.value_digest_key` to one value. The unique indexes ES-NoProj
+does not enforce (partial, expression, nondeterministic collation) are named
+in the log once per model.
+
+Lookup: each event that sets an indexed column is linked into
+`"Model!column$<digest>"` (`ReferenceLinks`), and a check rebuilds only the
+records whose events are in its value's stream, so its cost is that of the
+value's history, not the model's size. The digest is an HMAC-SHA256 under
+`config.value_digest_key` (by default a key derived from the application's
+`secret_key_base`; `Lyra::Projections::ValueDigest`), so neither the stream
+table nor the lock keys hold a value, nor a hash a dictionary reverses.
+Changing the key relinks a column's value streams on its next use (the old
+links deleted); every process of an installation must use one key, or their
+locks miss each other. An erasure (`Lyra::Erasure`) moves the links of the
+events it rewrites with them: the link of an erased value is deleted, its
+replacement's added. A create of a fresh value costs three round trips (the
+lock, the stream read, the link's `INSERT`); a write that sets no indexed
+column, and a model without such an index, cost nothing. With
+`config.reference_links = false`, or for a `NULLS NOT DISTINCT` tuple that is
+all NULL, every record of the model is read instead (as a uniqueness
+validation reads them).
+
+Coverage: each column's links have a checkpoint of their own. Before the first
+check of a model in a process (and before its value locks), the events after
+each column's checkpoint are linked, in one read; a column new to the process
+(an index added) is linked from the first event, and the foreign keys are not
+read again. A process of this release that reads a new index (on a refresh)
+links its own earlier writes itself, before its next write of the model;
+until then, and while processes of an earlier Lyra still write, their writes
+lack the column's links and a check elsewhere may miss them. After such a
+rolling deploy, once they are gone, run `bin/rails lyra:link_values`
+(`ReferenceLinks.relink_values!`: every value linked again from the first
+event). ES-Sync, ES-Async and ES-Lazy check the same indexes before their
+event (see "The same check runs in ES-Sync, ES-Async and ES-Lazy" above).
 
 `EventStoreReader` class methods: `find(model, id)`, `find_by(model, attrs)`,
 `exists?(model, id)`, `relation(model)`, `all(model)`, `where(model,
@@ -790,7 +1214,7 @@ view.compare
 
 | Method | Description |
 |---|---|
-| `compare` | Both views and the differences (`{}` when they agree, `{ exists: { crud:, event_sourced: } }` when only one has the record, or `{ "attr" => { crud:, event_sourced: } }`, keyed by column name as a string). A destroyed record whose row is gone compares clean; one whose row remains is an `exists` difference. `created_at`/`updated_at` are compared like any other column; times compare at microseconds. |
+| `compare` | Both views and the differences (`{}` when they agree, `{ exists: { crud:, event_sourced: } }` when only one has the record, or `{ "attr" => { crud:, event_sourced: } }`, keyed by column name as a string). A destroyed record whose row is gone compares clean; one whose row remains is an `exists` difference. `created_at`/`updated_at` are compared like any other column, except that with `config.record_touches = false` a difference confined to the update timestamps counts as agreement ([Touches](#touches)); times compare at microseconds. |
 | `crud_state` | `{ exists:, attributes:, timestamps: }`. The row is read as the caller reads it: under `reads_without_purpose :deny` it needs a purpose that allows the declared fields (from 1.0.0; before, it read as Lyra). `compare` and `compare_all` read it the same way; Lyra's mode gate, sampler and repair read as Lyra; the dashboard reads under its request's purpose (`dashboard_purpose`). |
 | `event_sourced_state` | `{ exists:, destroyed:, state:, events_count:, first_event_at:, last_event_at:, events_summary: }`; `destroyed: true` (and `exists: false`) when the last replayed event is a destroy, `state` keeping the last known attributes. A stream of only `replay: false` events has `exists: false`. |
 | `audit_trail` | `AuditProjection.audit_trail` for the record. |
@@ -799,6 +1223,14 @@ view.compare
 
 `Lyra::StateAnalyzer.analyze(model, id)` adds the audit trail and plain-text
 recommendations.
+
+**Normalisation.** Attribute names match whether they are strings or symbols. Before two values
+are compared, times (and strings that look like timestamps) become UTC at microsecond resolution,
+that of a PostgreSQL timestamp; numbers become floats rounded to six decimal places, so an integer
+equals the same float and a numeric string the number. Nothing else is equated: `nil` and the empty
+string differ, and so do values of other types whose string forms differ. A difference is never
+graded by severity: every one counts as a discrepancy. The mode-transition gate and the sampler
+report the names of the first five differing fields, never their values.
 
 ### Sampled DualView (opt-in)
 
@@ -996,6 +1428,20 @@ an access inside a transaction is recorded on a second connection, so it
 survives a rollback; size the pool at about twice the threads, or a read waits
 `checkout_timeout` for a connection and is then recorded inline (see
 [PRIVACY_COMPLIANCE.md](PRIVACY_COMPLIANCE.md#the-access-log)).
+
+**Reads made by another gem inside a write.** A gem's callback that loads a
+record runs under the purpose the application declared, like any other read, so
+it is checked and recorded. With PaperTrail's version limit in Monitor, for
+example, a destroy runs `enforce_version_limit!`, which loads the whole record
+(`version.item`). Under a purpose that does not cover every field of that model,
+the load is refused and recorded as `DataAccessDenied`, once per destroy, while
+the destroy itself goes ahead: the gem's own step continues without that data,
+and the application's write is unaffected. Such an entry is a truthful record of
+a refused read, not of a refused operation; its `request_id` and correlation tie
+it to the write that caused it. An application that does not want it can avoid
+the read (for PaperTrail, run without a version limit) or declare a purpose
+that covers the model for the code path that destroys. Hijack and event
+sourcing retire PaperTrail for monitored models, so there is no such read.
 
 ```ruby
 config.record_access_events = true
@@ -1317,10 +1763,50 @@ Lyra::Causation.with_id(event.event_id) { Shipment.create!(order: order) }
 | `Lyra::Correlation.generate_id` | |
 | `Lyra::Causation.with_id(id) { \|id\| ... }` | Set the causation id for the block. |
 | `Lyra::Causation.current_id`, `Lyra::Causation.clear` | |
+| `Lyra::Causation.outside_write_scopes` | The cause in scope outside every write scope: what the access log records. |
 | `Lyra::Causation.track(cause_id, effect_id)`, `chain_for(event_id)`, `cause_of(event_id)` | An in-process, in-memory causation map. |
+| `Lyra::Causation.integrity(store = Lyra.config.event_store)` | Reads the whole store: `{ events:, caused:, dangling: }`, `dangling` listing each event (`event_id`, `event_type`, `causation_id`) whose cause is not in the store. |
 | `Lyra::UserActionContext.with_context(action_type:, user_id: nil, **options) { \|ctx\| ... }` | Set the user action for the block (and its id as the correlation id); events record it as `action_id` and `user_action` in every mode. Options: `controller:`, `action_name:`, `params:`. |
 
-All are thread-local.
+All are thread-local. With `correlate_writes` on (the default) Lyra sets them itself: one correlation per HTTP request (the request id, or a generated id when there is none) or per job (the correlation in scope where it was enqueued, or the job id when there was none), a new one named after its own event for a write outside a request and a job, and the event of the enclosing write as the cause of a write made in its callbacks, such as the destroy of a dependent record. An id set with `with_id` is kept.
+
+With `config.correlate_writes` (the default), a monitored write is the cause of
+the writes made while it runs, in all its callbacks (`after_save` and
+`after_destroy` included): Lyra opens the write's scope around the whole save or
+destroy callback chain, inside its transaction (around `create_or_update` and
+`destroy`, and around a destroy chain the application runs itself with
+`run_callbacks(:destroy)`, as a soft delete does), and adds no callback.
+
+- Writes made once the write's own event is in the log (its `after_*`
+  callbacks, has_many autosave among them) name that event. When the write
+  records none (a save that changes nothing, an update or destroy that reaches
+  no row), they take the cause that was in scope when the write began.
+- Writes made before (its `before_*` callbacks: a `belongs_to` autosave, a
+  `dependent: :destroy`) name the write. If the write then ends without its
+  event in the log (it records none, is aborted or refused, raises, or its
+  Monitor append fails), Lyra appends a `Lyra::Events::SaveWithoutEffect`
+  marker with that id, in the write's transaction (in a savepoint, best effort,
+  when the write raised), to the stream `Lyra::SavesWithoutEffect`
+  (`Lyra::SavesWithoutEffect::STREAM`), never to the record's stream. Its data:
+  `model` (the stream owner's name), `record_id`, `operation` (`create`,
+  `update`, `destroy`), `reason` (`no change`, `no row`, `not saved`,
+  `append failed`) and `replay: false`, no attribute value; its metadata is
+  that of the write's own event (correlation, the cause in scope, who). Replay,
+  the projections, ES-Lazy's catch-up, DualView, `Lyra::EventWindow` (the
+  dashboard, `EventFlow`) and the GDPR reports pass it over;
+  `event_store.read.event(id)` finds it. Nothing is recorded in Disabled mode.
+- An access-log entry commits on a connection of its own and stays when the
+  write in scope rolls back, so it names no write in scope: its
+  `causation_id` is the cause from outside every write scope (one the
+  application set, or a job's), and its `correlation_id` ties it to the writes
+  around it.
+
+So once its transaction commits, every `causation_id` Lyra gives names an
+event in the store (`Lyra::Causation.integrity` checks a store). The
+exceptions are a cause the application sets itself
+(`Lyra::Causation.with_id`), and Monitor's log-and-continue policy, under which
+an append that fails (a marker's too) is logged and the stream falls behind
+until `lyra:repair`.
 
 ---
 
@@ -1391,10 +1877,10 @@ loaded by PAM's Railtie when the pam_dsl gem is in the application's bundle.
 |---|---|
 | `lyra:mode:check TO=... [PROJECTION=sync\|async\|disabled\|lazy] [FROM=...] [REBUILD=1]` | Check a switch and certify it when clean; exits 1 otherwise. |
 | `lyra:mode:status` | Configured mode, last applied mode, whether the gate is on. |
-| `lyra:repair [DRY_RUN=1] [MODELS=User,Order]` | Bring the event log back in line with the tables (Monitor/Disabled only). |
+| `lyra:repair [DRY_RUN=1] [MODELS=User,Order] [UNREPRESENTABLE=refuse\|skip]` | Bring the event log back in line with the tables (Monitor/Disabled only). Records with values their model cannot represent: refused with the listing (nothing repaired), or with `UNREPRESENTABLE=skip` listed and left out of line. |
 | `lyra:erase MODEL=... ID=... REASON=... [FIELDS=a,b] [EVERYWHERE=1] [MAX_COPIES=n] [DRY_RUN=1]` | `Lyra::Erasure.erase!` for one record; `MAX_COPIES` is passed as `max_copies:` (a positive integer; default `config.erasure_max_copies`), `DRY_RUN=1` as `dry_run: true`. Prints the copies erased, the records left behind, the rows erased without events with the remedy for the mode (`lyra:repair`, or a rebuild), and each value left as shared by field, type and holders; after a dry run, with the `MAX_COPIES` that would erase them. `LIFTING=id[,id]` passes `lifting:`; the restrictions lifted and the copies kept under a restriction are printed. |
 | `lyra:retention:apply [DRY_RUN=1] [MODELS=...]` | `Lyra::Retention.apply!`. |
-| `lyra:genesis [MODEL=A,B]` | Import pre-Lyra rows now. |
+| `lyra:genesis [MODEL=A,B] [UNREPRESENTABLE=refuse\|skip]` | Import pre-Lyra rows now. Lists the rows whose values a model cannot represent: a refused model (nothing of it imported; exits 1 after the other models), or with `UNREPRESENTABLE=skip` the rows left out. |
 | `lyra:projections:rebuild [MODEL=A,B] [TRUNCATE=false]` | Rebuild tables from the event log. |
 | `lyra:schema:create`, `update`, `verify`, `report`, `history`, `diff[v1,v2]` | Event schema versions in `schema_path`. |
 | `lyra:workflows:generate [MODE=...] [OUTPUT_DIR=...] [REPORTS_DIR=...]`, `lyra:workflows:verify`, `lyra:generate_workflows` | Generate and verify PetriFlow workflows (needs petri_flow). See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
@@ -1412,8 +1898,9 @@ monitored model.
 | Error | Raised when |
 |---|---|
 | `Lyra::EventStoreUnavailableError` | An event could not be stored (fails the write in Hijack and event sourcing, and in Monitor with `monitor_append_failure = :fail_write`). |
-| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate; `#report`. |
+| `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate; `#report`. Also a switch, check, adoption or boot into Hijack or event sourcing while `record_touches` is false here or any process has a live `touch_skipping` entry (`force: true` included), and then the gated `enable_hijack!`/`enable_event_sourcing!`; a process with the option off booting into, or finding, an application in such a mode, and `record_touches = false` set at runtime in one. |
 | `Lyra::Repair::Refused` | `Repair.run` outside Monitor/Disabled. |
+| `Lyra::Projections::Rebuild::Refused` | `Rebuild.rebuild` while `record_touches` is false, or a process has a live `touch_skipping` entry. |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. |
 | `Lyra::Temporal::HistoryNotRecorded` | A point-in-time read before an imported record's history begins. |
 | `Lyra::StrictDataAccessViolation` | A callback-bypassing write with `strict_data_access` on. |
@@ -1422,7 +1909,7 @@ monitored model.
 | `Lyra::Retention::Disabled` | `Retention.apply!` without `retention_executor` (and not a dry run). |
 | `Lyra::MappingVerificationError` | `verify_mapping!` failed, or petri_flow is missing. |
 | `Lyra::Schema::SchemaValidationError` | `strict_schema` found a breaking schema change at boot. |
-| `ArgumentError` | Unknown `mode`, `projection_mode`, `monitor_append_failure` or `reads_without_purpose` value, bad `domain_events` rule, or an unresolvable name in `config.models`. |
+| `ArgumentError` | Unknown `mode`, `projection_mode`, `monitor_append_failure`, `record_touches` or `reads_without_purpose` value, `record_touches = false` outside Monitor and Disabled (or, while it is false, `mode=`, `hijack_enabled = true`, `apply_label` or an ungated `enable_hijack!`/`enable_event_sourcing!` into Hijack or event sourcing; a gated one raises `ModeTransition::Refused`), bad `domain_events` rule, or an unresolvable name in `config.models`. |
 | `PamDsl::PolicyNotFoundError`, `InvalidFieldError`, `UndeclaredPurposeError`, `PurposeFieldMismatchError`, `ConsentRequiredError`, `SpecialCategoryViolationError`, `CriminalDataViolationError` | PAM validation (all subclasses of `PamDsl::Error`). `SensitivityViolationError` is a deprecated alias of `SpecialCategoryViolationError`, removed in 2.0. `CriminalDataViolationError` (from 1.0.0): Art. 10 data read without an `art10_authorisation`. |
 | `PamDsl::RestrictedProcessingError`, `ObjectedProcessingError` | Condition 6 (from 1.0.0): `validate_access!` for a subject whose restriction covers the access (and the purpose declares no Art. 18(2) exception that applies), or who objected to the purpose and the objection was upheld. Checked after every other condition. |
 | `PamDsl::ObjectionNotApplicableError`, `RightsTransitionError`, `RightsStoreNotDurableError`, `RightsConcurrencyError` | The rights API (from 1.0.0): an objection to a purpose with no right to object (recorded as rejected first); a transition the state does not allow (a lift without notice); a store that is not durable where one is required; a concurrent change to the same subject's rights. |

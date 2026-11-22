@@ -111,9 +111,11 @@ module Lyra
         # are one value, a time is taken in UTC, -0.0 is 0.0, a character(n)
         # value without its trailing spaces), under the column an
         # alias_attribute names. Under case_sensitive: false on a text
-        # column, and on a citext column, the key is computed by the
-        # database from LOWER(value), as the check compares: values that
-        # differ only in case take one lock. The scope: and conditions: are
+        # column, and on a citext column, the key is made from LOWER(value)
+        # as the database computes it, as the check compares: values that
+        # differ only in case take one lock. The key holds a keyed digest of
+        # the value (value_lock_key), never the value: lock statements reach
+        # the database's log. The scope: and conditions: are
         # left out of the key, which makes it coarser (writers of one value
         # in two scopes wait for each other), never finer; keys are hashed
         # to 32 bits (hashtext), so two values may rarely share one.
@@ -143,43 +145,66 @@ module Lyra
           klass.with_connection do |connection|
             next unless connection.transaction_open?
 
-            name = klass.attribute_aliases.fetch(attribute.to_s, attribute.to_s)
-            prefix = "#{LOCK}/#{Lyra.stream_owner_name(klass)}/#{name}"
-            text = lowered_key_text(klass, name, value) if case_insensitive || citext?(klass, name)
-            if text && connection.adapter_name.match?(/postgres/i)
-              connection.execute("SELECT pg_advisory_xact_lock(hashtext(#{connection.quote("#{prefix}/")} || LOWER(#{connection.quote(text)})))")
-            else
-              Lyra::AdvisoryLock.xact_lock(connection, "#{prefix}#{canonical(klass, name, value)}", purpose: "uniqueness check")
-            end
+            key = value_lock_key(klass, attribute, value, fold: case_insensitive)
+            Lyra::AdvisoryLock.xact_lock(connection, key, purpose: "uniqueness check")
           end
         end
 
-        # A citext column, wherever its type lives (public.citext, a schema
-        # outside the search path).
-        def citext?(klass, name)
-          column = klass.columns_hash[name]
-          return false unless column
+        # The locks lock! takes for each [attribute, value] of +pairs+, as a
+        # case-sensitive check takes them (a citext column's folded, as the
+        # column compares), all or none in one statement
+        # (Lyra::AdvisoryLock.xact_lock_all). For the writes checked against
+        # the unique indexes from the event store (UniqueIndexes, and
+        # StrictDataAccessRelation#events_only_unique_rows): they wait for, and
+        # are waited for by, a uniqueness validation of the same value.
+        def lock_all!(klass, pairs)
+          klass.with_connection do |connection|
+            next unless connection.transaction_open?
 
-          column.type == :citext || column.sql_type.to_s.match?(/(\A|\.)"?citext"?\z/)
+            keys = pairs.uniq.map { |attribute, value| value_lock_key(klass, attribute, value, fold: false) }
+            Lyra::AdvisoryLock.xact_lock_all(connection, keys, purpose: "unique index check")
+          end
         end
 
-        private
+        # The advisory lock key of +value+ in +attribute+ (lock!, lock_all!):
+        # "lyra_unique/<model>/<column>/" and a keyed digest (ValueDigest) of
+        # the value as the column holds it (canonical), or, folded (+fold+, or
+        # a citext column), of its LOWER as the database computes it; never the
+        # value itself, which would reach the statement log. NULL is "#null".
+        def value_lock_key(klass, attribute, value, fold:)
+          name = klass.attribute_aliases.fetch(attribute.to_s, attribute.to_s)
+          prefix = "#{LOCK}/#{Lyra.stream_owner_name(klass)}/#{name}"
+          text = lowered_key_text(klass, name, value) if fold || citext?(klass, name)
+          return "#{prefix}/#{ValueDigest.hex("#{prefix}/#{lower_texts(klass, [text], name: name).first}")}" if text
 
-        # The text LOWER is applied to in the lock's key, for a value of a
-        # text column (nil otherwise, or for NULL: the canonical key then).
-        def lowered_key_text(klass, name, value)
-          column = klass.columns_hash[name]
-          return nil unless column && %i[string text citext].include?(column.type)
-
-          value = TypedValues.normalize(value)
-          type = klass.type_for_attribute(name)
-          return nil if value.nil? || !type.serializable?(value)
-
-          text = type.serialize(value)&.to_s
-          TypedValues.schema(klass).blank_padded.include?(name) ? TypedValues.unpadded(text) : text
+          bound = canonical(klass, name, value)
+          bound == "#null" ? "#{prefix}#null" : "#{prefix}/#{ValueDigest.hex("#{prefix}#{bound}")}"
         end
 
-        # "/" and the value as the column holds it; "#null" for NULL.
+        # LOWER of each of +texts+ as +klass+'s database computes it, those
+        # lowered before (per database, in this process) not sent again; the
+        # rest in one query, as bind parameters named +name+ (a column's: the
+        # statement log shows them as it shows that column's, filtered where
+        # the application filters it).
+        def lower_texts(klass, texts, name: "value")
+          klass.with_connection do |connection|
+            memo = lower_memo(connection)
+            known = {}
+            texts.each { |text| (lowered = memo[text]) ? known[text] = lowered : nil }
+            missing = texts.reject { known.key?(_1) }.uniq
+            if missing.any?
+              lower_query(connection, missing, name.to_s).each_with_index do |lowered, i|
+                known[missing[i]] = lowered
+                remember_lower(memo, missing[i], lowered)
+              end
+            end
+            texts.map { known.fetch(_1) }
+          end
+        end
+
+        # "/" and the value as the column holds it; "#null" for NULL: the
+        # lock key's value, and the value a unique index compares in ES-NoProj
+        # (Lyra::Projections::UniqueIndexes).
         def canonical(klass, name, value)
           type = klass.type_for_attribute(name)
           value = TypedValues.normalize(value)
@@ -193,6 +218,48 @@ module Lyra
           "/#{bound}"
         rescue StandardError
           "/#{value.inspect}"
+        end
+
+        # A citext column, wherever its type lives (public.citext, a schema
+        # outside the search path).
+        def citext?(klass, name)
+          column = klass.columns_hash[name]
+          return false unless column
+
+          column.type == :citext || column.sql_type.to_s.match?(/(\A|\.)"?citext"?\z/)
+        end
+
+        # The text LOWER is applied to in a lock's key or a citext comparison, for a value of a
+        # text column (nil otherwise, or for NULL: the canonical key then).
+        def lowered_key_text(klass, name, value)
+          column = klass.columns_hash[name]
+          return nil unless column && %i[string text citext].include?(column.type)
+
+          value = TypedValues.normalize(value)
+          type = klass.type_for_attribute(name)
+          return nil if value.nil? || !type.serializable?(value)
+
+          text = type.serialize(value)&.to_s
+          TypedValues.schema(klass).blank_padded.include?(name) ? TypedValues.unpadded(text) : text
+        end
+
+        private
+
+        # LOWER of +texts+ in one query (lower_texts), the texts bound.
+        def lower_query(connection, texts, name)
+          type = ActiveModel::Type::String.new
+          if connection.adapter_name.match?(/postgres/i)
+            array = PG::TextEncoder::Array.new.encode(texts)
+            connection.select_values(
+              "SELECT LOWER(t.x) FROM unnest($1::text[]) WITH ORDINALITY AS t(x, i) ORDER BY t.i",
+              "Lyra uniqueness LOWER", [ActiveRecord::Relation::QueryAttribute.new(name, array, type)]
+            )
+          else
+            texts.each_slice(500).flat_map do |slice|
+              binds = slice.map { ActiveRecord::Relation::QueryAttribute.new(name, _1, type) }
+              connection.select_rows("SELECT #{slice.map { 'LOWER(?)' }.join(', ')}", "Lyra uniqueness LOWER", binds).first
+            end
+          end
         end
 
         def refuse_unsupported!(relation)
@@ -445,7 +512,7 @@ module Lyra
         def prepare(records)
           @lowered.each do |name, bound, cell|
             values = records.filter_map { |attributes| text(name, @reader.read(attributes, name)) }.uniq
-            lowered = lower_all([bound, *values])
+            lowered = lower_all([bound, *values], name)
             cell[:target] = lowered.first
             cell[:values] = values.zip(lowered.drop(1)).to_h
           end
@@ -634,35 +701,7 @@ module Lyra
         # lowered before (per database, in this process) are not sent
         # again; the rest go in one query (PostgreSQL: one array
         # parameter; SQLite: one SELECT of LOWER(...) per 500).
-        def lower_all(texts)
-          @klass.with_connection do |connection|
-            memo = Uniqueness.lower_memo(connection)
-            known = {}
-            texts.each { |text| (lowered = memo[text]) ? known[text] = lowered : nil }
-            missing = texts.reject { known.key?(_1) }.uniq
-            if missing.any?
-              lower_query(connection, missing).each_with_index do |lowered, i|
-                known[missing[i]] = lowered
-                Uniqueness.remember_lower(memo, missing[i], lowered)
-              end
-            end
-            texts.map { known.fetch(_1) }
-          end
-        end
-
-        def lower_query(connection, texts)
-          if connection.adapter_name.match?(/postgres/i)
-            array = PG::TextEncoder::Array.new.encode(texts)
-            connection.select_values(
-              "SELECT LOWER(t.x) FROM unnest(#{connection.quote(array)}::text[]) WITH ORDINALITY AS t(x, i) ORDER BY t.i",
-              "Lyra uniqueness LOWER"
-            )
-          else
-            texts.each_slice(500).flat_map do |slice|
-              connection.select_rows("SELECT #{slice.map { "LOWER(#{connection.quote(_1)})" }.join(', ')}", "Lyra uniqueness LOWER").first
-            end
-          end
-        end
+        def lower_all(texts, name = "value") = Uniqueness.lower_texts(@klass, texts, name: name)
 
         # The column an attribute node names: one of this model's own table.
         def column(node, predicate)

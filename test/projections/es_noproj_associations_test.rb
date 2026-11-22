@@ -151,8 +151,9 @@ class EsNoprojAssociationsTest < Minitest::Test
 
   # The foreign key of a :through association is on the intermediate
   # records; it was looked for on the target and refused.
+  # Once through each of Ann's two articles, as Active Record's join answers.
   def test_a_through_association_reads_through_the_intermediate_records
-    assert_equal [@ann.id], EnAuthor.find(@ann.id).article_authors.map(&:id)
+    assert_equal [@ann.id, @ann.id], EnAuthor.find(@ann.id).article_authors.map(&:id)
   end
 
   def test_building_through_an_association_sets_the_foreign_key

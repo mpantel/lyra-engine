@@ -19,6 +19,9 @@ module Lyra
     # condition, a key already conditioned) reads the records and behaves as
     # CachedRelation does, with the same answers.
     class DeferredRelation < CachedRelation
+      # Its own where comes before CachedRelation's recording (Rebuildable).
+      prepend Rebuildable.wrappers
+
       # The records, loaded on first use. Stands in for the Array a
       # CachedRelation keeps.
       class Records < Delegator
@@ -67,12 +70,22 @@ module Lyra
           self.query_terms = [[:conditions, conditions]]
           scalars = conditions.select { |key, value| plain_value?(model_class, key, value) && !value.is_a?(Array) && !value.is_a?(Range) }
           self.create_attributes = scalars.transform_keys(&:to_s)
+          # A write reads the records again (Rebuildable), by a copy of the
+          # conditions.
+          copied = Rebuildable.copy(conditions)
+          unless copied.equal?(Rebuildable::UNSAFE)
+            self.rebuild_recipe = [lambda {
+              self.class.new(model_class, conditions: Rebuildable.copy(copied, freeze: false), on_load: on_load)
+            }, []]
+          end
         else
           super(model_class, records || [])
         end
       end
 
-      def loaded?
+      # Whether the records have been read (loaded? is Active Record's: the
+      # application's load of them).
+      def records_read?
         !(Records === @records) || @records.loaded?
       end
 
@@ -105,7 +118,7 @@ module Lyra
       # already among the pending conditions (two conditions on one key are an
       # AND that a merge would turn into an override).
       def mergeable?(args)
-        return false if loaded? || @conditions.nil? || args.size != 1
+        return false if records_read? || @conditions.nil? || args.size != 1
 
         added = args.first
         return false unless added.is_a?(Hash) && added.any?

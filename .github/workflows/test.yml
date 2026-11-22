@@ -13,13 +13,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 4.0 is the gemspecs' floor (.ruby-version: 4.0.9)
+        # 4.0 is the gemspecs' floor (.ruby-version: 4.0.10)
         ruby-version: ['4.0']
 
     # The dummy app's test database (test/dummy/config/database.yml)
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18.7   # the version docker-compose.yml pins
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres

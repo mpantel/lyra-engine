@@ -9,7 +9,9 @@ module Lyra
     # projects the writes made inside a block itself: by default when the
     # block ends, so reads after the block see them (reads inside it do not);
     # with each_write: true as each write is made, so reads later in the same
-    # block see them too.
+    # block see them too. Under ES-Sync a write's row is written with it,
+    # inside a block as outside one (CrudInterceptor#lyra_run_sync_projection),
+    # so the block has nothing to project there.
     #
     # Usage:
     #   Lyra::Consistency::ReadYourWrites.with_guaranteed_read do

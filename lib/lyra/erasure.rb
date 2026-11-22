@@ -233,7 +233,7 @@ module Lyra
             origin_state = current_state(model, id)
             resolve = ->(key, value) { resolve_in(model, id, replacements, originals, key, value) }
             rewritten = events.filter_map { |event| rewrite(event, resolve) }
-            Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
+            overwrite(rewritten) if rewritten.any?
             row_erased, row_copies = erase_row(model, id, replacements, resolve)
             # What the record's own row still holds (a JSON key, inside a
             # longer string), reported as for other records.
@@ -288,6 +288,14 @@ module Lyra
       end
 
       private
+
+      # Rewrite +events+ in place, and their value-stream links with them
+      # (Projections::ReferenceLinks.relink_values): a link named by a digest
+      # of an erased unique value is deleted, one of its replacement added.
+      def overwrite(events)
+        Lyra.config.event_store.overwrite(events)
+        Lyra::Projections::ReferenceLinks.relink_values(events)
+      end
 
       # Whether this erasure, with the ones before it (their ErasureApplied
       # events), covers every personal field of the record.
@@ -606,16 +614,18 @@ module Lyra
         replaced == :keep || replaced == value ? [value, false] : [replaced, true]
       end
 
-      # The record's row, then its aggregate's advisory lock: the locks a writer
+      # The record's aggregate advisory lock, then its row: the locks a writer
       # holds (a Monitor or Hijack write keeps the row until it commits, with its
       # event appended in the same transaction; the other modes take the advisory
-      # lock), taken in the order writers take them. Waiting here is what lets an
-      # in-flight write finish before the stream is read.
+      # lock), in Lyra's order, the aggregate lock first (Lyra::AdvisoryLock).
+      # Waiting here is what lets an in-flight write finish before the stream is
+      # read. Taken the other way round (row, then advisory lock), it deadlocked
+      # against a write that skips callbacks, which takes them in this order.
       def lock_record(model, id, stream)
-        model.unscoped.lock.find_by(model.primary_key => id) unless events_only?
         model.with_connection do |connection|
           Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{stream}", purpose: "erasure")
         end
+        model.unscoped.lock.find_by(model.primary_key => id) unless events_only?
       end
 
       # The record's row, every column of it scrubbed with the rule its events
@@ -842,7 +852,7 @@ module Lyra
           rewritten = events.filter_map { |event| rewrite(event, holder_resolve(nil, nil, originals, replacements)) }
           next if rewritten.empty?
 
-          Lyra.config.event_store.overwrite(rewritten)
+          overwrite(rewritten)
           copies << "#{rewritten.size} events"
         end
 
@@ -909,7 +919,7 @@ module Lyra
         return erase_and_import(model, id, stream, resolve, reason, erased_by) if events.empty? && !events_only?
 
         rewritten = events.filter_map { |event| rewrite(event, resolve) }
-        Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
+        overwrite(rewritten) if rewritten.any?
         copied = erase_copied_columns(model, id, resolve)
         return [false, false] if copied.empty? && rewritten.empty?
 
@@ -939,7 +949,7 @@ module Lyra
         imported = Lyra::Genesis.import_one(model, id)
         unless imported
           rewritten = Lyra.config.event_store.read.stream(stream).to_a.filter_map { |event| rewrite(event, resolve) }
-          Lyra.config.event_store.overwrite(rewritten) if rewritten.any?
+          overwrite(rewritten) if rewritten.any?
         end
         record_erasure(model, id, stream, columns.keys, reason, erased_by, imported: imported)
         forget_cached(model, id)

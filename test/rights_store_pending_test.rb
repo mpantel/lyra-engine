@@ -76,6 +76,7 @@ class RightsStorePendingTest < Minitest::Test
       assert_empty @store.active
       assert_empty @store.active_for([BOB])
       assert_equal [], @store.keys_in_force
+      assert_equal [], Lyra::Rights.keys_in_force, "as the application asks it"
       raise ActiveRecord::Rollback
     end
 

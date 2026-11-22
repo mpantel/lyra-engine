@@ -4,7 +4,7 @@ This guide takes an existing Rails application from plain ActiveRecord to event
 sourcing with Lyra, one checked step at a time. Each step can be undone by
 switching back to the previous mode.
 
-It is written for developers who maintain a Rails 8 application on PostgreSQL
+It is written for developers who maintain a Rails 8.1 application on PostgreSQL
 and want an event history of it, and possibly event sourcing, without
 rewriting its models or controllers. Read
 [Adopting Lyra in an existing application](#adopting-lyra-in-an-existing-application)
@@ -102,7 +102,7 @@ results.
 
 ## Prerequisites
 
-- Ruby 4.0 or later, Rails 8.0 or later.
+- Ruby 4.0 or later, Rails 8.1 (`>= 8.1, < 8.2`; tested on 8.1.4.1).
 - PostgreSQL. Lyra depends on the `pg` gem, and several features rely on
   PostgreSQL: the advisory locks that keep Genesis and ES-Lazy correct under
   concurrency (SQLite needs none; on other databases the step runs unlocked and
@@ -334,6 +334,21 @@ bin/rails lyra:genesis MODEL=Order,Payment
 This works in any mode. The mode check of Phase 4 also imports rows without a
 stream before it compares.
 
+**Rows the model cannot represent.** A row holding a value its model reads
+differently from what it stores (an enum value outside the mapping, such as
+`status = '2'` under `enum :status, { requested: "requested" }`, read as
+`nil`) would get an event that disagrees with it. Genesis refuses such a
+model: `lyra:genesis` lists the rows (model, id, attribute, stored value,
+value read), imports nothing of that model and exits 1; on first use the
+write or read fails with `Lyra::Genesis::Refused`; the mode check counts them
+as discrepancies. Fix the rows (or the model) and run it again. To import the
+rest and leave those rows without a stream, run
+`bin/rails lyra:genesis UNREPRESENTABLE=skip` or set
+`config.genesis_unrepresentable = :skip` (the mode check still refuses, and a
+write to a skipped row, bulk writes included, is refused until the row is
+fixed in the database, by SQL; its next use then imports it). See
+[API_REFERENCE.md, Genesis](API_REFERENCE.md#genesis).
+
 **How to verify.** `bin/rails lyra:repair DRY_RUN=1` (Phase 3) should no longer
 list "row but no events".
 
@@ -432,10 +447,12 @@ fails and rolls back. `config.genesis = :auto` imports pre-existing rows on
 first use. Choose the projection mode by how your code reads:
 
 **ES-Sync (`:sync`, the default).** The row is projected from the event in the
-same transaction. Reads are unchanged. If a projection fails, the error is
-logged and `config.projection_error_handler` is called, and the write stands
-with its table behind; set `config.strict_projections = true` to make the
-write fail instead.
+same transaction. Reads are unchanged. If the projection raises a database
+error (a unique index, a constraint), the write fails with it, as Monitor's
+`INSERT` or `UPDATE` would: PostgreSQL has aborted the transaction. Any other
+projection error is logged and `config.projection_error_handler` is called,
+and the write stands with its table behind; set
+`config.strict_projections = true` to make the write fail then too.
 
 **ES-Async (`:async`).** The row is projected by
 `Lyra::Projections::AsyncProjectionJob` (queue `lyra_projections`), enqueued
@@ -498,7 +515,8 @@ them is the verification.
 
 **How to step back.** ES-Sync → Hijack or Monitor is not checked; if
 `strict_projections` was off, look for `Lyra: Sync projection failed` in the
-log first, or compare every record in a console with
+log first (a projection error other than a database error: from 1.0.0 a
+database error fails the write instead, whatever `strict_projections` says), or compare every record in a console with
 `Lyra::ModeTransition.check(to: "monitor").discrepancies`, and rebuild if any
 (Recovery). From the lagging modes, follow the gated route above.
 

@@ -158,19 +158,20 @@ class ReferenceLinksTest < Minitest::Test
 
   # A burst of first lookups, each inside a transaction, used to start one
   # catch-up per thread, each on a second connection, and at 64 threads the
-  # pool ran out. One thread catches up; the others wait for it
-  # without a second connection, so with the test's own connection three
-  # callers and the one catch-up fit a pool of five.
+  # pool ran out. One thread catches up; the others do not wait for it
+  # (nor take a second connection): they answer from every record, so with
+  # the test's own connection three callers and the one catch-up fit a pool
+  # of five.
   def test_concurrent_first_lookups_catch_up_once
     ReferenceLinks.reset!
     callers = ActiveRecord::Base.connection_pool.size - 2
     catch_ups = 0
     singleton = ReferenceLinks.singleton_class
     original = singleton.instance_method(:link_and_checkpoint)
-    singleton.define_method(:link_and_checkpoint) do |*args|
+    singleton.define_method(:link_and_checkpoint) do |*args, **kwargs|
       catch_ups += 1
       sleep 0.3 # long enough for every caller to arrive while it runs
-      original.bind_call(self, *args)
+      original.bind_call(self, *args, **kwargs)
     end
 
     start = Queue.new

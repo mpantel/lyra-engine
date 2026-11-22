@@ -17,7 +17,8 @@ module Lyra
   #
   # Who accessed goes in the metadata: user_id (Current.user) and
   # ip_address (Current.ip_address) when the application keeps them in
-  # Current, request and correlation ids, and whatever
+  # Current, request and correlation ids, the cause from outside every write
+  # scope (a write in scope may roll back; the entry stays), and whatever
   # config.access_metadata_proc returns for the access (a console, a job,
   # an API token: anything Current does not know). Without either, an
   # access carries no user: set one.
@@ -239,7 +240,10 @@ module Lyra
           ip_address: current(:ip_address),
           request_id: current(:request_id),
           correlation_id: Lyra::Correlation.current_id,
-          causation_id: Lyra::Causation.current_id
+          # Not a write in scope: the entry commits on its own connection and
+          # stays when that write rolls back, so it would name no event. The
+          # correlation still ties the read to the writes around it.
+          causation_id: Lyra::Causation.outside_write_scopes
         }.merge(custom_metadata(access)).merge(source: "lyra_access_log").compact
       end
 

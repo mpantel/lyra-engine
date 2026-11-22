@@ -135,9 +135,11 @@ class EsNoprojDependentTest < Minitest::Test
       assert_equal [author.id, nil], changes(last)["author_id"]
     end
 
-    # Clearing a polymorphic key writes two columns: StrictDataAccessRelation
-    # takes it for a plain update_all, not the dependent_association bypass,
-    # and the events say so in both modes.
+    # Clearing a polymorphic key writes two columns. It is Rails' own nullify
+    # all the same (Lyra::Associations::Maintenance): the
+    # dependent_association bypass, with both columns' changes, in both
+    # modes. Before 1.0.0 its shape made it a plain update_all, refused in
+    # strict mode.
     define_method(:"test_a_polymorphic_dependent_nullify_clears_each_childs_keys_in_#{mode}") do
       with_notes_table do
         use(mode)
@@ -150,7 +152,8 @@ class EsNoprojDependentTest < Minitest::Test
         assert_equal [nil, nil], EdNote.find(note.id).then { [_1.notable_type, _1.notable_id] }
         last = Lyra.config.event_store.read.stream("EdNote$#{note.id}").to_a.last
         assert_equal "updated", operation(last)
-        assert_equal "update_all", last.metadata[:bypass_source]
+        assert_equal "dependent_association", last.metadata[:nullify_source]
+        assert_equal({ "notable_type" => ["EdNotedAuthor", nil], "notable_id" => [author.id, nil] }, changes(last))
         assert_equal ["Elsewhere", author.id], EdNote.find(other.id).then { [_1.notable_type, _1.notable_id] }
       end
     end

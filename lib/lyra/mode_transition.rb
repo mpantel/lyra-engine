@@ -9,7 +9,8 @@ module Lyra
   # - Escalation, from Disabled or Monitor to Hijack or event sourcing: the
   #   events become authoritative, so they must reproduce every row. Rows
   #   that predate Lyra are imported first (Lyra::Genesis), or each would
-  #   count as a discrepancy.
+  #   count as a discrepancy. A row holding a value its model cannot
+  #   represent is not imported, and refuses the switch (from 1.0.0).
   # - Leaving a mode whose tables lag the log (ES-NoProj, ES-Lazy, ES-Async)
   #   for one that reads them: the tables must catch up first. ES-Lazy
   #   catches up on read; ES-NoProj needs a Rebuild (rebuild: true).
@@ -58,13 +59,18 @@ module Lyra
       def to_s = "#{model} #{id}: #{problem}#{" (#{details})" if details}"
     end
 
+    # +unrepresentable+: rows Genesis would not import, holding values their
+    # model cannot represent (each listed value is also a discrepancy, up to
+    # Lyra::Genesis::LISTED per model).
     Report = Struct.new(:from, :to, :checked, :rechecked, :imported, :rebuilt, :discrepancies,
-                        :position, :started_at, :finished_at, :certificate_id, keyword_init: true) do
+                        :position, :started_at, :finished_at, :certificate_id, :unrepresentable,
+                        keyword_init: true) do
       def clean? = discrepancies.empty?
 
       def summary
         "#{from} -> #{to}: #{checked} records checked, #{rechecked} re-checked, " \
-          "#{imported} imported, #{discrepancies.size} discrepancies"
+          "#{imported} imported, #{discrepancies.size} discrepancies" \
+          "#{", #{unrepresentable} rows with values their model cannot represent" if unrepresentable.to_i.positive?}"
       end
     end
 
@@ -102,6 +108,9 @@ module Lyra
         from = current
         to = label(mode, projection_mode)
         report = nil
+        # Not overridden by force: no mode whose log rebuilds rows may be entered
+        # while touches are left out of it, here or in another process.
+        refuse_unrecorded_touches!(from, to)
         refuse_unevaluable_default_scopes!(from, to) unless force
         refuse_foreign_keys_into_event_only_tables!(from, to) unless force
 
@@ -114,10 +123,17 @@ module Lyra
         end
 
         link_references if to == "event_sourcing/disabled" && from != to
-        apply(mode, projection_mode)
-        # forced: the gate was required and the operator overrode it.
-        id = record_applied(to, from: from, forced: force && gate_enabled? && gate_required?(from, to),
-                                certificate_id: report&.certificate_id)
+        # The registry's last word and the switch's record, under the registry's
+        # lock: a process registering to leave touches out either sees this
+        # switch (and records its touch) or is seen here (and the switch is
+        # refused). TouchRegistry.serialize.
+        id = TouchRegistry.serialize(to) do
+          refuse_unrecorded_touches!(from, to)
+          apply(mode, projection_mode)
+          # forced: the gate was required and the operator overrode it.
+          record_applied(to, from: from, forced: force && gate_enabled? && gate_required?(from, to),
+                             certificate_id: report&.certificate_id)
+        end
         ModeSync.seen!(id)
         announce(from, to)
         report
@@ -201,38 +217,63 @@ module Lyra
       # Compare every monitored record's row with its events. Returns a
       # Report; stores a certificate when it is clean.
       def check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)
+        # With record_touches false DualView takes timestamp-only differences
+        # as agreement, and a process that leaves touches out moves rows its
+        # events do not show: no certificate may come of either.
+        refuse_unrecorded_touches!(from, to)
         started_at = Time.current
         position = event_position
         imported = 0
         rebuilt = 0
+        discrepancies = []
+        unrepresentable = 0
 
+        # A row its model cannot represent refuses the model's import (nothing
+        # of the model is imported), whatever config.genesis_unrepresentable
+        # says: a skipped row would have no events. Each listed value is a
+        # discrepancy; the model's rows are not compared (each would be "row
+        # but no events").
+        refused = []
         if !%w[disabled monitor].include?(to) && %w[disabled monitor].include?(from)
-          models.each { |model| imported += Lyra::Genesis.import_all(model) }
+          models.each do |model|
+            imported += Lyra::Genesis.import_all(model, unrepresentable: :refuse)
+          rescue Lyra::Genesis::Refused => e
+            refused << model
+            unrepresentable += e.rows
+            e.values.each do |value|
+              discrepancies << Discrepancy.new(model: value.model, id: value.id, problem: "a value the model cannot represent",
+                                               details: value.details)
+            end
+          end
         end
         if LAGGING.include?(from)
           Lyra::Projections::LazyProjection.catch_up!(force: true) if from == "event_sourcing/lazy"
           rebuilt = models.sum { |model| Lyra::Projections::Rebuild.rebuild(model)[:records] } if rebuild
         end
 
-        discrepancies = []
         checked = 0
-        models.each do |model|
+        (models - refused).each do |model|
           ids_to_check(model).each_slice(batch_size) do |ids|
             ids.each { |id| (problem = compare(model, id)) && discrepancies << problem }
             checked += ids.size
           end
         end
 
-        changed = changed_since(models, position, started_at)
+        changed = changed_since(models - refused, position, started_at)
         changed.each do |model, ids|
           discrepancies.reject! { |d| d.model == model.name && ids.include?(d.id.to_s) }
           ids.each { |id| (problem = compare(model, id)) && discrepancies << problem }
         end
 
         report = Report.new(from: from, to: to, checked: checked, rechecked: changed.values.sum(&:size),
-                            imported: imported, rebuilt: rebuilt, discrepancies: discrepancies,
+                            imported: imported, rebuilt: rebuilt, discrepancies: discrepancies, unrepresentable: unrepresentable,
                             position: event_position, started_at: started_at, finished_at: Time.current)
-        certify(report) if report.clean?
+        # A process may have begun leaving touches out while the check ran: the
+        # last look and the certificate under the registry's lock.
+        TouchRegistry.serialize(to) do
+          refuse_unrecorded_touches!(from, to)
+          certify(report) if report.clean?
+        end
         report
       end
 
@@ -244,6 +285,9 @@ module Lyra
 
         to = current
         last = last_applied
+        if TouchRegistry.authoritative?(to) && (touches = TouchRegistry.gate_refusal(last || to, to))
+          raise Refused, touches
+        end
         if last.nil? || last == to || !gate_required?(last, to)
           ModeSync.seen!(last == to ? latest_applied&.dig(:id) : record_applied(to, from: last))
           return
@@ -297,6 +341,9 @@ module Lyra
       # Every id of +model+ with a row or a stream (Lyra::Repair).
       def record_ids(model) = ids_to_check(model)
 
+      # Whether the table can be used (created on first use).
+      def table_available? = table_ready?
+
       # nil if the record's row and events agree, else a Discrepancy
       # (Lyra::Repair).
       def discrepancy(model, id) = compare(model, id)
@@ -313,6 +360,20 @@ module Lyra
         return if Lyra.config.reference_links == false
 
         Lyra.config.monitored_models.each { |model| Lyra::Projections::ReferenceLinks.catch_up(model, force: true) }
+      end
+
+      # A mode whose log rebuilds rows is refused while touches are left out
+      # of the log: by this process (config.record_touches false,
+      # Configuration#touch_refusal) or by any live process
+      # (TouchRegistry.gate_refusal).
+      def refuse_unrecorded_touches!(from, to)
+        return unless TouchRegistry.authoritative?(to)
+
+        if (own = Lyra.config.touch_refusal(to))
+          raise Refused, "Lyra refuses #{from} -> #{to}: #{own}"
+        end
+        others = TouchRegistry.gate_refusal(from, to)
+        raise Refused, others if others
       end
 
       # ES-NoProj reads through each model's default scopes from the event
@@ -355,12 +416,14 @@ module Lyra
       end
 
       # A fresh certificate for the switch, re-checked for what changed since.
+      # Only one issued after every period in which a process left touches out
+      # (its latest heartbeat or its end, TouchRegistry.certificate_floor_sql).
       def certified_check(from, to)
         return nil unless table_ready?
 
         row = sql(:select_one,
           "SELECT id, position, created_at FROM #{TABLE} WHERE kind = 'certificate' AND from_config = #{q(from)} " \
-          "AND to_config = #{q(to)} ORDER BY id DESC LIMIT 1"
+          "AND to_config = #{q(to)} AND id > #{TouchRegistry.certificate_floor_sql} ORDER BY id DESC LIMIT 1"
         )
         return nil unless row
 
@@ -522,7 +585,8 @@ module Lyra
           # cannot take one back, and safely when two processes add one at once.
           Lyra.add_own_columns(connection, TABLE,
                                actor: [:string], os_user: [:string], host: [:string], pid: [:integer],
-                               forced: [:boolean, { null: false, default: false }], certificate_id: [:bigint])
+                               forced: [:boolean, { null: false, default: false }], certificate_id: [:bigint],
+                               started_at: [:datetime], seen_at: [:datetime], ended_at: [:datetime])
         end
         @table_ready = true
       rescue ActiveRecord::NoDatabaseError, ActiveRecord::ConnectionNotEstablished
