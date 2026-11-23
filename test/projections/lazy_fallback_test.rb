@@ -19,6 +19,25 @@ require_relative "lazy_locked_reads_test"
 class LazyFallbackTest < LazyLockedReadsTest
   LazyLockedReadsTest.instance_methods(false).grep(/^test_/).each { undef_method(_1) }
 
+  def test_the_fallback_is_warned_of_once
+    Lyra::Projections::LazyProjection.reset_fallback_warning!
+    logged = StringIO.new
+    previous = Rails.logger
+    Rails.logger = ActiveSupport::Logger.new(logged)
+    other = LockItem.create!(n: 0).id
+    LockItem.find(other)
+    2.times do |i|
+      LockItem.find(other).update!(n: i + 1) # pending
+      pool.release_connection
+      blockers = fill_pool(leave: 1)
+      Thread.new { pool.with_connection { LockItem.transaction { LockItem.find(other).n } } }.join(10)
+      release(blockers)
+    end
+    assert_equal 1, logged.string.scan("found no free connection in the pool").size, logged.string
+  ensure
+    Rails.logger = previous
+  end
+
   def test_a_transaction_that_fell_back_reads_again_without_waiting_for_itself
     other = LockItem.create!(n: 0).id
     LockItem.find(other)

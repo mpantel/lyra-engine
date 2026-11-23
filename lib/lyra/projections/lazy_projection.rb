@@ -304,7 +304,10 @@ module Lyra
           return catch_up_here(connection, target) + apply_own_writes(connection) if holds_catch_up_lock?(connection)
 
           applied = Lyra::OwnConnection.run(ActiveRecord::Base, wait_for_connection: false) do |inline|
-            next catch_up_here(connection, target) if inline
+            if inline
+              warn_fallback(connection)
+              next catch_up_here(connection, target)
+            end
 
             begin
               Thread.current[:lyra_lazy_catching_up] = true
@@ -732,6 +735,25 @@ module Lyra
 
           Lyra.config.event_store.read.events(event_ids).to_a.to_h { |e| [e.event_id, e] }
         end
+
+        # Once per process: a catch-up that found no free connection in the pool
+        # ran in its reader's transaction, which holds the catch-up lock to its
+        # commit (every other reader's catch-up waits for it). Not for a pinned
+        # connection (Rails' transactional tests), where it is always so.
+        def warn_fallback(connection)
+          return if connection.respond_to?(:pinned) && connection.pinned
+          return if @fallback_warned
+
+          @fallback_warned = true
+          size = ActiveRecord::Base.connection_pool.size
+          message = "Lyra: an ES-Lazy read in a transaction found no free connection in the pool (size #{size}) for its " \
+                    "catch-up, which ran in the reader's transaction and holds the catch-up lock to its commit; other " \
+                    "readers' catch-ups wait for it. A pool of twice the threads that read inside transactions keeps this rare."
+          defined?(Rails) && Rails.logger ? Rails.logger.warn(message) : Kernel.warn(message)
+        end
+
+        # Forget that the fallback was warned of (tests).
+        public def reset_fallback_warning! = (@fallback_warned = nil)
 
         def warn_stale_checkpoint(position, newest, gone: false)
           where = gone ? "names an event no longer at that position" : "is past the newest event (#{newest})"

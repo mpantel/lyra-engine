@@ -257,6 +257,11 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   record's stream head first ensures. Elsewhere the position is read as before.
 
 ### Changed
+- **ES-Lazy warns once per process when a catch-up finds no free connection** and runs in its
+  reader's transaction (the fallback), naming the pool's size: that transaction then holds the
+  catch-up lock to its commit, and every other reader's catch-up waits for it. A pool of twice the
+  threads that read inside transactions keeps it rare. Not for a pinned connection (Rails'
+  transactional tests).
 - **ES-NoProj: a uniqueness validation on a column with a unique index reads its value's holders,
   not every record of the model.** Every record that ever held the value has an event in that value's
   stream (the one the unique-index check reads), so those are read and the validation's conditions

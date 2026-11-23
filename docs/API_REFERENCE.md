@@ -885,7 +885,10 @@ Ruby:
   the relation already has); an SQL expression as the column raises
   `UnsupportedQuery`;
 - `order`, `reorder`, `reverse_order`, `limit`, `offset`, `page`/`per`,
-  `distinct` (removes repeated records);
+  `distinct` (removes repeated records). Without an `order`, a `limit` or
+  `offset` takes the records in primary-key order. SQL leaves that order to the
+  plan, so Monitor's may differ; both are valid answers, and an application
+  that pages needs an `order` in either mode;
 - `load` (with a block: each record), `loaded?`, `records`, `reset` and
   `reload` (read again from the event store, as a relation built at that
   moment; a relation that cannot be built again, one of given records,
@@ -893,7 +896,11 @@ Ruby:
   work on its loaded records (`destroy_all` then resets it), its
   `update_all`, `delete_all` and `touch_all` select at write time, and a bang
   query method raises `ActiveRecord::UnmodifiableRelation`, as in Active
-  Record;
+  Record. A relation that is not loaded is read when it is first used (from
+  1.0.1): one built before a write sees it, as Active Record's query run at
+  that point does. A right placed after `load` (an erasure, a restriction)
+  applies to the loaded records when they are next read: ES-NoProj raises where
+  Monitor serves the records it already holds, which is the stricter of the two;
 - `joins`, `left_joins`, `left_outer_joins` on direct associations, evaluated
   in memory: an inner join drops records without a partner, a has_many join
   repeats the record per partner as SQL does;
