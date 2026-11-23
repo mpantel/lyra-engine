@@ -145,10 +145,11 @@ class CreateLyraTables < ActiveRecord::Migration[<%= migration_version %>]
               name: "index_event_store_events_in_streams_on_stream_and_id",
               algorithm: (:concurrently if connection.adapter_name.match?(/postg/i)),
               if_not_exists: true
-    # Rails Event Store indexes this table by stream only. ES-NoProj's
-    # reference links join it to itself by event_id (a record's links to the
-    # records it names), which without this index reads every link row: a
-    # destroy that checks its dependents slowed with the store (1.0.1).
+    # Rails Event Store 3's own migration creates this index too (t.references
+    # :event); an event store set up otherwise can lack it. ES-NoProj's
+    # reference links join this table to itself by event_id (a record's links
+    # to the records it names), which without the index reads every link row:
+    # a destroy that checks its dependents slowed with the store (1.0.1).
     add_index :event_store_events_in_streams, :event_id,
               name: "index_event_store_events_in_streams_on_event_id",
               algorithm: (:concurrently if connection.adapter_name.match?(/postg/i)),

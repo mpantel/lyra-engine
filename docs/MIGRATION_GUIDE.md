@@ -169,10 +169,11 @@ tables:
 | `lyra_rights`, `lyra_consents` | restrictions, objections and consent (projections of their streams) |
 | `lyra_stream_heads` | each record's head: live or gone, and its last event |
 
-and two indexes on `event_store_events_in_streams`: `(stream, id)`, which serves
-Lyra's backward reads by id (Rails Event Store 3's own migration creates it for a
-new event store; an event store created by an earlier version lacks it), and
-`(event_id)`, which serves ES-NoProj's reference links. On PostgreSQL the
+and two indexes on `event_store_events_in_streams`, where they are missing:
+`(stream, id)`, which serves Lyra's backward reads by id, and `(event_id)`, which
+serves ES-NoProj's reference links. Rails Event Store 3's own migration creates
+both for a new event store; one created by an earlier version, or set up
+otherwise, can lack them. On PostgreSQL the
 migration builds both concurrently, so writes go on
 while it is built. The generator also writes `config/initializers/lyra.rb`
 unless one exists (`--skip-initializer` to leave it out).

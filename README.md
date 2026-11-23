@@ -72,9 +72,10 @@ gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional, verificati
 Create the event store tables with the RailsEventStore 3 generator
 (`bin/rails generate ruby_event_store:active_record:migration`), then Lyra's
 own tables with `bin/rails generate lyra:install` (from 1.0.1): one migration
-with them and two indexes on `event_store_events_in_streams`: `(stream, id)`,
-which Lyra's backward reads use, and `(event_id)`, which ES-NoProj's reference
-links use; and `config/initializers/lyra.rb` unless the
+with them and two indexes on `event_store_events_in_streams`, where they are
+missing: `(stream, id)`, which Lyra's backward reads use, and `(event_id)`, which
+ES-NoProj's reference links use (Rails Event Store 3 creates both for a new event
+store); and `config/initializers/lyra.rb` unless the
 application has one (`--skip-initializer`). Without the migration Lyra creates
 each table the first time it needs it, as before. The
 [Migration Guide](docs/MIGRATION_GUIDE.md) walks through the whole path from
