@@ -348,7 +348,7 @@ record wrongly or not at all.
 
 | Value | Runs on first use in |
 |---|---|
-| `:auto` (default) | event-sourcing mode only |
+| `:auto` (default) | Hijack and event-sourcing mode (Hijack from 1.0.1) |
 | `true` | every mode that records events (Monitor, Hijack, event sourcing) |
 | `false` | never |
 

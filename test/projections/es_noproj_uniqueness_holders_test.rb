@@ -33,6 +33,22 @@ class EsNoprojUniquenessHoldersTest < EsNoprojUniquenessTest
     assert taken?(moving, :code)
   end
 
+  # A validation a unique index covers takes no value lock (from 1.0.1): the
+  # append-time index check refuses a duplicate under its own lock, as the
+  # table's index does in Monitor. One no index covers keeps its lock.
+  def test_a_validation_an_index_covers_takes_no_value_lock
+    use(:es_noproj)
+    locks = lambda do |&write|
+      sql = []
+      callback = ->(*, payload) { sql << payload[:sql] }
+      ActiveSupport::Notifications.subscribed(callback, "sql.active_record") { UqRaced.transaction(&write) }
+      sql.grep(/pg_advisory_xact_lock.*lyra_unique/).size
+    end
+    assert_equal 0, locks.call { UqRaced.new(code: "V1").valid? }, "code: a unique index covers it"
+    assert_operator locks.call { UqRaced.new(code: "V2", amount: 7).valid? }, :>=, 1, "amount: no index"
+    assert_operator locks.call { UqRaced.new(code: "V3", name: "Nm").valid? }, :>=, 1, "name: case_sensitive: false, no index"
+  end
+
   def test_without_a_unique_index_or_case_sensitivity_every_record_is_read
     use(:es_noproj)
     UqRaced.create!(code: "C1", name: "Same", amount: 5)

@@ -54,6 +54,11 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 ### Fixed
+- **Hijack imports the rows that predate Lyra before a model's first use, as the event-sourcing
+  modes do** (`config.genesis` `:auto`, the default). Its stream heads refuse an update of a record
+  with no history, and `:auto` imported only in the event-sourcing modes: where the mode gate did
+  not run (the test environment's default, a forced switch), every update of such a row in Hijack
+  was refused (`MissingRecordError`). The benchmark campaign's smoke step met it in its Hijack cells.
 - **Partial unique indexes are enforced in the event-sourcing modes** where their condition is one
   PostgreSQL writes back in a common form: a column `IS [NOT] NULL`, a column `=` or `<>` a literal
   (casts on either side), a boolean column alone or under `NOT`, joined by `AND`. A record outside the
@@ -257,6 +262,15 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   record's stream head first ensures. Elsewhere the position is read as before.
 
 ### Changed
+- **ES-NoProj: a uniqueness validation a unique index covers takes no lock.** Where a unique index on
+  every row has exactly the validated attribute and its `scope:` columns (and the validation no
+  `conditions:`, and `case_sensitive: false` only on a citext column), the validation takes neither its
+  value lock nor the record's aggregate lock before it: two writers of one value may both pass it, as
+  in Monitor, and the second is refused at its append by the index check, under the value's lock
+  (`ActiveRecord::RecordNotUnique`, the table index's error in Monitor, where it was
+  `ActiveRecord::RecordInvalid`). A failed validation there no longer holds the aggregate lock to the
+  end of its transaction. A validation no index covers keeps both locks, which Monitor does not take
+  (Rails' validation alone is a read, then a write).
 - **ES-Lazy warns once per process when a catch-up finds no free connection** and runs in its
   reader's transaction (the fallback), naming the pool's size: that transaction then holds the
   catch-up lock to its commit, and every other reader's catch-up waits for it. A pool of twice the

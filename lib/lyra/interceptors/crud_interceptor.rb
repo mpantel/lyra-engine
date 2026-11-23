@@ -928,7 +928,12 @@ module Lyra
       def lyra_lock_aggregate_before_validation
         return unless persisted? && Lyra::Projections::Uniqueness.reads_events?(self.class)
         return unless Lyra.config.lock_aggregate_before_append
-        return unless self.class.validators.any? { _1.is_a?(ActiveRecord::Validations::UniquenessValidator) }
+        # Only for a validation no unique index covers (Uniqueness.index_covered?):
+        # one an index covers takes no value lock, so there is nothing to order.
+        return unless self.class.validators.any? do |validator|
+          validator.is_a?(ActiveRecord::Validations::UniquenessValidator) &&
+            validator.attributes.any? { !Lyra::Projections::Uniqueness.index_covered?(self.class, _1, validator.options) }
+        end
 
         self.class.with_connection do |connection|
           next unless connection.transaction_open?

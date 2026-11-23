@@ -41,6 +41,9 @@ module Lyra
     # a transaction-level advisory lock on (model, attribute, value) before it
     # reads (lock!): the second writer's check waits until the first's
     # transaction ends, and then reads its events. See lock! for its limits.
+    # Where a unique index covers the validation (index_covered?, from 1.0.1)
+    # no lock is taken: the index check at the append refuses the second
+    # writer (RecordNotUnique), as the table's index does in Monitor.
     #
     # The purpose check exemption (PurposeBoundReads::UniquenessExemption)
     # still applies: the validation is part of writing the record.
@@ -130,6 +133,31 @@ module Lyra
 
           ids = ReferenceLinks.record_ids_in_any(table, [UniqueIndexes.stream(table, column, key)])
           ids.empty? ? [] : CachedProjection.find_many(table, ids).compact
+        end
+        # Whether a unique index Lyra checks at the append (UniqueIndexes) covers
+        # this validation of +attribute+ (with +options+ :scope, :conditions,
+        # :case_sensitive): one on every row (not partial) whose columns are exactly
+        # the attribute and its scope, the validation with no conditions:, and
+        # compared as the index compares (case_sensitive: false only on a citext
+        # column). There the validation takes no value lock, nor the record's
+        # aggregate lock before it (from 1.0.1): two writers of one value may both
+        # pass it, as in Monitor, and the second is refused at its append by the
+        # index check, under the value's lock, after the aggregate lock
+        # (ActiveRecord::RecordNotUnique, as the table's index raises in Monitor).
+        # A validation no index covers keeps its lock, which Monitor does not take
+        # (Rails' validation alone is a read, then a write).
+        def index_covered?(klass, attribute, options)
+          return false if options[:conditions]
+
+          table = klass.respond_to?(:base_class) ? klass.base_class : klass
+          return false unless UniqueIndexes.enforced?(table)
+
+          aliases = table.attribute_aliases
+          column = aliases.fetch(attribute.to_s, attribute.to_s)
+          return false if options.key?(:case_sensitive) && !options[:case_sensitive] && !citext?(table, column)
+
+          wanted = ([column] + Array(options[:scope]).map { aliases.fetch(_1.to_s, _1.to_s) }).sort
+          UniqueIndexes.of(table).any? { |index| index.condition.nil? && index.columns.sort == wanted }
         end
         # A transaction-level advisory lock on (model, attribute, value),
         # taken before the check reads, held until the writer's transaction
@@ -497,7 +525,7 @@ module Lyra
           # An unboundable value (out of the column's range) matches no row.
           return relation if relation.null_relation?
 
-          if lyra_claims?(Thread.current[RECORD], attribute)
+          if lyra_claims?(Thread.current[RECORD], attribute) && !Uniqueness.index_covered?(klass, attribute, options)
             case_insensitive = options.key?(:case_sensitive) && !options[:case_sensitive]
             Uniqueness.lock!(klass, attribute, value, case_insensitive: case_insensitive)
           end

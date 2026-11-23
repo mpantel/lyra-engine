@@ -324,13 +324,16 @@ class EsNoprojUniquenessTest < Minitest::Test
     assert_equal 1, UqRaced.where(code: "R1").count
   end
 
+  # code has a unique index: from 1.0.1 its validation takes no lock, both
+  # writers may pass it as in Monitor, and the second is refused at its append
+  # by the index check (RecordNotUnique, the table's index's error in Monitor).
   def test_two_writers_of_one_value_in_es_noproj
     use(:es_noproj)
 
     results = race { UqRaced.create!(code: "R1") }
 
     assert_equal 1, results.count(:saved), results.inspect
-    assert_equal 1, results.count { _1.is_a?(ActiveRecord::RecordInvalid) }, results.inspect
+    assert_equal 1, results.count { _1.is_a?(ActiveRecord::RecordNotUnique) }, results.inspect
     assert_equal 1, UqRaced.where(code: "R1").count
   end
 

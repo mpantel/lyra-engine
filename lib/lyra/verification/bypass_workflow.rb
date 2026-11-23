@@ -158,7 +158,7 @@ module Lyra
     # - a row Genesis could not import (config.genesis_unrepresentable :skip
     #   left it without a stream, or :refuse refused the model's import):
     #   Lyra::Genesis::Refused before any write or event (admit_all!), where
-    #   Genesis runs (the event-sourcing modes; Hijack and Monitor with
+    #   Genesis runs (Hijack and the event-sourcing modes; Monitor with
     #   genesis: true). insert_all creates new rows, none of which is asked,
     #   nor is a join row (link); but where it reads keys or unique values
     #   from the event store (ES-NoProj, ES-Async, ES-Lazy), the model's
@@ -217,7 +217,8 @@ module Lyra
     #   support (refused at enrolment where the key is known): enrolled
     #   before Active Record read it, its bulk inserts are refused in the
     #   event-sourcing modes before anything is written, and Genesis refuses
-    #   the model on its first use there; Monitor and Hijack record them;
+    #   the model on its first use there; Monitor and Hijack record them
+    #   (Genesis skips such a model there);
     # - ES-NoProj's create and update through callbacks are not bypass
     #   writes (their unique indexes are checked from the event store as
     #   update_column(s)' and update_all's are, Lyra::Projections

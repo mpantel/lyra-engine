@@ -834,7 +834,10 @@ refusing with `UnsupportedQuery` what it cannot evaluate exactly. Since no row
 is written, no unique index catches two concurrent writers of one value; on
 PostgreSQL the check takes a transaction-level advisory lock on the model,
 attribute and value first, so the second writer's check waits for the first's
-commit (limits in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled)).
+commit. Where a unique index covers the validation (from 1.0.1), it takes no
+lock: both writers may pass it, as in Monitor, and the append-time index check
+refuses the second (`RecordNotUnique`), as the table's index does in Monitor
+(limits in [API_REFERENCE.md](API_REFERENCE.md#es-noproj-projection_mode-disabled)).
 
 **Unique indexes.** For the same reason the table's unique indexes refused
 nothing: a duplicate `create`, `update`, `update_columns` or `update_all` was

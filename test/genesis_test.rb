@@ -154,6 +154,21 @@ class GenesisTest < Minitest::Test
     assert_equal 2, (state["quantity"] || state[:quantity]), "the rebuilt state keeps what only the row knew"
   end
 
+  # Hijack refuses an update of a record with no history (1.0.1's stream
+  # heads), so :auto imports there too, before the first write: an update of a
+  # row that predates Lyra works without the mode gate (the test environment's
+  # default, a forced switch).
+  def test_hijack_imports_before_the_first_write
+    Lyra.config.enable_hijack!
+    GenesisItem.find(@ids.second).update!(label: "b2")
+
+    events = stream(@ids.second)
+    assert_equal 2, events.size
+    assert events.first.event_type.end_with?("Imported")
+    assert_equal "b2", GenesisItem.find(@ids.second).label
+    assert_equal 3, imported_events.size, "every row without a stream, once"
+  end
+
   def test_monitor_mode_imports_only_when_asked
     Lyra.config.enable_monitor!
     GenesisItem.find(@ids.first).update!(label: "a2")

@@ -212,8 +212,8 @@ module Lyra
       # User tracking - custom metadata proc called for every event
       # Signature: ->(record, operation) { { user_id: ..., ... } }
       @metadata_proc = nil
-      # Genesis: :auto (event-sourcing mode only), true (every event-producing
-      # mode) or false. See Lyra::Genesis.
+      # Genesis: :auto (Hijack and event-sourcing mode), true (every
+      # event-producing mode, Monitor too) or false. See Lyra::Genesis.
       @genesis = :auto
       @genesis_unrepresentable = :refuse
       # Reference links: :auto (ES-NoProj only), true (every event-producing

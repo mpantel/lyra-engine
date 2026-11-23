@@ -35,9 +35,10 @@ module Lyra
   # free), the import runs in the caller's transaction and the model counts as
   # imported only once it commits (Lyra::OwnConnection).
   #
-  # Enabled with config.genesis: :auto (the default) runs it in event-sourcing
-  # mode, where the event log is the only source of truth; true also runs it in
-  # Monitor and Hijack modes (for DualView and Rebuild); false never runs it.
+  # Enabled with config.genesis: :auto (the default) runs it in Hijack and
+  # event-sourcing mode, whose stream heads refuse an update of a record with no
+  # history (Hijack from 1.0.1); true also runs it in Monitor (for DualView and
+  # Rebuild); false never runs it.
   #
   # Values the model cannot represent (from 1.0.0). The Imported event holds
   # the row as the model reads it. A stored value the model cannot read --
@@ -165,11 +166,17 @@ module Lyra
     @mutex = Mutex.new
 
     class << self
+      # :auto (the default): in Hijack and the event-sourcing modes, whose
+      # stream heads refuse an update or destroy of a record with no history
+      # (from 1.0.1, Hijack included): the rows that predate Lyra are imported
+      # before a model's first use there, whether or not the mode gate ran.
+      # Monitor records a row it finds without history as it writes it, and
+      # imports only with config.genesis true.
       def enabled?
         case Lyra.config.genesis
         when true then !Lyra.disabled_mode?
         when false, nil then false
-        else Lyra.event_sourcing_mode?
+        else Lyra.event_sourcing_mode? || Lyra.hijack_mode?
         end
       end
 
@@ -179,6 +186,11 @@ module Lyra
       # holds values the model cannot represent (admit!).
       def first_use(model_class, id = nil)
         return 0 unless enabled?
+        # Hijack records a model with a composite primary key, which Genesis
+        # cannot import (a stream is named by one key): its first use there goes
+        # on without an import, as before Hijack imported (1.0.1). The
+        # event-sourcing modes still refuse such a model at its first use.
+        return 0 if model_class.primary_key.is_a?(Array) && !Lyra.event_sourcing_mode?
         return 0 if Thread.current[:lyra_genesis_running]
 
         count = 0

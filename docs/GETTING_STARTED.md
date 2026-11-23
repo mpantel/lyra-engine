@@ -135,8 +135,8 @@ comparison for every row.
 A row written before Lyra was enabled has no stream, so DualView reports
 an `exists` difference for it. Genesis gives each such row one `Imported` event
 (`OrderImported`) holding the row as it is. With the default
-`config.genesis = :auto` it runs by itself only in event-sourcing mode, so in
-Monitor run it yourself:
+`config.genesis = :auto` it runs by itself in Hijack and event-sourcing mode, so
+in Monitor run it yourself:
 
 ```bash
 bin/rails lyra:genesis                # every monitored model
