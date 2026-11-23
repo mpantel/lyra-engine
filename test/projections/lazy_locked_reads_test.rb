@@ -94,7 +94,10 @@ class LazyLockedReadsTest < Minitest::Test
   # Locking readers that update and plain writers together: no deadlock, and
   # every increment under the lock counts.
   def test_locking_readers_and_plain_writers_do_not_deadlock
-    increments = 6
+    # Four threads, one connection each, inside the test pool of five: ES-Lazy's
+    # catch-up takes another for itself, and with none free it runs in the
+    # reader's transaction instead (the documented fallback, which can deadlock).
+    increments = 4
     writers = Array.new(increments) do |i|
       thread do
         if i.even?

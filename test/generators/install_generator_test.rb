@@ -12,6 +12,7 @@ require "stringio"
 class InstallGeneratorTest < Minitest::Test
   RES_TABLE = "event_store_events_in_streams"
   RES_INDEX = "index_event_store_events_in_streams_on_stream_and_id"
+  RES_EVENT_INDEX = "index_event_store_events_in_streams_on_event_id"
 
   def setup
     skip "Requires Rails and PostgreSQL" unless defined?(ActiveRecord::Base) && postgres?
@@ -38,6 +39,7 @@ class InstallGeneratorTest < Minitest::Test
     assert_includes source, "class CreateLyraTables < ActiveRecord::Migration[#{ActiveRecord::Migration.current_version}]"
     tables.each { |table| assert_includes source, "create_table :#{table}, " }
     assert_includes source, RES_INDEX
+    assert_includes source, RES_EVENT_INDEX
 
     initializer = File.join(@dir, "config/initializers/lyra.rb")
     assert_includes File.read(initializer), "Lyra.configure do |config|"
@@ -71,7 +73,9 @@ class InstallGeneratorTest < Minitest::Test
     assert_same_tables at_run_time, migrated
     assert_equal tables.sort, migrated[:columns].map(&:first).uniq.sort - [RES_TABLE]
     refute res_index?(at_run_time), "run time never builds the index on #{RES_TABLE}"
+    refute res_index?(at_run_time, RES_EVENT_INDEX)
     assert res_index?(migrated)
+    assert res_index?(migrated, RES_EVENT_INDEX)
   end
 
   # Where Lyra created its tables at run time (1.0.0 and earlier), the
@@ -86,6 +90,7 @@ class InstallGeneratorTest < Minitest::Test
 
       assert_same_tables before, after
       assert res_index?(after)
+      assert res_index?(after, RES_EVENT_INDEX)
     end
   end
 
@@ -253,5 +258,5 @@ class InstallGeneratorTest < Minitest::Test
     names.each { |name| assert_equal only(expected, name), only(actual, name), "#{name} differs" }
   end
 
-  def res_index?(catalog) = catalog[:indexes].any? { |table, name, _| table == RES_TABLE && name == RES_INDEX }
+  def res_index?(catalog, index = RES_INDEX) = catalog[:indexes].any? { |table, name, _| table == RES_TABLE && name == index }
 end

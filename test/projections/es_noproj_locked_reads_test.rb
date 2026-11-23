@@ -97,15 +97,17 @@ class EsNoprojLockedReadsTest < Minitest::Test
   # Locking readers and plain writers together: no deadlock, every increment
   # under the lock counts.
   def test_locking_readers_and_plain_writers_do_not_deadlock
-    writers = Array.new(6) do |i|
+    # Four threads, one connection each, inside the test pool of five: as in
+    # lazy_locked_reads_test.
+    writers = Array.new(4) do |i|
       thread do
         r = NoprojLockItem.find(@id)
         i.even? ? r.with_lock { r.update!(n: r.n + 1) } : r.touch
         :ok
       end
     end
-    assert_equal [:ok] * 6, writers.map { |t| Timeout.timeout(30) { t.value } }
-    assert_equal 3, value
+    assert_equal [:ok] * 4, writers.map { |t| Timeout.timeout(30) { t.value } }
+    assert_equal 2, value
   end
 
   # Model.lock.where(...): the selection's records locked before its first

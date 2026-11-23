@@ -37,7 +37,8 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   `lyra_consents`, `lyra_stream_heads`), with the definitions Lyra uses when it creates them at run
   time, and an index on Rails Event Store's `event_store_events_in_streams (stream, id)`, which
   serves Lyra's backward reads by id (Rails Event Store 3 creates it for a new event store; event
-  stores created by earlier versions lack it; on PostgreSQL it is built concurrently). It also
+  stores created by earlier versions lack it), and one on its `event_id`, which serves ES-NoProj's
+  reference links (below); on PostgreSQL both are built concurrently. It also
   writes `config/initializers/lyra.rb` unless the application has one (`--skip-initializer`), and
   takes `--database` for another database's migrations path. With the migration the tables are in
   `db/schema.rb` or `db/structure.sql`, so `db:schema:load` and test databases have them, and the
@@ -52,6 +53,14 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 ### Fixed
+- **ES-NoProj's deletes no longer slow down as the event store grows.** A destroy checks its
+  dependent associations through the reference links, and the lookup joined Rails Event Store's
+  links table to itself by `event_id`, which Rails Event Store does not index, so it read every link
+  row: on the testbed a delete took about 120 ms at 10⁵ events and about 1 s at 10⁶. The install
+  migration now adds an index on `event_store_events_in_streams (event_id)`, with which the same
+  delete takes about 15 ms at 10⁵, as at 10⁴. An application that ran the migration of an earlier
+  1.0.1 build adds the index with `add_index :event_store_events_in_streams, :event_id,
+  algorithm: :concurrently`. The index adds one entry per link row to every append.
 - **DualView reads the row without the model's default scope, and so do ES-Sync's projection
   writes.** DualView, and with it the mode gate, the sampler and `lyra:repair`, looked the row up
   through the model's default scope, so a row it hides (a soft-deleted one) was reported missing
