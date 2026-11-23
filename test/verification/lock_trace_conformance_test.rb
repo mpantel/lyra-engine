@@ -94,6 +94,18 @@ class LockTraceConformanceEsAsyncTest < EsAsyncLockedReadsTest
     assert_equal 8, value
   end
 
+  # A record-level write that skips callbacks (touch) after a writer whose
+  # job has not run: from 1.0.1 it takes the bulk write's path (the stream's
+  # lock, the row brought up to date, then the write: the net's bypass kind),
+  # where before it took the aggregate lock and the row only (record_bypass).
+  def test_a_touch_after_a_writer_whose_job_has_not_run
+    assert_fits %i[writer bypass] do |held, go|
+      [actor("w0") { AsyncLockItem.find(@id).update!(n: 7); held << true },
+       actor("w1", after: held) { go.pop; AsyncLockItem.transaction { AsyncLockItem.find(@id).touch } }]
+    end
+    assert_equal 7, value
+  end
+
   # Controls: the replay rejects what the net forbids.
   def test_the_replay_rejects_two_holders_of_one_aggregate_lock
     s = LockTrace::Step
