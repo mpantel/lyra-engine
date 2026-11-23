@@ -38,6 +38,17 @@ bundle exec rake docker:start    # starts the lyra_postgres container (docker-co
 docker exec lyra_postgres createdb -U postgres lyra_test   # once, if the database does not exist yet
 ```
 
+Two test runs on one server need a database each, or they delete each other's rows: set
+`LYRA_TEST_DATABASE` to another name (and create it first) for the second run.
+
+```bash
+docker exec lyra_postgres createdb -U postgres lyra_test_b
+LYRA_TEST_DATABASE=lyra_test_b bundle exec rake test
+```
+
+Timing-sensitive work (benchmarks, the volume sweeps) still runs alone: separate databases
+share the server's CPU and disk.
+
 `rake docker:status`, `docker:stop`, `docker:logs`, `docker:psql` and
 `docker:clean` manage the same container. The PAM DSL and PetriFlow suites do
 not need a database.

@@ -148,6 +148,8 @@ if PETRI_FLOW_AVAILABLE
       autoload :TemplateInvariants, "lyra/verification/template_invariants"
       autoload :LazyLockOrderNet, "lyra/verification/lazy_lock_order_net"
       autoload :AsyncLockOrderNet, "lyra/verification/async_lock_order_net"
+      autoload :TraceReplay, "lyra/verification/trace_replay"
+      autoload :GateSettleNet, "lyra/verification/gate_settle_net"
     end
   end
 end

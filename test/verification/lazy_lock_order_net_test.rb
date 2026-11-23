@@ -25,6 +25,34 @@ module Lyra
         assert NET.explore(NET::Config.new(name: "x", kinds: %i[with_lock_x_first writes_then_reads]))[:deadlock]
       end
 
+      # The fallback (the catch-up in the reader's transaction, c held to its
+      # commit) against a reader that holds the record and catches up on its own
+      # connection: a wait cycle through that connection, which PostgreSQL's
+      # detector cannot see, so a hang (reproduced on 23 Nov with a full pool).
+      # Two fallbacks: a cycle PostgreSQL detects. Without the fallback: none.
+      def test_the_fallback_hangs_against_an_own_connection_catch_up
+        before = { own_wait: :unbounded, remembers: false }
+        r = NET.explore(NET::Config.new(name: "x", kinds: %i[plain_inline writes_then_reads], **before))
+        assert r[:hang], "a hang: #{r.inspect}"
+        assert NET.explore(NET::Config.new(name: "x", kinds: %i[falls_back_then_reads], **before))[:hang], "waits for itself"
+        # 1.0.1: the bounded wait turns the cycle into one PostgreSQL detects, and a
+        # transaction holding c catches up in place.
+        fixed = NET.explore(NET::Config.new(name: "x", kinds: %i[plain_inline writes_then_reads]))
+        assert_nil fixed[:hang]
+        assert fixed[:deadlock], "detected: #{fixed.inspect}"
+        assert_nil NET.explore(NET::Config.new(name: "x", kinds: %i[falls_back_then_reads]))[:deadlock]
+        %i[plain writes_then_reads bulk falls_back_then_reads].repeated_combination(2).each do |kinds|
+          assert_nil NET.explore(NET::Config.new(name: "x", kinds: kinds))[:hang], kinds.join("+")
+        end
+        detected = NET.explore(NET::Config.new(name: "x", kinds: %i[plain_inline writes_then_reads_inline]))
+        assert detected[:deadlock]
+        assert_nil detected[:hang]
+        assert_nil NET.explore(NET::Config.new(name: "x", kinds: %i[plain_inline plain_inline]))[:deadlock]
+        %i[plain writes_then_reads bulk].repeated_combination(2).each do |kinds|
+          assert_nil NET.explore(NET::Config.new(name: "x", kinds: kinds))[:deadlock], kinds.join("+")
+        end
+      end
+
       def test_the_aggregate_lock_first_is_free_of_deadlock_and_lost_updates
         [2, 3].each do |size|
           mixes(:with_lock_a_first, size).each do |kinds|

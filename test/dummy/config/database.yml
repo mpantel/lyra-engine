@@ -4,5 +4,7 @@ test:
   port: 5433
   username: postgres
   password: postgres
-  database: lyra_test
+  # A database of its own per concurrent run (LYRA_TEST_DATABASE), so two runs on
+  # one server do not share tables; create it first (createdb).
+  database: <%= ENV.fetch("LYRA_TEST_DATABASE", "lyra_test") %>
   pool: 5
