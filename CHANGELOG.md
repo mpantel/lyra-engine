@@ -54,6 +54,27 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 ### Fixed
+- **ES-Async: a bulk write starts from the row as its stream has it.** `update_all` (an SQL
+  expression such as `n = n + 1`), `update_counters`, `increment!` and `touch_all` on a record whose
+  projection job had not run read the row the job had not written yet: the update pending in the job
+  was lost (a log of `n` 0 → 7, then 0 → 1, where Monitor gives 8), with no error. Under the records'
+  aggregate locks, the events their jobs have not applied are now applied first, under the streams'
+  locks (`AsyncProjectionJob.project_pending`), as `insert_all` and `upsert_all` already did; a
+  pending destroy deletes its row there, and the write leaves it out as before. Found by trace
+  conformance: the ES-Async lock-order net models bulk writes that way, and the recorded
+  `update_all` took the row without the stream lock.
+- **ES-Lazy: a catch-up that fell back to its reader's transaction no longer hangs the readers.**
+  Where no second connection is free, a read inside a transaction catches up in it, and holds the
+  catch-up lock to its commit. Two ways of waiting for that lock hung, with no error, before this
+  release: the same transaction's next read, once a connection was free, caught up there and waited
+  for the lock its own transaction held; and a reader holding a record that the fallback's
+  transaction then wrote caught up on its own connection and waited for the lock while its
+  transaction waited for it in Ruby, a cycle PostgreSQL's detector cannot see. The Olist replay
+  hung within a minute in ES-Lazy at 16 threads with a pool of 20 (the concurrency nets found the
+  second way first: `LazyLockOrderNet`'s hang). Now a transaction that holds the lock catches up in
+  place, and a catch-up on its own connection waits at most 1 s for the lock
+  (`LazyProjection::OWN_LOCK_WAIT`), then runs in its reader's transaction, where a cycle is a
+  deadlock PostgreSQL detects (`ActiveRecord::Deadlocked`, which the application can retry).
 - **ES-NoProj's deletes no longer slow down as the event store grows.** A destroy checks its
   dependent associations through the reference links, and the lookup joined Rails Event Store's
   links table to itself by `event_id`. Rails Event Store 3's own migration indexes that column, but an
@@ -243,7 +264,9 @@ writes in flight (see Fixed). What remains is listed under Known issues.
 - **ES-Lazy: a read inside a transaction catches up on a connection of its own** (see Fixed), so
   while it does, it uses a second connection of the pool. Where none is free, or the connection
   is pinned (transactional tests), the catch-up runs in the reader's transaction as in 1.0.0, with
-  1.0.0's deadlock. A read that only its own transaction's events are behind replays those
+  1.0.0's deadlock, and holds the catch-up lock to that commit, so other readers' catch-ups wait
+  for it (see Fixed for the hangs this could cause). A pool of twice the threads that read inside
+  transactions keeps the fallback rare. A read that only its own transaction's events are behind replays those
   records itself and runs no catch-up.
 - **ES-Lazy costs one query more per read while gaps are open,** including for the up to 300
   seconds that a rolled-back transaction's ids stay gaps. The query grows with their number: on

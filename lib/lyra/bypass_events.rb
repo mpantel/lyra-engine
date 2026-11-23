@@ -177,7 +177,8 @@ module Lyra
       # the write began with: atomically) is replayed onto its row
       # (LazyProjection.refresh_records), so the write starts from the row
       # as the stream has it: an update committed in between is not lost
-      # under it. The whole catch-up is not run again there: its lock is
+      # under it. In ES-Async the events their jobs have not applied are
+      # applied, under the streams' locks (AsyncProjectionJob.project_pending). The whole catch-up is not run again there: its lock is
       # taken before the aggregate locks by every writer that reads first,
       # and taking it after them deadlocked. Then the streams of the rows
       # locked are read, in one query where it can be
@@ -198,8 +199,14 @@ module Lyra
             lock_streams!(model_class, added, write: write)
             locked.merge(added)
             # ES-Lazy: their rows as their streams have them now, under the
-            # locks, before the rows are read and written.
+            # locks, before the rows are read and written. ES-Async: the events
+            # their jobs have not applied yet, applied (under the streams'
+            # locks, as an upsert_all's are), so an update_all's SQL
+            # expression, an update_counters or an increment! starts from the
+            # row as the stream has it: an update pending in a job is not lost
+            # under it (1.0.1).
             Lyra::Projections::LazyProjection.refresh_records(model_class, added)
+            Lyra::Projections::AsyncProjectionJob.project_pending(model_class, added) if projects_pending?
           end
 
           before = nil

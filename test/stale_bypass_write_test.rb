@@ -268,8 +268,9 @@ class StaleBypassWriteTest < Minitest::Test
 
   # ES-Async: the destroy is in the store, its row still in the table
   # until the projection job runs. update_all and delete_all leave that row
-  # out, as Active Record's reach no row of a destroyed record; a stale
-  # copy's update_columns records nothing.
+  # out, as Active Record's reach no row of a destroyed record (from 1.0.1
+  # they apply the pending destroy first, which deletes it); a stale copy's
+  # update_columns records nothing.
   def test_es_async_bulk_writes_leave_out_a_row_whose_destroy_is_pending
     pending_jobs
     a = SbpItem.create!(code: "a", tag: "x")
@@ -283,10 +284,13 @@ class StaleBypassWriteTest < Minitest::Test
     assert_equal 1, SbpItem.unscoped.where(code: %w[a b]).touch_all
     refute stale.update_columns(tag: "v")
     assert_equal "v", stale.tag, "set in memory, as on a row already gone"
-    assert_equal "x", connection.select_value("SELECT tag FROM #{TABLE} WHERE id = #{Integer(b.id)}"),
-                 "the pending row is not written without an event"
+    # From 1.0.1 the bulk write first applies the events the jobs have not
+    # (AsyncProjectionJob.project_pending): b's destroy deletes its row, so
+    # nothing writes it without an event.
+    assert_nil connection.select_value("SELECT tag FROM #{TABLE} WHERE id = #{Integer(b.id)}"),
+               "the pending destroy applied, the row is not written without an event"
     assert_same stale, stale.delete
-    assert_equal 2, connection.select_value("SELECT count(*) FROM #{TABLE}").to_i, "the destroy's job deletes the row"
+    assert_equal 1, connection.select_value("SELECT count(*) FROM #{TABLE}").to_i, "b's row went with its destroy"
     assert_equal %i[created destroyed], operations(b.id)
     assert_equal %i[created updated updated], operations(a.id)
 

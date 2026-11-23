@@ -507,7 +507,12 @@ runs. What can still deadlock: raw `FOR UPDATE` SQL and an eager-loading
 locking read, which take rows before aggregate locks; a record that starts to
 match such a read more than twice while it runs; and the fallback when no second connection
 is free in the pool (or the connection is pinned, as in transactional tests),
-where the catch-up runs in the transaction as in 1.0.0. In `REPEATABLE READ`
+where the catch-up runs in the transaction as in 1.0.0. That fallback holds the
+catch-up lock until the transaction ends, so every other reader's catch-up
+waits for that commit; the transaction's later reads catch up in it again, and
+a catch-up on a connection of its own waits at most 1 s for the lock, then runs
+in its reader's transaction, so a wait cycle through a fallback is a deadlock
+PostgreSQL detects (`ActiveRecord::Deadlocked`), not a hang. In `REPEATABLE READ`
 and `SERIALIZABLE` the catch-up also runs in the transaction, as in 1.0.0, so
 that the transaction's snapshot sees the rows it applies.
 
@@ -533,6 +538,8 @@ that the transaction's snapshot sees the rows it applies.
    ```
 3. Keep transactions short. In ES-Lazy, read what you need before the
    transaction, or before its first write.
+4. In ES-Lazy, give the pool a connection more for every thread that reads
+   inside transactions (twice the threads), so the catch-up rarely falls back.
 
 ---
 

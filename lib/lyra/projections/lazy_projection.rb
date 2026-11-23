@@ -98,6 +98,16 @@ module Lyra
       # the lock's holder replays the record itself (bring_locked_up_to_date).
       SKIP_LOCKED_WAIT = "100ms"
 
+      # How long the catch-up on its own connection waits for the catch-up
+      # lock (1.0.1). The reader waits for that connection in Ruby, where
+      # PostgreSQL's deadlock detector cannot see the wait: a holder that is
+      # waiting for this reader (a catch-up that fell back to its reader's
+      # transaction, and holds the lock to that commit) would never let it go.
+      # After the wait, the catch-up runs in the reader's own transaction,
+      # where every wait is PostgreSQL's to see: a cycle becomes a detected,
+      # retryable deadlock (ActiveRecord::Deadlocked), not a hang.
+      OWN_LOCK_WAIT = "1s"
+
       # How many times a locking load runs again for records that started to
       # match after its keys were read (lock_selection).
       SELECTION_RECHECKS = 2
@@ -151,7 +161,7 @@ module Lyra
               # show rows another connection's catch-up commits later), the
               # catch-up runs here, as in 1.0.0.
               if !connection.transaction_open? || snapshot_isolation?(connection)
-                next ActiveRecord::Base.transaction { catch_up_to(connection, target) }
+                next catch_up_here(connection, target)
               end
               # Inside a transaction (design c): only its own events left, which
               # the reader applies itself, or a catch-up of the others' first.
@@ -288,20 +298,50 @@ module Lyra
         # pinned connection in transactional tests, a full pool), the catch-up
         # runs in the reader's transaction, as in 1.0.0.
         def catch_up_on_own_connection(connection, target)
+          # A transaction that took the catch-up lock in an earlier fallback
+          # holds it to its commit: its catch-up runs here again, at once. On
+          # a connection of its own it would wait for its own transaction.
+          return catch_up_here(connection, target) + apply_own_writes(connection) if holds_catch_up_lock?(connection)
+
           applied = Lyra::OwnConnection.run(ActiveRecord::Base, wait_for_connection: false) do |inline|
-            if inline
-              ActiveRecord::Base.transaction { catch_up_to(connection, target) }
-            else
+            next catch_up_here(connection, target) if inline
+
+            begin
               Thread.current[:lyra_lazy_catching_up] = true
               ActiveRecord::Base.with_connection do |own|
                 own.uncached do
                   own_target = catch_up_target(own)
-                  own_target ? own.transaction { catch_up_to(own, own_target, skip_locked: true) } : 0
+                  next 0 unless own_target
+
+                  own.transaction do
+                    own.execute("SET LOCAL lock_timeout = '#{OWN_LOCK_WAIT}'") if own.adapter_name.match?(/postgres/i)
+                    catch_up_to(own, own_target, skip_locked: true)
+                  end
                 end
               end
+            rescue ActiveRecord::LockWaitTimeout
+              :waited
             end
           end
+          applied = catch_up_here(connection, target) if applied == :waited
           applied.to_i + apply_own_writes(connection)
+        end
+
+        # The catch-up in the reader's connection: outside a transaction, a
+        # short one of its own; inside one (the fallback), in it, holding the
+        # catch-up lock to the reader's commit, which is remembered for its
+        # later reads (holds_catch_up_lock?).
+        def catch_up_here(connection, target)
+          applied = ActiveRecord::Base.transaction { catch_up_to(connection, target) }
+          Thread.current[:lyra_lazy_lock_held] = outermost(connection) if connection.transaction_open?
+          applied
+        end
+
+        # Whether this thread's open transaction on +connection+ took the
+        # catch-up lock (catch_up_here), which it holds until it ends.
+        def holds_catch_up_lock?(connection)
+          held = Thread.current[:lyra_lazy_lock_held]
+          held && connection.transaction_open? && held.equal?(outermost(connection))
         end
 
         # Whether a locking read (lock!, with_lock, lock.find) takes its records'
