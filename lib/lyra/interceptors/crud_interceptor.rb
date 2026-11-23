@@ -1099,7 +1099,7 @@ module Lyra
 
         changed = changed_attribute_names_to_save
         # Nothing built for an update that sets no indexed column.
-        return nil unless changed.intersect?(Lyra::Projections::UniqueIndexes.columns(self.class))
+        return nil unless changed.intersect?(Lyra::Projections::UniqueIndexes.watched_columns(self.class))
 
         written = changed.to_h { |name| [name, read_attribute(name)] }
         Lyra::Projections::UniqueIndexes.update_claims(self.class, id_in_database, written)

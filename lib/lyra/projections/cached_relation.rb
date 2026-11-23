@@ -974,6 +974,7 @@ end
 
       def rebuild_recipe=(recipe)
         @rebuild = recipe && [self, recipe]
+        @built_generation = recipe && CachedRelation.generation
       end
 
       # Whether the application has loaded the records (to_a, each, ...), as
@@ -4278,6 +4279,82 @@ end
           @relation.where_associated(*associations)
         end
       end
+
+      # =========================================================================
+      # Freshness (1.0.1)
+      # =========================================================================
+
+      # A relation is evaluated when it is built; Active Record's runs its query
+      # when it is first read. A relation built before a write, and read after
+      # it, held the records as they were (a record created in between was
+      # missing from its reads and its count). Each record event appended in
+      # ES-NoProj advances a counter of this process (at once, for the writer's
+      # own transaction, and again at its commit, for the other threads), and a
+      # relation that can be built again and has not been loaded is evaluated
+      # again, at its first use, if the counter moved since it was built. A
+      # loaded relation keeps its records, as in Active Record; reset and reload
+      # read again in any case. Writes of other processes are seen by a relation
+      # built after them, not by one built before (no query is added per read).
+      @generation = 0
+      @generation_lock = Mutex.new
+
+      class << self
+        def generation = @generation
+
+        # Called by Lyra.append_events for each record event in ES-NoProj.
+        def written!
+          advance = -> { @generation_lock.synchronize { @generation += 1 } }
+          advance.call
+          ActiveRecord::Base.connection_pool.active_connection&.transaction_open? &&
+            Lyra::OwnConnection.after_commit(ActiveRecord::Base, &advance)
+        end
+
+        def tracks_writes? = Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
+      end
+
+      # Built again from its recipe, at its first use, if a record event was
+      # appended since it was built (see Freshness).
+      def freshen!
+        return if @freshening || @loaded_records || @built_generation.nil? || @built_generation == CachedRelation.generation
+
+        recipe = rebuild_recipe or return
+        @freshening = true
+        fresh = evaluate_relation(recipe)
+        fresh ? replace_with!(fresh) : (@built_generation = CachedRelation.generation)
+      ensure
+        @freshening = false if recipe
+      end
+
+      # Every public method, and method_missing, first freshens the relation;
+      # outermost, so the modules prepended above read fresh records too. Only
+      # at a thread's outermost call on a relation: inside one (Lyra's own bulk
+      # write appending its events, then reading the groups it built), the
+      # records it works on stay the ones it chose. A relation read in a block
+      # the application passes to one (each, find_each) is read as it was built.
+      RELATION_DEPTH = :lyra_cached_relation_depth
+      FRESHNESS_EXEMPT = %i[freshen! loaded loaded? loaded_records? rebuild_recipe rebuild_recipe= inherit_rebuild
+                            query_relation model_class klass equal? eql? == hash object_id class is_a? kind_of?
+                            instance_of? respond_to? frozen? nil? itself dup clone tap then].freeze
+      Freshness = Module.new do
+        (CachedRelation.public_instance_methods - Object.public_instance_methods - FRESHNESS_EXEMPT).each do |name|
+          define_method(name) do |*args, **kwargs, &block|
+            depth = Thread.current[RELATION_DEPTH].to_i
+            freshen! if depth.zero?
+            Thread.current[RELATION_DEPTH] = depth + 1
+            begin
+              super(*args, **kwargs, &block)
+            ensure
+              Thread.current[RELATION_DEPTH] = depth
+            end
+          end
+        end
+        define_method(:method_missing) do |name, *args, **kwargs, &block|
+          freshen! if Thread.current[RELATION_DEPTH].to_i.zero?
+          super(name, *args, **kwargs, &block)
+        end
+        private :method_missing
+      end
+      prepend Freshness
     end
   end
 end

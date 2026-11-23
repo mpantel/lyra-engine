@@ -43,6 +43,8 @@ module Lyra
     end
     stored = store_events(events, stream_name: stream_name, store: store)
     note_own_writes(events) if Projections::LazyProjection.active?
+    # ES-NoProj: a relation built before this write is read again (CachedRelation, Freshness).
+    Projections::CachedRelation.written! if Projections::CachedRelation.tracks_writes? && Array(events).any? { record_operation(_1) }
     stored
   end
 

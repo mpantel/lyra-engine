@@ -69,7 +69,8 @@ class EsNoprojUniqueWritesTest < Minitest::Test
   def test_the_indexes_es_noproj_checks
     indexes = Lyra::Projections::UniqueIndexes.of(UwPerson).map { [_1.columns, _1.nulls_not_distinct] }
 
-    assert_equal [[%w[amount], false], [%w[email], false], [%w[shop_id code], false]], indexes.sort
+    # The partial index on name (name = 'only') is checked from 1.0.1 (its condition compiles).
+    assert_equal [[%w[amount], false], [%w[email], false], [%w[name], false], [%w[shop_id code], false]], indexes.sort
   end
 
   # A create with a value a live record holds raises, after the callbacks
@@ -698,9 +699,11 @@ class EsNoprojUniqueWritesTest < Minitest::Test
     Lyra::Projections::ValueDigest.reset!
   end
 
-  # The unique indexes ES-NoProj does not enforce are named once.
+  # The unique indexes ES-NoProj does not enforce are named once: here a
+  # partial index whose condition Lyra does not evaluate (IN).
   def test_the_indexes_left_out_are_named_once
     use(:es_noproj)
+    connection.add_index(TABLE, :code, unique: true, where: "code IN ('x', 'y')", name: "index_lyra_uw_people_code_in")
     logged = StringIO.new
     previous = Rails.logger
     Rails.logger = ActiveSupport::Logger.new(logged)
@@ -709,7 +712,8 @@ class EsNoprojUniqueWritesTest < Minitest::Test
     Lyra::Projections::UniqueIndexes.send(:read_indexes, UwPerson) # read again: not named again
 
     assert_equal 1, logged.string.scan("does not enforce").size, logged.string
-    assert_match(/index_lyra_uw_people_on_name.*partial/, logged.string)
+    assert_match(/index_lyra_uw_people_code_in \(partial, a condition Lyra does not evaluate\)/, logged.string)
+    refute_match(/index_lyra_uw_people_on_name/, logged.string)
   ensure
     Rails.logger = previous
   end

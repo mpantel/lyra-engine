@@ -54,6 +54,20 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 ### Fixed
+- **Partial unique indexes are enforced in the event-sourcing modes** where their condition is one
+  PostgreSQL writes back in a common form: a column `IS [NOT] NULL`, a column `=` or `<>` a literal
+  (casts on either side), a boolean column alone or under `NOT`, joined by `AND`. A record outside the
+  index claims nothing, and a holder outside it holds nothing, as the table's index decides; ES-Sync
+  adds the index's own `WHERE` to its lookup. Before, every partial index was skipped: ES-NoProj saved
+  the duplicate, and in ES-Async and ES-Lazy it reached the log and its projection met the index. A
+  condition with `OR`, `IN`, a function or another column is still left to the table (named in the
+  log).
+- **ES-NoProj: a relation built before a write and read after it sees the write,** as Active Record's
+  does (it runs its query at the first read). ES-NoProj evaluated a relation when it was built, so a
+  record created or changed in between was missing from its reads and its count. A relation that has
+  not been loaded is now evaluated again at its first use if a record event was appended in this
+  process since it was built; a loaded one keeps its records until `reset` or `reload`, as in Active
+  Record. A write of another process is seen by a relation built after it.
 - **ES-Async: a record-level `touch` or `update_columns` is no longer written over by a projection
   job.** Such a write took the record's aggregate lock but not its stream's, so a job in its last
   pass (the stream's lock, the events after its checkpoint, then the row) could read the stream

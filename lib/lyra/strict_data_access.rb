@@ -296,7 +296,7 @@ module Lyra
       indexes = Lyra::Projections::UniqueIndexes
       return unless indexes.enforced?(klass) && indexes.of(klass).any?
 
-      written = lyra_given_columns(attributes).slice(*indexes.columns(klass))
+      written = lyra_given_columns(attributes).slice(*indexes.watched_columns(klass))
       return if written.empty?
 
       in_table = indexes.in_table?(klass)
@@ -318,7 +318,7 @@ module Lyra
       indexes = Lyra::Projections::UniqueIndexes
       return nil unless indexes.enforced?(klass) && indexes.of(klass).any?
 
-      written = given.slice(*indexes.columns(klass)).reject do |column, value|
+      written = given.slice(*indexes.watched_columns(klass)).reject do |column, value|
         held = stored ? stored[column] : attribute_in_database(column)
         indexes.key(klass, column, value) == indexes.key(klass, column, held)
       end
@@ -668,7 +668,7 @@ module Lyra
 
       scope = scope_for_create.transform_keys(&:to_s)
       defaults = klass.column_defaults
-      columns = indexes.flat_map(&:columns).uniq
+      columns = unique.watched_columns(klass)
       claims = rows.map do |row|
         values = defaults.merge(scope.merge(row.to_h.to_h { |k, v| [klass.attribute_aliases.fetch(k.to_s, k.to_s), v] }))
         given = columns.to_h { |column| [column, klass.type_for_attribute(column).cast(values[column])] }
@@ -862,13 +862,15 @@ module Lyra
 
       scope = scope_for_create.transform_keys(&:to_s)
       defaults = klass.column_defaults
-      columns = indexes.flat_map(&:columns).uniq
+      columns = unique.watched_columns(klass)
       # Each row's values, as the record would hold them.
       given = rows.map do |row|
         values = defaults.merge(scope.merge(row.to_h.to_h { |k, v| [klass.attribute_aliases.fetch(k.to_s, k.to_s), v] }))
         columns.to_h { |column| [column, klass.type_for_attribute(column).cast(values[column])] }
       end
       key_tuple = lambda do |index, values|
+        next nil unless unique.covers?(index) { values[_1] }
+
         compared = index.columns.map { |column| unique.key(klass, column, values[column]) }
         compared.any?(&:nil?) && !index.nulls_not_distinct ? nil : compared
       end

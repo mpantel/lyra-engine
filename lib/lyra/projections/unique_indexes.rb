@@ -36,7 +36,9 @@ module Lyra
     # ModelProjection.refuse_skipped_create!).
     #
     # Which indexes: unique, on columns (not an expression), not partial (no
-    # WHERE), other than the primary key, and on no column with a
+    # WHERE) unless its condition compiles (from 1.0.1, Condition: a record
+    # outside it claims nothing, and a holder outside it holds nothing), other
+    # than the primary key, and on no column with a
     # nondeterministic collation (whose equality only the database knows:
     # Uniqueness refuses such columns too). They are read from the database
     # once per model and process, again when its columns change
@@ -98,7 +100,9 @@ module Lyra
     # (and before its value locks), the events stored before its columns
     # were linked are linked (ReferenceLinks.catch_up: per column).
     module UniqueIndexes
-      Index = Struct.new(:name, :columns, :nulls_not_distinct)
+      # +where+ and +condition+: a partial index's WHERE, as PostgreSQL writes
+      # it, and compiled (Condition); nil for an index on every row.
+      Index = Struct.new(:name, :columns, :nulls_not_distinct, :where, :condition)
 
       # A value a write claims: the index, the tuple's comparison keys (nil
       # for NULL), and the values as given (for the lock and the message).
@@ -106,7 +110,164 @@ module Lyra
 
       # One model's indexes, the attribute types they were read with, and
       # when (monotonic seconds).
-      Facts = Struct.new(:types, :indexes, :columns, :read_at)
+      # +columns+: the indexes' columns (each value-linked); +watched+: those
+      # and the columns their conditions read, which decide whether a write
+      # concerns an index.
+      Facts = Struct.new(:types, :indexes, :columns, :watched, :read_at)
+
+      # The WHERE of a partial unique index, compiled (from 1.0.1) for the
+      # conditions PostgreSQL writes back for the common ones: a column IS
+      # [NOT] NULL, a column = or <> a literal (casts on either side), a
+      # boolean column alone or under NOT, joined by AND, in parentheses.
+      # Evaluated on a record's values as SQL does: a comparison with NULL is
+      # not true, so the record claims nothing there. Anything else (OR, IN, a
+      # function, another column) does not compile, and the index is left to
+      # the table as before (named in the log).
+      class Condition
+        attr_reader :columns
+
+        def self.parse(sql, klass)
+          new(sql, klass).tap(&:compile)
+        rescue ArgumentError
+          nil
+        end
+
+        def initialize(sql, klass)
+          @sql = sql.to_s
+          @klass = klass
+          @columns = []
+        end
+
+        def compile
+          @tokens = tokenize(@sql)
+          @at = 0
+          @test = expression
+          raise ArgumentError, "trailing #{@tokens[@at].inspect}" if @at < @tokens.size
+          raise ArgumentError, "no column" if @columns.empty?
+
+          unknown = @columns - @klass.attribute_types.keys
+          raise ArgumentError, "unknown #{unknown.inspect}" if unknown.any?
+
+          @columns.uniq!
+          self
+        end
+
+        # Whether a record whose values the block gives (column => value as
+        # the record holds it) is in the index.
+        def call(&values) = true.equal?(@test.call(values))
+
+        private
+
+        def tokenize(sql)
+          tokens = []
+          rest = sql.strip
+          until rest.empty?
+            m = rest.match(/\A\s*(\(|\)|::|<>|!=|=|'(?:[^']|'')*'|-?\d+(?:\.\d+)?|"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_]*)/)
+            raise ArgumentError, "at #{rest[0, 20].inspect}" unless m
+
+            tokens << m[1]
+            rest = m.post_match.lstrip
+          end
+          tokens
+        end
+
+        def peek(offset = 0) = @tokens[@at + offset]
+        def word?(token, word) = token.is_a?(String) && token.casecmp?(word)
+
+        def take(expected = nil)
+          token = @tokens[@at] or raise ArgumentError, "end"
+          raise ArgumentError, "#{token} for #{expected}" if expected && !word?(token, expected)
+
+          @at += 1
+          token
+        end
+
+        def expression
+          tests = [primary]
+          tests << (take("AND") && primary) while word?(peek, "AND")
+          ->(values) { tests.map { _1.call(values) }.then { |r| r.include?(false) ? false : (r.include?(nil) ? nil : true) } }
+        end
+
+        # A comparison, NOT, a boolean column, or a parenthesised expression.
+        def primary
+          if word?(peek, "NOT")
+            take
+            inner = primary
+            return ->(values) { (v = inner.call(values)).nil? ? nil : !v }
+          end
+          saved = @at
+          begin
+            return comparison
+          rescue ArgumentError
+            @at = saved
+          end
+          take("(")
+          inner = expression
+          take(")")
+          inner
+        end
+
+        def comparison
+          left = operand
+          if word?(peek, "IS")
+            take
+            negate = word?(peek, "NOT") && take
+            take("NULL")
+            column = left[:column] or raise ArgumentError, "IS NULL of a literal"
+            return ->(values) { values.call(column).nil? == !negate }
+          end
+          if %w[= <> !=].include?(peek)
+            op = take
+            right = operand
+            column, literal = left[:column] ? [left[:column], right] : [right[:column], left]
+            raise ArgumentError, "two columns" if column.nil? || literal[:column]
+
+            wanted = canonical(column, literal[:value])
+            equal = op == "="
+            return lambda do |values|
+              value = values.call(column)
+              value.nil? ? nil : (canonical(column, value) == wanted) == equal
+            end
+          end
+          column = left[:column] or raise ArgumentError, "a literal alone"
+          raise ArgumentError, "not boolean" unless @klass.type_for_attribute(column).type == :boolean
+
+          ->(values) { (v = values.call(column)).nil? ? nil : v == true }
+        end
+
+        # A column or a literal, in parentheses or not, with casts after it.
+        def operand
+          if peek == "("
+            take
+            inner = operand
+            take(")")
+          else
+            token = take
+            inner =
+              if token.start_with?("'") then { value: token[1..-2].gsub("''", "'") }
+              elsif token.match?(/\A-?\d/) then { value: token }
+              elsif word?(token, "true") || word?(token, "false") then { value: token.casecmp?("true") }
+              elsif %w[( ) :: = <> !=].include?(token) || %w[and or not is null in like].include?(token.downcase)
+                raise ArgumentError, "unexpected #{token}"
+              else
+                name = token.start_with?('"') ? token[1..-2].gsub('""', '"') : token
+                @columns << name
+                { column: name }
+              end
+          end
+          while peek == "::"
+            take
+            take # the type name (text, integer, character varying is written as one word here)
+            take while peek&.match?(/\A(varying|precision|without|with|time|zone)\z/i)
+          end
+          inner
+        end
+
+        def canonical(column, value)
+          Uniqueness.canonical(@klass, column, @klass.type_for_attribute(column).cast(value))
+        end
+      end
+
 
       @facts = ObjectSpace::WeakKeyMap.new
       @lock = Mutex.new
@@ -136,6 +297,17 @@ module Lyra
 
         # The columns of those indexes, whose values are linked.
         def columns(klass) = facts(klass).columns
+
+        # The columns that decide whether a write concerns an index: its columns
+        # and those its condition reads (a partial index).
+        def watched_columns(klass) = facts(klass).watched
+
+        # The columns of +index+ and of its condition.
+        def index_columns(index) = index.condition ? (index.columns + index.condition.columns).uniq : index.columns
+
+        # Whether a record whose values the block gives is in +index+ (always,
+        # unless it is partial and its condition is not true).
+        def covers?(index, &values) = index.condition.nil? || index.condition.call(&values)
 
         # The comparison key of +value+ (as the record holds it) in +column+;
         # nil for NULL. A citext column's is its LOWER, as the database
@@ -183,7 +355,8 @@ module Lyra
         # NULLS NOT DISTINCT.
         def claims(klass, touched = nil)
           of(klass).filter_map do |index|
-            next unless touched.nil? || index.columns.any? { touched.include?(_1) }
+            next unless touched.nil? || index_columns(index).any? { touched.include?(_1) }
+            next unless covers?(index) { |column| yield column }
 
             values = index.columns.map { yield _1 }
             keys = index.columns.each_with_index.map { |column, i| key(klass, column, values[i]) }
@@ -200,7 +373,7 @@ module Lyra
         # +current+: that state, if the caller has read it. Called under the
         # record's aggregate lock.
         def update_claims(klass, id, written, current: nil)
-          indexes = of(klass).select { |index| index.columns.any? { written.key?(_1) } }
+          indexes = of(klass).select { |index| index_columns(index).any? { written.key?(_1) } }
           return [] if indexes.empty?
 
           stored = lambda do |column|
@@ -208,6 +381,8 @@ module Lyra
             current[column]
           end
           indexes.filter_map do |index|
+            next unless covers?(index) { |column| written.key?(column) ? written[column] : stored.(column) }
+
             values = index.columns.map { |column| written.key?(column) ? written[column] : stored.(column) }
             keys = index.columns.each_with_index.map { |column, i| key(klass, column, values[i]) }
             next if keys.any?(&:nil?) && !index.nulls_not_distinct
@@ -226,7 +401,7 @@ module Lyra
           return {} unless attributes
 
           reader = TypedValues::EventReader.new(table)
-          columns(table).to_h { |column| [column, reader.read(attributes, column)] }
+          watched_columns(table).to_h { |column| [column, reader.read(attributes, column)] }
         end
 
         # The value locks of +claims+, all or none, after the model's value
@@ -281,7 +456,8 @@ module Lyra
             fold_ahead(table, claim.index, records, reader)
             pk = table.primary_key
             held = records.filter_map do |attributes|
-              holds = claim.index.columns.each_with_index.all? { |column, i| key(table, column, reader.read(attributes, column)) == claim.keys[i] }
+              holds = claim.index.columns.each_with_index.all? { |column, i| key(table, column, reader.read(attributes, column)) == claim.keys[i] } &&
+                      covers?(claim.index) { |column| reader.read(attributes, column) }
               attributes[pk].to_s if holds
             end
             [held, named - held]
@@ -391,7 +567,9 @@ module Lyra
           conditions = claim.index.columns.zip(claim.values).to_h
           pk = table.primary_key
           Lyra::PurposeBoundReads.internal(INTERNAL) do
-            table.uncached { table.unscoped.where(conditions).limit(2).pluck(pk) }.map(&:to_s)
+            relation = table.unscoped.where(conditions)
+            relation = relation.where(Arel.sql(claim.index.where)) if claim.index.where
+            table.uncached { relation.limit(2).pluck(pk) }.map(&:to_s)
           end
         end
 
@@ -400,7 +578,7 @@ module Lyra
         # row is the record's: written in the writers' transactions, and
         # locked by this update (CrudInterceptor#lyra_lock_own_row).
         def row_state(table, id)
-          wanted = columns(table)
+          wanted = watched_columns(table)
           return {} if wanted.empty?
 
           values = Lyra::PurposeBoundReads.internal(INTERNAL) do
@@ -470,7 +648,8 @@ module Lyra
           indexes = read_indexes(table)
           columns = indexes.flat_map(&:columns).uniq.freeze
           gained = found ? columns - found.columns : []
-          fresh = Facts.new(types, indexes, columns, now).freeze
+          watched = indexes.flat_map { index_columns(_1) }.uniq.freeze
+          fresh = Facts.new(types, indexes, columns, watched, now).freeze
           @lock.synchronize { @facts[table] = fresh }
           ReferenceLinks.unlinked!(table, gained) if gained.any?
           fresh
@@ -481,9 +660,10 @@ module Lyra
           table.with_connection do |connection|
             listed = connection.indexes(table.table_name)
             unique = listed.select(&:unique)
-            candidates = unique.select { |index| index.columns.is_a?(Array) && index.where.nil? }
+            conditions = unique.to_h { |index| [index.name, index.where && Condition.parse(index.where, table)] }
+            candidates = unique.select { |index| index.columns.is_a?(Array) && (index.where.nil? || conditions[index.name]) }
             nondeterministic = nondeterministic_columns(connection, table, candidates.flat_map(&:columns))
-            skipped = (unique - candidates).map { |index| [index.name, index.where ? "partial" : "an expression"] }
+            skipped = (unique - candidates).map { |index| [index.name, index.columns.is_a?(Array) ? "partial, a condition Lyra does not evaluate" : "an expression"] }
             indexes = candidates.filter_map do |index|
               columns = index.columns.map(&:to_s)
               next if columns == primary_key
@@ -493,7 +673,7 @@ module Lyra
                 next
               end
               nulls = index.respond_to?(:nulls_not_distinct) && index.nulls_not_distinct ? true : false
-              Index.new(index.name, columns.freeze, nulls).freeze
+              Index.new(index.name, columns.freeze, nulls, index.where, conditions[index.name]).freeze
             end.freeze
             warn_unenforced(table, skipped)
             indexes
