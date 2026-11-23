@@ -38,6 +38,8 @@ class LazyProjectionTest < Minitest::Test
   def teardown
     return unless defined?(LazyArticle)
 
+    # A holder a failed test left waiting would keep its transaction open.
+    (@holders || []).each { |h| h.go << true; h.thread.join(5) }
     Lyra.config.projection_mode = :sync
     clean
   end
@@ -208,10 +210,13 @@ class LazyProjectionTest < Minitest::Test
   end
 
   # The freshness check before every read reads the checkpoint and the
-  # newest event id in one statement; it took two.
+  # newest event id in one statement; it took two. (With no gap open: while
+  # one is, a second asks whether its event is visible.)
   def test_an_up_to_date_read_checks_the_log_in_one_query
     author = LazyAuthor.create!(name: "Ann", email: "ann@example.com")
     LazyAuthor.count
+    # Less the ids of earlier tests' events, which a fresh checkpoint watches.
+    ActiveRecord::Base.connection.execute("UPDATE #{LazyProjection::TABLE} SET gaps = '{}'")
 
     sql = statements { assert_equal "Ann", LazyAuthor.find(author.id).name }
 
@@ -291,10 +296,36 @@ class LazyProjectionTest < Minitest::Test
     LazyAuthor.create!(name: "Bea", email: "bea@example.com") # a later id, committed
     holder = hold_catch_up # passes the reader's event, listed as missing
     go << true
-    wait_until_waiting_on_the_lock(reader)
+    wait_until_waiting_on_the_lock(reader, own_connection: true)
 
     holder.release
     assert_equal %w[Ann Bea Own], reader.value
+  end
+
+  # An event store emptied without this table, whose ids start again: its new
+  # events reach the old checkpoint's position. Compared by position alone (as
+  # 1.0.0 did) they looked applied, and nothing was projected; the checkpoint
+  # now keeps its event's id, sees another event there, and starts over.
+  def test_a_checkpoint_whose_event_is_gone_starts_over
+    3.times { |i| LazyAuthor.create!(name: "Old #{i}", email: "old#{i}@example.com") }
+    LazyAuthor.count
+    position = LazyProjection.checkpoint.first
+    conn = ActiveRecord::Base.connection
+    %w[event_store_events_in_streams event_store_events articles users].each { conn.execute("DELETE FROM #{_1}") }
+    conn.execute("DELETE FROM #{Lyra::StreamHeads::TABLE}") if conn.table_exists?(Lyra::StreamHeads::TABLE)
+    sequence = conn.select_value("SELECT pg_get_serial_sequence('event_store_events', 'id')")
+    restore = conn.select_value("SELECT last_value FROM #{sequence}").to_i
+    conn.execute("SELECT setval(#{conn.quote(sequence)}, 1, false)")
+    names = []
+    while conn.select_value("SELECT COALESCE(MAX(id), 0) FROM event_store_events").to_i < position
+      names << "New #{names.size}"
+      LazyAuthor.create!(name: names.last, email: "new#{names.size}@example.com")
+    end
+
+    assert_equal names.sort, LazyAuthor.order(:name).pluck(:name)
+  ensure
+    # The ids go on from where they were, for the tests that follow.
+    conn&.execute("SELECT setval(#{conn.quote(sequence)}, #{[restore, 1].max}, true)") if sequence
   end
 
   def test_lazy_mode_needs_event_sourcing_mode
@@ -336,8 +367,11 @@ class LazyProjectionTest < Minitest::Test
     end.tap { |t| t.report_on_exception = false }
   end
 
-  # A reader in another connection that has caught up in its own transaction
-  # and keeps it open: the catch-up lock stays taken until release.
+  # A catch-up under way on another connection: it holds the catch-up lock and
+  # has applied what was pending, but has not committed, until release. (A
+  # reader's catch-up no longer holds the lock to the reader's commit, from
+  # 1.0.1: it commits at once on a connection of its own, so the holder runs
+  # the catch-up's own steps.)
   Holder = Struct.new(:thread, :go) do
     def release
       go << true
@@ -349,23 +383,31 @@ class LazyProjectionTest < Minitest::Test
     held = Queue.new
     go = Queue.new
     thread = in_thread do
-      ActiveRecord::Base.transaction do
-        LazyAuthor.count
+      connection = ActiveRecord::Base.connection
+      connection.transaction do
+        Thread.current[:lyra_lazy_catching_up] = true
+        LazyProjection.send(:lock!, connection)
+        LazyProjection.send(:apply_pending, connection)
         held << true
         go.pop
+      ensure
+        Thread.current[:lyra_lazy_catching_up] = nil
       end
     end
     held.pop
-    Holder.new(thread, go)
+    Holder.new(thread, go).tap { (@holders ||= []) << _1 }
   end
 
   # Until +reader+'s session waits for an advisory lock it has not been
   # granted. Only that session, in this database: pg_locks lists the waits
   # of the whole cluster, and another session's wait (another test run,
   # another database) must not count as the reader's.
-  def wait_until_waiting_on_the_lock(reader)
+  # A reader inside a transaction catches up on a connection of its own
+  # (1.0.1), so with +own_connection+ the wait is any session's in this
+  # database.
+  def wait_until_waiting_on_the_lock(reader, own_connection: false)
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
-    until waiting_on_an_advisory_lock?(reader.thread_variable_get(:pid))
+    until waiting_on_an_advisory_lock?(own_connection ? :any : reader.thread_variable_get(:pid))
       flunk "no reader waits on the catch-up lock" if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
       sleep 0.01
     end
@@ -376,7 +418,7 @@ class LazyProjectionTest < Minitest::Test
 
     raw(<<~SQL).to_i.positive?
       SELECT count(*) FROM pg_locks
-      WHERE locktype = 'advisory' AND NOT granted AND pid = #{Integer(pid)}
+      WHERE locktype = 'advisory' AND NOT granted#{pid == :any ? "" : " AND pid = #{Integer(pid)}"}
         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
     SQL
   end

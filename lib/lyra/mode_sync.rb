@@ -31,12 +31,20 @@ module Lyra
   # process's own in-process changes through the raw config.mode = setter
   # (tests, benchmark harnesses) are left alone.
   #
+  # A process whose boot check did not run (a rake task; any process with the
+  # gate off) has not looked when it boots, and may have booted in a stale
+  # mode: at its first check it adopts the application's, unless it has set
+  # its mode since boot (any mode, the one it booted in too) and the switch is
+  # older than the boot (remember_boot!). The configuration applied again by a
+  # code reload is not a set.
+  #
   # config.mode_sync: nil (default) follows the Mode Transition Safety gate
   # (on everywhere but the test environment); true; false.
   module ModeSync
     @mutex = Mutex.new
     @last_seen_id = nil
     @checked_at = nil
+    @boot = nil
 
     class << self
       attr_reader :last_seen_id
@@ -103,6 +111,12 @@ module Lyra
             return nil
           end
 
+          # After the two touch checks, which must hold whatever set the mode.
+          if set_since_boot?(row)
+            @last_seen_id = row[:id]
+            return nil
+          end
+
           if (refusal = ModeTransition.adoption_refusal(row))
             @last_seen_id = row[:id]
             Rails.logger.error("Lyra: did not adopt the application's mode #{row[:config]}; this process stays in " \
@@ -127,14 +141,78 @@ module Lyra
         end
       end
 
+      # At the end of initialization (Engine), where the boot check marked
+      # nothing seen: the latest applied id then, from which on the process's
+      # own sets are its own (mode_set!). Not seen!: a process that merely
+      # booted still adopts that row.
+      # It creates no table and keeps no connection it opened (db:drop needs
+      # the database free of sessions). When the database cannot be read,
+      # nothing is remembered, and the first check adopts as it finds.
+      def remember_boot! # :nodoc:
+        @boot = nil
+        return if @last_seen_id || !enabled?
+
+        id = latest_id_at_boot
+        # Assigned last: loading Active Record may run the application's
+        # configuration, which is not a set.
+        @boot = { id: id, set: false }
+      rescue StandardError => e
+        Rails.logger&.debug("Lyra: the applied mode not read at boot (#{e.class}: #{e.message})")
+      end
+
+      def forget_boot! # :nodoc:
+        @boot = nil
+      end
+
+      # The process set its mode (Configuration's mode setters), unless the
+      # code reload in progress on this thread applies the configuration again.
+      def mode_set! # :nodoc:
+        boot = @boot
+        return if boot.nil? || boot[:set] || Thread.current[:lyra_reapplying_configuration]
+
+        @boot = boot.merge(set: true)
+      end
+
+      # Around the reloader's prepare! (a code reload's to_prepare blocks).
+      def reapplying_configuration # :nodoc:
+        previous = Thread.current[:lyra_reapplying_configuration]
+        Thread.current[:lyra_reapplying_configuration] = true
+        yield
+      ensure
+        Thread.current[:lyra_reapplying_configuration] = previous
+      end
+
       def reset!
         @mutex.synchronize do
           @last_seen_id = nil
           @checked_at = nil
+          @boot = nil
         end
       end
 
       private
+
+      # Whether this process set its mode after a boot that +row+ predates.
+      def set_since_boot?(row)
+        @boot && @boot[:set] && row[:id] <= @boot[:id]
+      end
+
+      # 0 without a table or a row.
+      def latest_id_at_boot
+        pool = ActiveRecord::Base.connection_pool
+        connected = pool.connected?
+        # SQLite creates the file on connecting, and db:create would find it.
+        db = pool.db_config
+        return 0 if !connected && db.adapter == "sqlite3" && !File.exist?(File.expand_path(db.database, Rails.root))
+
+        pool.with_connection do |c|
+          next 0 unless c.table_exists?(ModeTransition::TABLE)
+
+          c.select_value("SELECT MAX(id) FROM #{ModeTransition::TABLE} WHERE kind = 'applied'").to_i
+        end
+      ensure
+        pool.disconnect if connected == false
+      end
 
       def due_in
         return 0 unless @checked_at
@@ -155,6 +233,14 @@ module Lyra
           ModeSync.maybe_sync!
           super(*args, **kwargs, &block)
         end
+      end
+    end
+
+    # Prepended onto the application's reloader: a code reload applies the
+    # configuration again, which is no set of the process's own.
+    module Reloads
+      def prepare!
+        ModeSync.reapplying_configuration { super }
       end
     end
 

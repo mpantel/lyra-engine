@@ -7,6 +7,271 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - unreleased
+
+A patch release of `orfeas_lyra`; `orfeas_pam_dsl` and `orfeas_petri_flow` stay at 1.0.0. It adds
+one table of Lyra's own, `lyra_stream_heads`, and one column, `lyra_projection_checkpoints.event_id`,
+each created on first use like the others or by the new install migration, and three settings:
+`stream_heads` (on), `check_effects` (off) and `mode_transition_settle_timeout`. A record's history is
+checked where its events are appended; in ES-Lazy a catch-up no longer holds its lock to the
+application's commit; a read under a row lock sees every committed write of its records and keeps
+out the others until it ends, in ES-Async, ES-Lazy and ES-NoProj; and the mode gate waits for the
+writes in flight (see Fixed). What remains is listed under Known issues.
+
+### Added
+- **`config.check_effects`, opt-in (off by default; `LYRA_CHECK_EFFECTS=1`): the effect clause of
+  Hypothesis H checked at the write.** In Hijack and ES-Sync the row is written in the same
+  transaction as the event. With the setting on, after each create, update or destroy through
+  callbacks, Lyra compares the record's row with the replay of its stream, as the mode gate and
+  DualView compare them, and raises `Lyra::EffectMismatchError` when they differ (a trigger, a
+  default the database computes, a type that does not round-trip), so the write and its event roll
+  back together. Off, such a write goes through as in 1.0.0 and DualView finds the difference
+  later. Monitor takes its event from what its table did, and ES-Async, ES-Lazy and ES-NoProj
+  write the row later or never, so the check does not apply there; writes that skip callbacks
+  (`update_columns`, `update_all`, `insert_all`) are not checked, nor are a soft-deleted record (its
+  stream ends in a destroy while its row stays, by design) and a model on another database than
+  the event store; an STI record is compared by its base class, as its stream names it. Cost: a read of the row and of
+  the stream and a replay per write. The benchmark campaign runs with it off.
+- **`bin/rails generate lyra:install`** writes one migration with Lyra's own tables
+  (`lyra_mode_transitions`, `lyra_projection_checkpoints`, `lyra_async_checkpoints`, `lyra_rights`,
+  `lyra_consents`, `lyra_stream_heads`), with the definitions Lyra uses when it creates them at run
+  time, and an index on Rails Event Store's `event_store_events_in_streams (stream, id)`, which
+  serves Lyra's backward reads by id (Rails Event Store 3 creates it for a new event store; event
+  stores created by earlier versions lack it; on PostgreSQL it is built concurrently). It also
+  writes `config/initializers/lyra.rb` unless the application has one (`--skip-initializer`), and
+  takes `--database` for another database's migrations path. With the migration the tables are in
+  `db/schema.rb` or `db/structure.sql`, so `db:schema:load` and test databases have them, and the
+  application's database role needs no right to create tables. Creation on first use stays: without
+  the migration Lyra creates each table the first time it needs it, as in 1.0.0, and with it finds
+  the table there and does nothing. Every statement is "if not exists", so the migration runs where
+  Lyra already created the tables, leaves them as they are, and gives a `lyra_mode_transitions`
+  created by an earlier version the columns later versions added; rolling it back changes nothing.
+  **Upgrading:** run the generator and `bin/rails db:migrate`; the stream heads need no backfill, as
+  each record's head is built from its events the first time its stream is met. A test creates
+  every table both ways and compares them in PostgreSQL's catalog (columns, types, nulls, defaults,
+  indexes, constraints), and loads them from a dumped `db/schema.rb`.
+
+### Fixed
+- **DualView reads the row without the model's default scope, and so do ES-Sync's projection
+  writes.** DualView, and with it the mode gate, the sampler and `lyra:repair`, looked the row up
+  through the model's default scope, so a row it hides (a soft-deleted one) was reported missing
+  while its events described it; ES-Sync's projection updated and deleted through the same scope,
+  so an update or a destroy of such a record left its row as it was. Both read and write the row
+  unscoped now.
+- **A read-modify-write under a row lock no longer loses an update in ES-Async, ES-Lazy and
+  ES-NoProj.** Two transactions that each read a record with `lock!`, `with_lock` or
+  `Model.lock.find(id)` and increment it could give 1 instead of 2, with no error: in ES-Async the
+  row lock read a row waiting for its projection job, in ES-NoProj the lock locked nothing (there
+  is no row), and in ES-Lazy the catch-up ran before the lock was granted. Now such a read first
+  takes the records' aggregate locks, which every writer of them takes before its append; in
+  ES-Async also the records' stream locks, under which their rows are brought up to date with
+  the events no job has applied yet; then it reads (in ES-Lazy, under the row lock and the
+  records' stream heads, the records behind their streams are replayed and read again). A writer
+  of those records waits until the reader's transaction ends. The order (the aggregate lock, the
+  stream's, then the row) is the one writes that skip callbacks take, and it removes ES-Async's
+  deadlocks between `with_lock` followed by a write and a write that skips callbacks or a
+  read-your-writes projection (checked on `Lyra::Verification::AsyncLockOrderNet`). A locking read
+  whose keys are not known before it runs (`Model.lock.where(...)`, a `lock` with a join) reads the
+  keys it selects first, without the lock, takes their locks, then runs; a record that started to
+  match in between is locked and the read runs again (up to twice). In ES-NoProj a locked relation
+  (`lock`, carried to what is built from it, as Active Record's is) locks its records before its
+  first read and reads them again under the locks. Hijack, ES-Sync and Monitor, whose row lock is
+  the lock, are unchanged.
+- **ES-Lazy: a checkpoint whose event is gone is no longer trusted.** An event store emptied or
+  restored without `lyra_projection_checkpoints`, whose new events reached the old checkpoint's
+  position, was not caught up: the guard compared positions only, so the new events below the
+  position looked applied. The checkpoint now keeps the id of the event at its position (a new
+  column, `event_id`, added at run time to a table an earlier version created, and by the install
+  migration), and a checkpoint whose event is no longer there is started over, with a warning, as
+  one past the newest event was. A checkpoint written by 1.0.0 names no event and is taken as
+  before until the next catch-up moves it.
+- **A record's history is now checked where its events are appended (stream heads).** Lyra 1.0.0 did
+  not check that a record's operations are valid for the ORM, an assumption its correctness
+  arguments make. A `create` with a live record's primary key, given or generated by a sequence
+  behind the table, appended a second `Created` in ES-Sync, ES-Async, ES-Lazy and ES-NoProj, with no
+  error: the table kept the old row while the log said the new one, and ES-NoProj served the new
+  values. An `upsert_all` whose generated key met a live row recorded a second `Created` in every
+  mode that records events but ES-NoProj. Now every replayed CRUD event Lyra appends first moves
+  its record's head, a row in the new table `lyra_stream_heads`, in the same transaction:
+  - a create or an import needs no live record; an update or a destroy needs a live one; a destroy
+    makes it gone, and a destroyed record's key can be created again;
+  - two concurrent creators of one key meet on the head's primary key: the second waits for the
+    first's transaction, as on the table's own key, and is refused if that committed;
+  - in Hijack and the event-sourcing modes a refused write raises before its event is stored:
+    `Lyra::StreamHeads::LiveKeyError` (an `ActiveRecord::RecordNotUnique`, as plain Active Record
+    raises for the table's key, so `create_or_find_by` works), `Lyra::RecordDestroyedError` or
+    `Lyra::StreamHeads::MissingRecordError` (both `ActiveRecord::RecordNotFound`);
+  - Monitor never refuses a write its table took: it records it, and reports a head that disagreed
+    (the log, and the `lyra.stream_head_mismatch` notification) for DualView and `lyra:repair`.
+
+  The head is a row lock, not an advisory lock, so a transaction may create any number of
+  records. It is taken last before the append, after the aggregate lock and the unique-index
+  locks. The log stays the authority: a head whose last event is no longer in the store (events
+  deleted by hand, a test database cleaned of them) is not trusted, and a stream with events but no
+  head (written before 1.0.1) gets its head from its events when first met. The table is created
+  on first use; `config.stream_heads = false` restores 1.0.0's behaviour.
+- **A change of a record's primary key** is refused in Hijack and the event-sourcing modes
+  (`Lyra::StreamHeads::KeyChangeError`), where 1.0.0 recorded the update on the new key's stream:
+  onto a live key it overwrote that other record with no error, onto a free key it began a stream
+  with no create. Monitor, which records what its table did, records it as the destroy of the old
+  key and the create of the new one.
+- **An `upsert_all` that met a live record is recorded as that record's update**, as the database
+  executed it, with its changes from the record's replayed state, where 1.0.0 recorded a create.
+- **ES-Sync refuses a create whose row's key is already taken** (`LiveKeyError`), as Monitor's
+  `INSERT` is refused; 1.0.0 skipped the insert and kept the event.
+- **ES-Lazy: the check before a read skipped committed events below the checkpoint, the thread's
+  own included.** Event ids are assigned before commit, so a write can commit below the checkpoint
+  (a gap) when a later id was applied first. The check took the tables for up to date whenever the
+  process had re-checked the gaps less than a second before, whether or not a gap's event had
+  committed since. Such a write was invisible to reads until a later catch-up, with no error where
+  it was read: a thread got `RecordNotFound` for a record it had just created, two increments from
+  0 by one thread, one after the other, gave 1, `update_all` matched no row, and
+  `catch_up!(force: true)` left the write out of the tables. The defect is not new in 1.0.0: 0.9.0
+  has it too. Now, while gaps are open, the check asks in one more query whether the event of one
+  of them is visible to the read, and catches up if so.
+- **ES-Lazy: a late event under a foreign key no longer stops every read.** A catch-up applied the
+  events above the checkpoint first and filled the gaps after them, by replaying each gap's whole
+  record. A child above the checkpoint whose parent's create was a gap failed on its foreign key,
+  and so did a replay that passed through a parent destroyed since; the catch-up rolled back, and
+  every later read raised `ActiveRecord::InvalidForeignKey`, also after the gap expired. Now a
+  gap's event, once visible, is applied in its place in the log's order, before the events above
+  it, followed only by those later events of its record that were applied before it. A store
+  already in that state recovers at the next read.
+- **ES-Lazy: the check and the catch-up are no longer answered from the query cache** (in a
+  request or a job). The check came from the cache, so a read could miss another connection's
+  committed write until the cache was next cleared. So did the attempt to take the catch-up lock,
+  so a catch-up could run on an earlier answer without holding the lock.
+
+- **A mode set in a process after boot is no longer overridden by a switch recorded before that
+  boot.** A process whose boot check does not run (every rake task, and any process with
+  `mode_transition_gate = false` and `mode_sync = true`) took the latest `applied` row of
+  `lyra_mode_transitions` for a new switch at its first ModeSync check. It adopted that row over a
+  mode it had set itself with `config.mode =`, `projection_mode =`, `hijack_enabled =`, `disable!`
+  or an `enable_*!` helper, so a benchmark that replayed Disabled in a rake task ran in Monitor and
+  stored events. Now such a process notes, when it finishes booting, the latest applied switch,
+  and a switch recorded up to then does not override any mode it sets after boot, including the
+  one it booted in. A process that sets no mode after boot still adopts the application's mode at
+  its first check, so a task or console booted with an older configuration does not write in the
+  wrong mode. The configuration a code reload applies again is not a set. A switch recorded after
+  the boot is adopted as before. With ModeSync on, booting costs one read-only query, which creates
+  nothing and gives back the connection it opened.
+- **Leaving Hijack with `config.mode =` clears `config.hijack_enabled`.** `enable_hijack!`, a switch
+  into Hijack and ModeSync's adoption of one set the flag, and `mode =` never cleared it.
+  `hijack_mode?` stayed true, so a process set to Disabled or Monitor still routed writes through
+  events as in Hijack. Now `mode =` clears the flag when it leaves Hijack, as a switch does, and
+  `enable_hijack!` followed by `mode =` follows the last call. Code that relied on the flag
+  outliving `mode =` now really leaves Hijack. `hijack_enabled = true` set on its own, outside
+  Hijack, still makes Lyra act as Hijack whatever `mode` says.
+
+- **A rebuild no longer destroys rows the event log cannot restore without being asked to.**
+  `Lyra::Projections::Rebuild.rebuild` (and `rebuild_all`, and `rake lyra:projections:rebuild`)
+  clears the table by default before it replays the streams, and the database then applies each
+  foreign key's `ON DELETE` action: the rows of another table on an `ON DELETE CASCADE` key into
+  it were deleted, and `SET NULL` or `SET DEFAULT` references rewritten, with no error; rows of the
+  table itself that had no stream (not yet imported) were deleted and not restored. A clearing
+  rebuild now looks for both first, foreign keys from PostgreSQL's catalog, and raises
+  `Rebuild::Refused` before writing anything, naming each key with its table, column, action,
+  constraint and the rows it reaches, and the rows without a stream. A key counts only where rows
+  reference the table; the table's references to itself and its model's own
+  `has_and_belongs_to_many` join tables (restored from their link events) do not count, and the
+  rows of a monitored table do, as a rebuild restores one model's table. The message says how to
+  proceed: back up, import the rows without a stream (Genesis), then rebuild in place
+  (`truncate: false`, `TRUNCATE=false`, unchanged) or clear anyway with the new `force: true`
+  (`FORCE=1`). `Rebuild.clear_hazards(Model)` returns what a clearing rebuild would lose.
+- **A mode check that rebuilds no longer changes the tables when it fails.**
+  `Lyra::ModeTransition.check(rebuild: true)` (and so `to!(..., rebuild: true)` and
+  `rake lyra:mode:check REBUILD=1`) rebuilt the tables, committed, then compared, so a check that
+  found discrepancies, or a switch it refused, had already rewritten them. The rebuild and the
+  comparison now run in one transaction (a savepoint inside a transaction already open), rolled
+  back unless the check is clean; a clean check keeps the rebuilt tables and its certificate. A
+  rebuild the check cannot do safely (above) raises `ModeTransition::Refused` and changes no
+  table.
+- **The mode gate no longer certifies a switch with a write in flight.** The check noted the event
+  store's position (its highest event id) and later re-checked only the records with events above
+  it. A write whose event took an id below that position and committed after it was never
+  re-checked: after a gated switch from ES-Lazy to ES-Sync its record was in the log and missing
+  from the table, with no error. On PostgreSQL the gate now settles each position it uses, at
+  the check's start and end and at the switch: it waits until every writing transaction of the
+  database running when the position was read has ended, at most `mode_transition_settle_timeout`
+  seconds (new, default 30), so the catch-up, the comparison and the re-check that follow see what
+  those writes committed. A write that does not end in time leaves the check unclean, with the
+  discrepancy "a write in flight at the check did not end", and no certificate is stored. This
+  relies on a Lyra write holding a transaction id before its event takes an id, which writing the
+  record's stream head first ensures. Elsewhere the position is read as before.
+
+### Changed
+- **Writes cost more statements.** A create adds the head's insert and a check of its stream; an
+  update or a destroy one statement on its head. The cost is measured in the 1.0.1 benchmark
+  campaign.
+- **An update or destroy of a record with no event history is refused** in Hijack and the
+  event-sourcing modes (`MissingRecordError`), where 1.0.0 appended an event that began its
+  stream. Genesis imports the rows that predate Lyra before a model's first write, so this meets
+  only rows written around Lyra; import them with Genesis or `lyra:repair` first.
+- **The head is a lock in every mode that records events**, also with
+  `lock_aggregate_before_append` off: two writers of one record are ordered at the append. A
+  comparison without any lock needs `stream_heads = false` too.
+- **A soft delete is recorded as the update it is, not as a destroy.** A soft delete (paranoia's
+  `paranoia_destroy`, which runs the destroy callbacks itself and keeps the row; discard's
+  `discard`; a retention rule's `:soft_delete`) writes `deleted_at` (or `discarded_at`), and that
+  write is recorded, as `Updated`, in every mode. The destroy callbacks it runs record nothing
+  themselves, as no row was deleted. 1.0.0 recorded a `Destroyed`: the record's stream ended while
+  its row stayed, so DualView, the mode gate and `lyra:repair` reported every soft-deleted record
+  as a mismatch, ES-NoProj lost the record from its view where Monitor keeps it behind its default
+  scope, and an update or a `restore` after it was an update after a destroy. Now the stream
+  follows the row: a soft-deleted record can be updated, touched and restored, each recorded as an
+  update, and a real destroy of it (paranoia's `really_destroy!`) is its destroy. The writes in a
+  soft delete's destroy callbacks name its write scope as their cause, which, recording no event
+  of its own, is a `SaveWithoutEffect` marker. A stream written by 1.0.0, which ends in a destroy
+  while its row stays, keeps that history: a touch of it writes the row and records nothing.
+- **The stream heads are kept on PostgreSQL only.** They rely on its row locks (`FOR UPDATE`) and
+  `INSERT ... ON CONFLICT`. On SQLite they are not kept, and the history clauses are not enforced,
+  as in 1.0.0. A head is taken on the record's own database, where Lyra keeps its event store.
+- **Tests that delete the event store's rows** should delete `lyra_stream_heads`' rows too. A head
+  left behind is corrected from the events before it refuses anything, but until then it orders
+  writers by itself.
+- **ES-Lazy: a read inside a transaction catches up on a connection of its own** (see Fixed), so
+  while it does, it uses a second connection of the pool. Where none is free, or the connection
+  is pinned (transactional tests), the catch-up runs in the reader's transaction as in 1.0.0, with
+  1.0.0's deadlock. A read that only its own transaction's events are behind replays those
+  records itself and runs no catch-up.
+- **ES-Lazy costs one query more per read while gaps are open,** including for the up to 300
+  seconds that a rolled-back transaction's ids stay gaps. The query grows with their number: on
+  a development VM, a read by id took about 0.5 ms longer with one gap and 3.3 ms longer with
+  1,000, and the query alone about 22 ms with 10,000 in a store of 2 million events. With no gap
+  open a read sends the same two statements as before (the check and the read), except that in a
+  request or a job its check is sent every time instead of coming from the cache.
+- A catch-up that cannot be applied now fails the reads that need it at once, where between
+  re-checks they went on from stale tables.
+
+### Security
+- The example applications' lockfiles take the fixed releases of gems with published advisories
+  (puma, rack and crass; in the Solidus case study also addressable, msgpack, net-ssh, ransack,
+  rubyzip and view_component 3.27), with Ruby, Rails, Rails Event Store and Solidus unchanged, and
+  the Solidus case study's canonical tag no longer builds the request's format parameter into a
+  regular expression, which a `?format=` query could make fail or backtrack.
+
+### Known issues
+This release does not change these:
+- ES-Lazy, ES-Async and ES-NoProj: a locking read Lyra cannot order runs as in 1.0.0: raw SQL
+  (`find_by_sql` with `FOR UPDATE`), an eager-loading locking read (`lock.includes(...).references`),
+  one that selects no primary key, and, in ES-NoProj, a locked relation with a window (`limit`,
+  `offset`). A record that starts to match a locking read after its keys were read, more than
+  twice, is left out of it (ES-NoProj) or takes its row lock before its aggregate lock (ES-Lazy,
+  ES-Async), which can deadlock with a writer of it (`ActiveRecord::Deadlocked`);
+- ES-Lazy: a catch-up that cannot be applied fails every read: events that no order of the log
+  makes valid under the table's constraints, or one that needs an event skipped for good;
+- ES-Lazy: a write whose transaction stays open more than 300 seconds after its id became a gap,
+  one in flight more than 100 ids below the first event of a fresh checkpoint, and one in flight
+  when the application leaves ES-Lazy without the gate (`mode_transition_gate` off, or a forced
+  switch) can be missing from the tables for good;
+- ES-Lazy: `eager_load` (and `includes` with `references`) loading records, `ids`, `count_by_sql`,
+  a relation's `cache_version` and raw SQL do not catch up before they read;
+- ES-Lazy: in `REPEATABLE READ` and `SERIALIZABLE` a transaction does not see rows a catch-up
+  applied after its snapshot was taken, so it can read stale rows;
+- ES-Lazy: a query repeated in a query-cache scope can be answered from that cache, as in Active
+  Record.
+
+
 ## [1.0.0] - 2026-11-22
 
 ### Breaking

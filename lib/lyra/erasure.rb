@@ -625,7 +625,7 @@ module Lyra
         model.with_connection do |connection|
           Lyra::AdvisoryLock.xact_lock(connection, "lyra_aggregate/#{stream}", purpose: "erasure")
         end
-        model.unscoped.lock.find_by(model.primary_key => id) unless events_only?
+        Lyra::Projections::LazyProjection.own_locking_read { model.unscoped.lock.find_by(model.primary_key => id) } unless events_only?
       end
 
       # The record's row, every column of it scrubbed with the rule its events
@@ -638,7 +638,7 @@ module Lyra
       def erase_row(model, id, replacements, resolve)
         return [false, []] if events_only?
 
-        row = model.unscoped.lock.find_by(model.primary_key => id)
+        row = Lyra::Projections::LazyProjection.own_locking_read { model.unscoped.lock.find_by(model.primary_key => id) }
         return [false, []] unless row
 
         columns = scrub_row(model, row, resolve)
@@ -938,7 +938,7 @@ module Lyra
       # connection the lock did not hold back), that stream is read again and
       # rewritten instead, and no import is claimed.
       def erase_and_import(model, id, stream, resolve, reason, erased_by)
-        row = model.unscoped.lock.find_by(model.primary_key => id)
+        row = Lyra::Projections::LazyProjection.own_locking_read { model.unscoped.lock.find_by(model.primary_key => id) }
         return [false, false] unless row
 
         columns = scrub_row(model, row, resolve)
@@ -1144,7 +1144,7 @@ module Lyra
       def erase_copied_columns(model, id, resolve)
         return [] if events_only?
 
-        row = model.unscoped.lock.find_by(model.primary_key => id)
+        row = Lyra::Projections::LazyProjection.own_locking_read { model.unscoped.lock.find_by(model.primary_key => id) }
         return [] unless row
 
         columns = scrub_row(model, row, resolve)

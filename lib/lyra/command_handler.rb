@@ -29,6 +29,11 @@ module Lyra
       # Fail-closed: a write whose event cannot be stored fails with the
       # error, as in event sourcing, rather than as a refused save.
       raise
+    rescue StreamHeads::LiveKeyError, StreamHeads::MissingRecordError, RecordDestroyedError
+      # What Hypothesis H excludes (Lyra::StreamHeads) fails as Monitor's write
+      # fails: RecordNotUnique for a create of a live key, RecordNotFound for
+      # a record that has none or was destroyed.
+      raise
     rescue => e
       CommandResult.failure(error: e.message)
     end

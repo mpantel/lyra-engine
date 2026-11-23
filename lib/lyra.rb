@@ -41,6 +41,8 @@ require "lyra/saves_without_effect"
 require "lyra/encrypted_attributes"
 require "lyra/optimistic_locking"
 require "lyra/event_store_adapter"
+require "lyra/stream_heads"
+require "lyra/effect_check"
 require "lyra/event_serializer"
 require "lyra/stream_tail"
 require "lyra/projection"
@@ -134,6 +136,20 @@ if PETRI_FLOW_AVAILABLE
   require "lyra/verification/workflow_generator"
   require "lyra/verification/bypass_workflow"
   require "lyra/verification/rights_workflows"
+end
+
+# The concurrency nets (the tests, benchmarks/petri-concurrent-writers): loaded
+# when first named, not at boot; Lyra's runtime does not use them.
+if PETRI_FLOW_AVAILABLE
+  module Lyra
+    module Verification
+      autoload :ConcurrentWritersNet, "lyra/verification/concurrent_writers_net"
+      autoload :LazyCatchUpNet, "lyra/verification/lazy_catch_up_net"
+      autoload :TemplateInvariants, "lyra/verification/template_invariants"
+      autoload :LazyLockOrderNet, "lyra/verification/lazy_lock_order_net"
+      autoload :AsyncLockOrderNet, "lyra/verification/async_lock_order_net"
+    end
+  end
 end
 
 module Lyra

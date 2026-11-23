@@ -496,6 +496,11 @@ module Lyra
               step = Rebuildable.step(name, args, kwargs, block) if recipe
               result = super(*args, **kwargs, &block)
               Rebuildable.record(self, result, recipe, step)
+              # A lock carries to what is built from the locked relation
+              # (Model.lock.where(...)), as Active Record's lock value does.
+              if @locking_read && result.is_a?(CachedRelation) && !result.equal?(self)
+                result.instance_variable_set(:@locking_read, true)
+              end
               result
             end
           end
@@ -834,6 +839,46 @@ module Lyra
         relation.windowed_by(limit_value, offset_value, pagination: @pagination)
       end
     end
+
+# A locked relation's records, read in a transaction in ES-NoProj (from
+# 1.0.1): before the first read, the records it selects are locked
+# (their aggregate locks, which every writer of them takes before its
+# append) and read again under the locks, as many times as records
+# start to match in between (LazyProjection::SELECTION_RECHECKS), so a
+# read-modify-write of them excludes every other writer until the
+# transaction ends. find(ids) locks only the ids (locked_find_relation).
+# A window (limit, offset) reads as before (the CHANGELOG's known issues).
+module CachedRelationLockedSelection
+  %i[each to_a records first last take take! first! last! find_by find_by! sole].each do |name|
+    define_method(name) do |*args, **kwargs, &block|
+      lock_selection!
+      super(*args, **kwargs, &block)
+    end
+  end
+
+  private
+
+  def lock_selection!
+    return if @selection_locked || !@locking_read || windowed?
+    return unless Lyra::Projections::LazyProjection.orders_locking_reads?
+    return unless model_class.with_connection(&:transaction_open?)
+    return unless (recipe = rebuild_recipe)
+
+    @selection_locked = true
+    locked = []
+    fresh = nil
+    (Lyra::Projections::LazyProjection::SELECTION_RECHECKS + 1).times do
+      fresh = evaluate_relation(recipe) or return
+      missing = fresh.to_a.map { record_id(_1) }.uniq - locked
+      break if missing.empty?
+
+      Lyra::BypassEvents.check_lock_limit!(model_class, locked.size + missing.size, "locking read")
+      Lyra::Projections::LazyProjection.take_aggregate_locks(model_class, missing)
+      locked |= missing
+    end
+    @records = fresh.to_a.select { locked.include?(record_id(_1)) }
+  end
+end
 
     class CachedRelation
       include Enumerable
@@ -1199,6 +1244,10 @@ module Lyra
       # relation, in its order, else in the order of the ids). Several ids
       # used to be an ArgumentError.
       def find(*args)
+        if (fresh = locked_find_relation(args))
+          return fresh.find(*args)
+        end
+
         expects_array = args.first.is_a?(Array)
         return [] if expects_array && args.first.empty?
 
@@ -1213,6 +1262,21 @@ module Lyra
           find_some(ids)
         end
       end
+
+      # A locked relation's find (lock above), in a transaction, in ES-NoProj:
+      # the records' aggregate locks, then the relation read again under them.
+      # nil where the find reads as it did.
+      def locked_find_relation(args)
+        return nil unless @locking_read && Lyra::Projections::LazyProjection.orders_locking_reads?
+
+        ids = args.flatten.compact.uniq
+        return nil unless ids.any? && ids.all? { _1.is_a?(Integer) || _1.is_a?(String) }
+        return nil unless model_class.with_connection(&:transaction_open?)
+
+        Lyra::Projections::LazyProjection.take_aggregate_locks(model_class, ids)
+        (recipe = rebuild_recipe) && evaluate_relation(recipe)
+      end
+      private :locked_find_relation
 
       def find_one(id)
         record = window_first(@records) { |r| r.id.to_s == id.to_s }
@@ -2411,9 +2475,19 @@ module Lyra
         raise UnsupportedQuery.new(model_class, "to_sql (the relation is answered from the event store, not by SQL)")
       end
 
-      # Hints for the database, which ES-NoProj reads do not reach. A lock
-      # takes no row lock: writes take Lyra's aggregate lock.
-      %i[lock annotate optimizer_hints strict_loading].each do |name|
+      # A lock takes no row lock (there are no rows). From 1.0.1 a locked
+      # relation's find(ids), in a transaction, takes the records' aggregate
+      # locks, which every writer of them takes before its append, and reads
+      # the records again under them (find below), so a read-modify-write
+      # under the lock sees every committed write and no other writer commits
+      # until it ends. 1.0.0 ignored the lock, and two increments could give 1.
+      def lock(*_args)
+        @locking_read = true
+        self
+      end
+
+      # Hints for the database, which ES-NoProj reads do not reach.
+      %i[annotate optimizer_hints strict_loading].each do |name|
         define_method(name) { |*_args| self }
       end
 
@@ -3157,6 +3231,7 @@ module Lyra
       prepend CachedRelationDelivery
       prepend CachedRelationWindow
       prepend Rebuildable.wrappers
+      prepend CachedRelationLockedSelection
 
       # =========================================================================
       # Inspection

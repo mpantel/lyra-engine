@@ -40,6 +40,80 @@ class ModeTransitionTest < Minitest::Test
     refute MT.gate_required?("event_sourcing/lazy", "event_sourcing/disabled")
   end
 
+  # A write in flight across the check: its event takes an id below the
+  # position the check reads, and commits after it. 1.0.0 re-checked only
+  # above the position and certified the switch; after ES-Lazy -> ES-Sync the
+  # write was in the log and missing from the table, with no error. Now the
+  # check waits for the write to end and re-checks its record.
+  def test_a_write_in_flight_at_the_check_is_rechecked_before_the_certificate
+    skip "PostgreSQL" unless ActiveRecord::Base.connection.adapter_name.match?(/postg/i)
+
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :lazy
+    GateUser.create!(name: "Ann", email: "ann@example.com")
+    appended = Queue.new
+    go = Queue.new
+    writer = Thread.new do
+      ActiveRecord::Base.connection_pool.with_connection do
+        ActiveRecord::Base.transaction do
+          GateUser.create!(name: "Late", email: "late@example.com")
+          appended << true
+          go.pop
+        end
+      end
+    end
+    appended.pop
+    GateUser.create!(name: "Bea", email: "bea@example.com") # a later id, committed
+    begin
+      checker = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection { MT.check(to: "event_sourcing/sync", from: "event_sourcing/lazy") }
+      end
+      assert_nil checker.join(1), "the check waits for the write in flight"
+    ensure
+      go << true
+      writer.join(10)
+    end
+    report = checker.value
+
+    assert report.clean?, report.discrepancies.map(&:to_s).inspect
+    MT.to!(:event_sourcing, projection_mode: :sync)
+    assert_equal %w[Ann Bea Late], raw_names, "the late write is in the table after the switch"
+  end
+
+  # A write in flight that does not end within the settle timeout: no
+  # certificate.
+  def test_a_write_in_flight_that_does_not_end_refuses_the_certificate
+    skip "PostgreSQL" unless ActiveRecord::Base.connection.adapter_name.match?(/postg/i)
+
+    Lyra.config.enable_event_sourcing!
+    Lyra.config.projection_mode = :lazy
+    Lyra.config.mode_transition_settle_timeout = 0.3
+    appended = Queue.new
+    go = Queue.new
+    writer = Thread.new do
+      ActiveRecord::Base.connection_pool.with_connection do
+        ActiveRecord::Base.transaction do
+          GateUser.create!(name: "Late", email: "late@example.com")
+          appended << true
+          go.pop
+          raise ActiveRecord::Rollback
+        end
+      end
+    end
+    appended.pop
+    begin
+      report = MT.check(to: "event_sourcing/sync", from: "event_sourcing/lazy")
+    ensure
+      go << true
+      writer.join(10)
+    end
+
+    refute report.clean?
+    assert_match(/a write in flight at the check did not end/, report.discrepancies.map(&:to_s).join)
+  ensure
+    Lyra.config.mode_transition_settle_timeout = 30
+  end
+
   def test_escalation_passes_when_rows_and_events_agree_importing_old_rows
     GateUser.create!(name: "Ann", email: "ann@example.com")
     raw("INSERT INTO users (name, email, created_at, updated_at) VALUES ('Old', 'old@example.com', now(), now())")
@@ -178,11 +252,15 @@ class ModeTransitionTest < Minitest::Test
 
   def raw(sql) = ActiveRecord::Base.connection.select_value(sql)
 
+  def raw_names = ActiveRecord::Base.connection.select_values("SELECT name FROM users ORDER BY name")
+
   def clean
     conn = ActiveRecord::Base.connection
     conn.execute("DELETE FROM users")
     conn.execute("DELETE FROM event_store_events_in_streams")
     conn.execute("DELETE FROM event_store_events")
     conn.execute("DELETE FROM #{MT::TABLE}") if conn.table_exists?(MT::TABLE)
+    conn.execute("DELETE FROM #{Lyra::StreamHeads::TABLE}") if conn.table_exists?(Lyra::StreamHeads::TABLE)
+    Lyra::Projections::LazyProjection.reset!
   end
 end

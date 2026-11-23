@@ -21,6 +21,10 @@ module Lyra
       Lyra.configure do |config|
         config.mode = :hijack
         config.event_store = @mock_event_store
+        # These tests check the events built against a mock store, which
+        # holds no stream: the stream heads (Lyra::StreamHeads), which read
+        # the real one, are tested in stream_heads_test.rb and below.
+        config.stream_heads = false
       end
 
       # Create a mock model class with integer primary key
@@ -120,24 +124,31 @@ module Lyra
     # Missing Aggregate Handling Tests
     # =========================================================================
 
-    def test_handle_update_succeeds_without_prior_event_history
-      # Update a record that has no event history (e.g., seeded data)
+    # A record with no event history (a row written around Lyra; Genesis
+    # imports the rows that predate it before a model's first write): an update
+    # or destroy would begin a stream with no create, which Hypothesis H
+    # excludes, so the stream heads refuse it (from 1.0.1). Switched off, the
+    # event is built as in 1.0.0.
+    def test_handle_update_without_prior_event_history
       command = Commands::UpdateCommand.new(@model_class, 12345, { name: ["Old", "New"] })
-      result = CommandHandler.handle(command)
+      Lyra.config.stream_heads = true
+      assert_raises(StreamHeads::MissingRecordError) { CommandHandler.handle(command) }
 
-      # Should succeed even without prior aggregate
-      assert result.success?, "Update should succeed for records without event history"
-      assert result.events.any?, "Should generate update event"
+      Lyra.config.stream_heads = false
+      result = CommandHandler.handle(command)
+      assert result.success?
+      assert result.events.any?
     end
 
-    def test_handle_destroy_succeeds_without_prior_event_history
-      # Destroy a record that has no event history
+    def test_handle_destroy_without_prior_event_history
       command = Commands::DestroyCommand.new(@model_class, 67890)
-      result = CommandHandler.handle(command)
+      Lyra.config.stream_heads = true
+      assert_raises(StreamHeads::MissingRecordError) { CommandHandler.handle(command) }
 
-      # Should succeed even without prior aggregate
-      assert result.success?, "Destroy should succeed for records without event history"
-      assert result.events.any?, "Should generate destroy event"
+      Lyra.config.stream_heads = false
+      result = CommandHandler.handle(command)
+      assert result.success?
+      assert result.events.any?
     end
 
     # =========================================================================

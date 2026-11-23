@@ -55,6 +55,10 @@ module Lyra
       end
     end
 
+    # Rolls a rebuilding check's transaction back (check).
+    class DiscardRebuild < StandardError; end
+    private_constant :DiscardRebuild
+
     Discrepancy = Struct.new(:model, :id, :problem, :details, keyword_init: true) do
       def to_s = "#{model} #{id}: #{problem}#{" (#{details})" if details}"
     end
@@ -129,6 +133,9 @@ module Lyra
         # refused). TouchRegistry.serialize.
         id = TouchRegistry.serialize(to) do
           refuse_unrecorded_touches!(from, to)
+          # A switch is the application's: if recording it fails, ModeSync
+          # does not keep it as this process's own change.
+          ModeSync.forget_boot!
           apply(mode, projection_mode)
           # forced: the gate was required and the operator overrode it.
           record_applied(to, from: from, forced: force && gate_enabled? && gate_required?(from, to),
@@ -216,16 +223,56 @@ module Lyra
 
       # Compare every monitored record's row with its events. Returns a
       # Report; stores a certificate when it is clean.
+      #
+      # With rebuild: true, leaving a mode whose tables lag the log, the
+      # tables are rebuilt from the log (Rebuild.rebuild, which refuses to
+      # clear a table whose rows the log cannot all restore) and then
+      # compared, in one transaction (a savepoint inside the caller's) that
+      # is rolled back unless the check is clean: a check that fails, or
+      # raises, leaves the tables as they were (from 1.0.1; before, the
+      # rebuild committed first). A clean check keeps the rebuilt tables and
+      # its certificate.
       def check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)
         # With record_touches false DualView takes timestamp-only differences
         # as agreement, and a process that leaves touches out moves rows its
         # events do not show: no certificate may come of either.
         refuse_unrecorded_touches!(from, to)
+        return run_check(to, from, models, false, batch_size) unless rebuild && LAGGING.include?(from)
+
+        report = nil
+        begin
+          in_transactions([ActiveRecord::Base, *models]) do
+            report = run_check(to, from, models, true, batch_size)
+            raise DiscardRebuild unless report.clean?
+          end
+        rescue DiscardRebuild
+          report.rebuilt = 0
+        rescue Lyra::Projections::Rebuild::Refused => e
+          raise Refused, "Lyra refuses to check #{from} -> #{to} with rebuild: true; no table was changed. #{e.message} " \
+                         "The check's rebuild takes neither option: rebuild the tables first (rake " \
+                         "lyra:projections:rebuild with TRUNCATE=false or FORCE=1), then check without REBUILD."
+        end
+        report
+      end
+
+      # A transaction on each database +models+ use (each a savepoint inside
+      # a transaction already open), around the block.
+      private def in_transactions(models, &block)
+        one_per_pool = models.select { _1.respond_to?(:connection_pool) }.uniq(&:connection_pool)
+        one_per_pool.reverse.reduce(block) { |inner, model| -> { model.transaction(requires_new: true) { inner.call } } }.call
+      end
+
+      # check, once it has decided whether to rebuild.
+      private def run_check(to, from, models, rebuild, batch_size)
         started_at = Time.current
-        position = event_position
+        discrepancies = []
+        # The position the re-check starts from, settled before anything is
+        # read: an event below it that was not yet visible has committed (or
+        # rolled back) by the time the catch-up and the comparison run.
+        position, settled = settled_position
+        in_flight!(discrepancies, position, "check") unless settled
         imported = 0
         rebuilt = 0
-        discrepancies = []
         unrepresentable = 0
 
         # A row its model cannot represent refuses the model's import (nothing
@@ -259,6 +306,12 @@ module Lyra
           end
         end
 
+        # The position the certificate keeps, settled the same way before the
+        # re-check reads what changed since the first one.
+        final_position, settled = settled_position
+        in_flight!(discrepancies, final_position, "check") unless settled
+        # What those writes appended, ES-Lazy applies now, as it did at the start.
+        Lyra::Projections::LazyProjection.catch_up!(force: true) if from == "event_sourcing/lazy"
         changed = changed_since(models - refused, position, started_at)
         changed.each do |model, ids|
           discrepancies.reject! { |d| d.model == model.name && ids.include?(d.id.to_s) }
@@ -267,7 +320,7 @@ module Lyra
 
         report = Report.new(from: from, to: to, checked: checked, rechecked: changed.values.sum(&:size),
                             imported: imported, rebuilt: rebuilt, discrepancies: discrepancies, unrepresentable: unrepresentable,
-                            position: event_position, started_at: started_at, finished_at: Time.current)
+                            position: final_position, started_at: started_at, finished_at: Time.current)
         # A process may have begun leaving touches out while the check ran: the
         # last look and the certificate under the registry's lock.
         TouchRegistry.serialize(to) do
@@ -431,8 +484,12 @@ module Lyra
         return nil if certified_at < Time.current - Lyra.config.mode_transition_certificate_ttl
 
         models = Lyra.config.monitored_models
+        # Writes in flight now end first, so the re-check sees what they
+        # committed (the certificate's own position is settled: run_check).
+        _, settled = settled_position
         changed = changed_since(models, row["position"].to_i, certified_at)
         discrepancies = changed.flat_map { |model, ids| ids.filter_map { |id| compare(model, id) } }
+        in_flight!(discrepancies, row["position"].to_i, "switch") unless settled
         Report.new(from: from, to: to, checked: 0, rechecked: changed.values.sum(&:size), imported: 0, rebuilt: 0,
                    discrepancies: discrepancies, position: event_position, started_at: certified_at,
                    finished_at: Time.current, certificate_id: row["id"].to_i)
@@ -556,6 +613,42 @@ module Lyra
       def event_position
         sql(:select_value, "SELECT COALESCE(MAX(id), 0) FROM event_store_events").to_i
       end
+      
+      # The event store's position, settled (from 1.0.1): read, then, on
+      # PostgreSQL, every writing transaction of this database running at that
+      # moment (pg_stat_activity.backend_xid) waited for, at most
+      # config.mode_transition_settle_timeout seconds. A transaction Lyra writes in
+      # holds a transaction id before its first event takes an id (it writes the
+      # record's stream head first), so an event below the position that was not
+      # yet visible belongs to one of them, and a read after this one sees it
+      # (1.0.0 read the position alone, and a write in flight across the check was
+      # never re-checked). Returns [position, whether they all ended].
+      def settled_position
+        position = event_position
+        return [position, true] unless postgres?
+      
+        running = sql(:select_values,
+          "SELECT backend_xid::text FROM pg_stat_activity WHERE datname = current_database() " \
+          "AND backend_xid IS NOT NULL AND pid <> pg_backend_pid()")
+        return [position, true] if running.empty?
+      
+        list = running.map { q(_1) }.join(", ")
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + Lyra.config.mode_transition_settle_timeout
+        loop do
+          still = sql(:select_value, "SELECT count(*) FROM pg_stat_activity WHERE backend_xid::text IN (#{list})").to_i
+          return [position, true] if still.zero?
+          return [position, false] if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+      
+          sleep 0.05
+        end
+      end
+      
+      def in_flight!(discrepancies, position, at)
+        discrepancies << Discrepancy.new(model: "(event store)", id: position, problem: "a write in flight at the #{at} did not end",
+                                         details: "waited #{Lyra.config.mode_transition_settle_timeout} s")
+      end
+      
+      def postgres? = ActiveRecord::Base.with_connection { _1.adapter_name.match?(/postg/i) }
 
       # Created on first use, so the gate needs no migration. False when the
       # database cannot be reached (assets precompilation, a first setup).

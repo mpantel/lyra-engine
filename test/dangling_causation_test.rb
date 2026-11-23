@@ -249,7 +249,11 @@ class DanglingCausationTest < Minitest::Test
     # A soft delete runs the destroy callbacks itself, without destroy
     # (paranoia's paranoia_destroy): it gets a write scope too, and a normal
     # destroy gets one scope, not two (the outermost write's correlation is
-    # its own event id).
+    # its own event id). From 1.0.1 a soft delete records no Destroyed, only
+    # the update it makes (the row stays, and so does the record's stream), so
+    # its scope's event id, which the writes in its before_destroy callbacks
+    # name, is a SaveWithoutEffect marker, as for any write that records no
+    # event of its own; nothing dangles.
     define_method("test_a_soft_delete_running_the_destroy_callbacks_itself_has_a_write_scope_in_#{mode}") do
       use(mode)
       DcParent.class_eval do
@@ -261,14 +265,15 @@ class DanglingCausationTest < Minitest::Test
 
       parent.soft_destroy
 
-      destroyed = stream(DcParent, parent.id).find { operation(_1) == "destroyed" }
-      assert destroyed, stream(DcParent, parent.id).map(&:event_type).inspect
+      parent_events = stream(DcParent, parent.id)
+      assert_empty parent_events.select { operation(_1) == "destroyed" }, "a soft delete records no Destroyed"
       child_events = stream(DcChild, child.id).last(2)
-      assert_equal [destroyed.event_id] * 2, child_events.map { _1.metadata[:causation_id] },
-                   "the before_destroy and after_destroy writes name the soft delete"
-      assert_equal [destroyed.event_id] * 2, child_events.map { _1.metadata[:correlation_id] }, "one correlation, the delete's"
-      assert_equal destroyed.event_id, destroyed.metadata[:correlation_id], "one scope"
-      assert_empty markers
+      scope = child_events.first.metadata[:causation_id]
+      refute_nil scope, "the before_destroy write names the soft delete"
+      assert_equal [scope], markers.map(&:event_id), "the soft delete's scope, which recorded no event, is a marker"
+      deleted = parent_events.find { operation(_1) == "updated" && _1.metadata[:causation_id] == scope }
+      assert deleted, "the update the soft delete made is recorded, in its scope: #{parent_events.map { operation(_1) }.inspect}"
+      assert_equal [scope] * 2, child_events.map { _1.metadata[:correlation_id] }, "one correlation, the delete's"
       assert_no_dangling_causation
 
       other, other_child = parent_with_child

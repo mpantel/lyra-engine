@@ -97,8 +97,10 @@ module Lyra
           # ON CONFLICT DO NOTHING, so a create projected again (a replay, a
           # job after a write that projected its own row) inserts nothing.
           inserted = Lyra.projection_write(INTERNAL) { model_class.insert(insert_attrs) }
-          refuse_skipped_create!(model_class, insert_attrs, inserted)
-          inserted
+          # :key_taken when a row already holds the key: ES-Sync's own write
+          # refuses it (CrudInterceptor#lyra_run_sync_projection); a replay or
+          # a job projecting a create again goes on.
+          refuse_skipped_create!(model_class, insert_attrs, inserted) || inserted
         end
 
         # A create that inserted nothing (no key returned) although no row has
@@ -138,7 +140,7 @@ module Lyra
           table = model_class.base_class
           id = attributes[key]
           present = table.uncached { table.unscoped.where(key => id).exists? }
-          return if present
+          return :key_taken if present
 
           holders = holder_rows(table, attributes)
           lagging = holders.any? && holders.all? { |holder, held| lagging?(table, holder, held) }
@@ -222,6 +224,9 @@ module Lyra
         # Update an existing record in the model table
         #
         # Uses update_all() to bypass all callbacks.
+        # The model without its default scope, where it has one.
+        def unscoped(model_class) = model_class.respond_to?(:unscoped) ? model_class.unscoped : model_class
+
         def project_update(model_class, result)
           event = result.events&.first
           return unless event
@@ -247,7 +252,9 @@ module Lyra
 
           # Use update_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write(INTERNAL) { model_class.where(Lyra.key_column(model_class) => model_id).update_all(updates) }
+          # Unscoped: a row the model's default scope hides (a soft-deleted one)
+          # is still the record's row (from 1.0.1).
+          Lyra.projection_write(INTERNAL) { unscoped(model_class).where(Lyra.key_column(model_class) => model_id).update_all(updates) }
         end
 
         # Delete a record from the model table
@@ -261,7 +268,7 @@ module Lyra
 
           # Use delete_all to bypass callbacks
           # Lyra.projection_write: skips strict access and publishes no bypass events
-          Lyra.projection_write(INTERNAL) { model_class.where(Lyra.key_column(model_class) => model_id).delete_all }
+          Lyra.projection_write(INTERNAL) { unscoped(model_class).where(Lyra.key_column(model_class) => model_id).delete_all }
         end
 
         private :project_create, :project_update, :project_destroy, :refuse_skipped_create!, :holder_rows, :lagging?, :report_duplicate

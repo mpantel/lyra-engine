@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "test_helper"
+require "timeout"
 
 # A table's unique indexes in ES-Sync, ES-Async and ES-Lazy, where the event
 # is appended before the projection writes the row. A duplicate's event was
@@ -128,6 +129,49 @@ class EsModesUniqueWritesTest < Minitest::Test
     end
     assert_equal [1, ActiveRecord::RecordNotUnique, %i[created updated]], outcomes[:monitor][:result]
     assert_same_as_monitor(outcomes)
+  end
+
+  # The same, racing the holder's job: the job has written the holder's row
+  # and not committed when the upsert runs. The row is taken, so the upsert
+  # cannot bring it up to date, and it raises RecordNotUnique before anything
+  # is written, rather than insert a second record with the value (a second
+  # Created; the leftover listed after 1.0.0's unique-index work). Monitor's
+  # INSERT would wait for the commit and update the row; ES-Async refuses.
+  def test_upsert_all_by_the_unique_column_racing_the_holders_job
+    use(:es_async)
+    holder = UmPerson.create!(email: "a@x", name: "old").id
+    projected = Queue.new
+    go = Queue.new
+    job = Thread.new do
+      ActiveRecord::Base.connection_pool.with_connection do
+        ActiveRecord::Base.transaction do
+          Lyra::Projections::AsyncProjectionJob.project_pending(UmPerson, [holder]) # as the job does
+          projected << true
+          go.pop
+        end
+      end
+    end
+    projected.pop
+    events = event_count
+    begin
+      result = Thread.new do
+        ActiveRecord::Base.connection_pool.with_connection do
+          attempt { UmPerson.upsert_all([{ email: "a@x", name: "up", created_at: STAMP, updated_at: STAMP }], unique_by: :email).length }
+        end
+      end.tap { _1.report_on_exception = false }
+      outcome = Timeout.timeout(10) { result.value }
+    ensure
+      go << true # the job ends whatever the upsert did
+      job.join(10)
+    end
+    settle
+
+    assert_equal ActiveRecord::RecordNotUnique, outcome
+    assert_equal events, event_count, "nothing appended"
+    assert_equal %i[created], operations(holder)
+    assert_equal 1, created_events, "no second record in the log"
+    assert_equal [["a@x", "old"]], UmPerson.pluck(:email, :name)
+    assert_projection_clean
   end
 
   # insert_all: a row with a value taken is left out (ON CONFLICT DO

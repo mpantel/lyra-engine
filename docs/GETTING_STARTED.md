@@ -48,11 +48,13 @@ generator:
 ```bash
 bundle install
 bin/rails generate ruby_event_store:active_record:migration
+bin/rails generate lyra:install
 bin/rails db:migrate
 ```
 
-Lyra's own tables (`lyra_mode_transitions`, `lyra_projection_checkpoints`) are
-created on first use.
+`lyra:install` (from 1.0.1) writes a migration with Lyra's own tables and an
+initializer, unless one exists. Without the migration Lyra creates its tables
+on first use, as before ([Migration Guide](MIGRATION_GUIDE.md#phase-0-install)).
 
 ## 2. Add an initializer in Monitor
 

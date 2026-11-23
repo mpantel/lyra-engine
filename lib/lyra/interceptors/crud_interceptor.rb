@@ -45,6 +45,13 @@ module Lyra
       def _update_record(*args)
         lyra_genesis_first_use
         return super unless lyra_takes_over_write_here?
+
+        # The key names the record's stream: a change of it would be recorded
+        # on another record's stream (Hypothesis H, Lyra::StreamHeads).
+        pk = self.class.primary_key
+        if pk.is_a?(String) && will_save_change_to_attribute?(pk)
+          Lyra::StreamHeads.refuse_key_change!(self.class, attribute_in_database(pk), read_attribute(pk))
+        end
         return lyra_hijack_with_row_write { lyra_hijack_update ? super(*args) : false } if lyra_hijack_atomically?
         return false unless lyra_hijack_mode? ? lyra_hijack_update : lyra_prepare_event_source_update
 
@@ -195,6 +202,12 @@ module Lyra
         after_create :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
         after_update :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
         after_destroy :lyra_finalize_event_source, if: :lyra_event_sourcing_mode?
+
+        # H2, opt-in (config.check_effects): the row as written against its
+        # events, after the row write and in its transaction (Lyra::EffectCheck).
+        after_create :lyra_check_effect, if: :lyra_checks_effects?
+        after_update :lyra_check_effect, if: :lyra_checks_effects?
+        after_destroy :lyra_check_effect, if: :lyra_checks_effects?
 
         # Sampled DualView verification after commit (Lyra::DualViewSampler);
         # off unless config.dual_view_sample_rate is above 0.
@@ -713,6 +726,15 @@ module Lyra
         lyra_monitored? && Lyra.event_sourcing_mode?
       end
 
+      def lyra_checks_effects?
+        lyra_monitored? && Lyra::EffectCheck.applies?
+      end
+
+      def lyra_check_effect
+        Lyra::EffectCheck.verify!(self)
+      end
+
+
       def lyra_takes_over_write?
         lyra_hijack_mode? || lyra_event_sourcing_mode?
       end
@@ -738,6 +760,20 @@ module Lyra
         rows, @lyra_rows_updated = @lyra_rows_updated, nil
         return if rows == 0 || previous_changes.empty?
 
+        # A changed primary key: the table now holds the record under the new
+        # key, so the log records what the table did, the old key's record
+        # destroyed and the new key's created (from 1.0.1; 1.0.0 recorded an
+        # update on the new key's stream, which had no create).
+        pk = self.class.primary_key
+        if pk.is_a?(String) && saved_change_to_attribute?(pk) && Lyra::StreamHeads.enabled?
+          old_key = attribute_before_last_save(pk)
+          gone = Lyra::EventData.build(self.class, old_key, :destroyed, attributes: {}, changes: {})
+                                .merge(metadata: { source: "lyra_interceptor" }.merge(lyra_event_metadata(:destroyed)))
+          publish_event(:destroyed, gone, stream_name: Lyra.stream_name(self.class, old_key))
+          publish_event(:created, build_event_data(:created))
+          return
+        end
+
         event_data = build_event_data(:updated)
         publish_event(:updated, event_data)
       ensure
@@ -751,10 +787,15 @@ module Lyra
         # deleted the row) and one of a record that was not persisted (a new
         # one, or a copy destroyed twice), which runs no DELETE (WriteHooks#
         # destroy sets 0). A second Destroyed makes the stream ill-formed. nil
-        # means no count was taken: a soft delete (paranoia) runs the destroy
-        # callbacks without Active Record's destroy, and is recorded as before.
+        # means no count was taken: the destroy callbacks ran without Active
+        # Record's destroy, a soft delete (paranoia's paranoia_destroy, which
+        # keeps the row). It records nothing itself from 1.0.1: what it writes
+        # (deleted_at, through update_columns or a save) is recorded as the
+        # update it is, so the stream follows the row, which is still there.
+        # 1.0.0 recorded a Destroyed, and the record's stream ended while its
+        # row stayed.
         rows, @lyra_rows_deleted = @lyra_rows_deleted, nil
-        return if @lyra_hijacked || rows == 0
+        return if @lyra_hijacked || rows == 0 || (rows.nil? && !destroyed?)
 
         event_data = build_event_data(:destroyed)
         publish_event(:destroyed, event_data)
@@ -1170,7 +1211,17 @@ module Lyra
       # under REPEATABLE READ). It now fails the write, as Monitor's INSERT
       # or UPDATE fails it.
       def lyra_run_sync_projection(operation, result)
-        Lyra::Projections::ModelProjection.project(self.class, operation, result, INTERNAL)
+        projected = Lyra::Projections::ModelProjection.project(self.class, operation, result, INTERNAL)
+        # The table's primary key, as Monitor's INSERT meets it: a row already
+        # holds the key, so the create is refused with its event, in the same
+        # transaction (from 1.0.1; 1.0.0 skipped the insert and kept the event).
+        # The stream heads refuse a live key before this; this catches a row
+        # with no live stream (one written around Lyra).
+        if operation == :create && projected == :key_taken && Lyra::StreamHeads.enabled?
+          raise Lyra::StreamHeads::LiveKeyError, "Lyra: #{self.class.name} #{id}: a row already holds this key; the create is refused"
+        end
+
+        projected
       rescue ActiveRecord::StatementInvalid
         raise
       rescue => e
@@ -1313,7 +1364,7 @@ module Lyra
         end
       end
 
-      def publish_event(operation, data)
+      def publish_event(operation, data, stream_name: lyra_stream_name)
         # Extract metadata from data and pass separately to RailsEventStore
         metadata = Lyra::Privacy.stamp(self.class, data, data.delete(:metadata) || {})
         # The CRUD event, or the domain events the model's rules choose
@@ -1325,7 +1376,7 @@ module Lyra
           event_id: lyra_take_own_event_id
         )
 
-        Lyra.append_events(events, stream_name: lyra_stream_name)
+        Lyra.append_events(events, stream_name: stream_name)
         lyra_own_event_appended!
       rescue => e
         # Its event is not in the log, so the writes made next do not name it

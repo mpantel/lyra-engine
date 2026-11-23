@@ -148,15 +148,47 @@ gem "orfeas_pam_dsl", "~> 1.0", require: "pam_dsl"        # optional
 gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional
 ```
 
-**2. Create the event store tables** with the RailsEventStore 3 generator:
+**2. Create the event store tables and Lyra's own** with the RailsEventStore 3
+generator and Lyra's:
 
 ```bash
 bin/rails generate ruby_event_store:active_record:migration
+bin/rails generate lyra:install
 bin/rails db:migrate
 ```
 
-Lyra's own tables (`lyra_mode_transitions`, `lyra_projection_checkpoints`) are
-created on first use and need no migration.
+`lyra:install` writes one migration (`db/migrate/<timestamp>_create_lyra_tables.rb`;
+`--database NAME` for another database's migrations path) with Lyra's own
+tables:
+
+| Table | Holds |
+|---|---|
+| `lyra_mode_transitions` | the application's mode, the gate's certificates, the touch registry |
+| `lyra_projection_checkpoints` | ES-Lazy's catch-up checkpoint |
+| `lyra_async_checkpoints` | ES-Async's position per stream |
+| `lyra_rights`, `lyra_consents` | restrictions, objections and consent (projections of their streams) |
+| `lyra_stream_heads` | each record's head: live or gone, and its last event |
+
+and an index on `event_store_events_in_streams (stream, id)`, which serves
+Lyra's backward reads by id. Rails Event Store 3's own migration creates that
+index for a new event store; an event store created by an earlier version lacks
+it, and on PostgreSQL the migration builds it concurrently, so writes go on
+while it is built. The generator also writes `config/initializers/lyra.rb`
+unless one exists (`--skip-initializer` to leave it out).
+
+The migration is optional. Without it Lyra creates each table the first time
+it needs it, as before, which needs a database role allowed to create tables;
+with it the tables are in `db/schema.rb` or `db/structure.sql`, so
+`db:schema:load` and test databases have them, and the application's role
+needs no such right. Every statement is "if not exists", so it can run where
+Lyra already created the tables at run time.
+
+**Upgrading from 1.0.0:** run the generator and migrate. Tables Lyra already
+created are left as they are; a `lyra_mode_transitions` created by an earlier
+version gets the columns later versions added; the new `lyra_stream_heads` is
+created empty. The stream heads need no backfill: a record's head is built from
+its events the first time its stream is met. Rolling the migration back changes
+nothing: Lyra keeps using its tables, and the index may be Rails Event Store's.
 
 **3. Add an initializer.** Start in Monitor:
 
@@ -505,6 +537,12 @@ streams. See [PERFORMANCE.md](PERFORMANCE.md) and
     ```bash
     bin/rails lyra:mode:check TO=monitor REBUILD=1
     ```
+    The rebuild and the comparison run in one transaction, rolled back unless
+    the check is clean, so a check that fails leaves the tables as they were
+    (from 1.0.1). Where clearing a table would lose rows the log cannot restore
+    (see [Recovery](#recovery)) the check refuses and changes nothing: back up,
+    rebuild the tables yourself (`lyra:projections:rebuild TRUNCATE=false`, or
+    `FORCE=1`), then check without `REBUILD`.
 
 At run time, `Lyra::ModeTransition.to!(:event_sourcing, projection_mode: :sync)`
 runs the gate in-process (`rebuild: true` when leaving ES-NoProj).
@@ -536,8 +574,8 @@ rows and the events agree, for every monitored record.
   `lyra_mode_transitions`. A process writes one when it boots into a new mode,
   or when none is recorded yet (after the boot gate, and only while the gate
   is on), and on every gated switch (`ModeTransition.to!`). The table also
-  keeps the certificates of clean checks. Lyra creates it on first use; it
-  needs no migration.
+  keeps the certificates of clean checks. The `lyra:install` migration creates
+  it; without the migration Lyra creates it on first use.
 - **`Lyra::ModeSync` keeps the two in step.** At most every
   `config.mode_sync_interval` seconds (default 5) each process looks for a
   newer `applied` row and adopts its mode, without running the gate again
@@ -577,8 +615,14 @@ A check imports rows that predate Lyra first (Genesis, on a switch out of
 Disabled or Monitor), compares every row and every stream, re-checks what
 changed while it ran, and stores a clean result as a certificate for that
 switch (valid for `config.mode_transition_certificate_ttl`, 1 hour by
-default). Leaving ES-Lazy, it catches the tables up first; leaving ES-NoProj,
-it rebuilds them when asked (`REBUILD=1`, or `rebuild: true`).
+default). On PostgreSQL, where it reads the event store's position (at its
+start and end, and at the switch) it first waits for the writes then in flight
+to end, so a write that commits after the position was read is re-checked
+too; one still open after `config.mode_transition_settle_timeout` (30 s)
+leaves the check unclean. Leaving ES-Lazy, it catches the tables up first; leaving ES-NoProj,
+it rebuilds them when asked (`REBUILD=1`, or `rebuild: true`), keeping the
+rebuild only when the check is clean, and refusing where clearing a table would
+lose rows the log cannot restore ([Recovery](#recovery)).
 
 ### The rule: switch modes with a deploy
 
@@ -638,6 +682,7 @@ above.
 |---|---|---|
 | `mode_transition_gate` | `nil` | `nil` gates everywhere but the test environment; `true`; `false` |
 | `mode_transition_certificate_ttl` | `3600` | seconds a clean check certifies a switch |
+| `mode_transition_settle_timeout` | `30` | seconds the check and the switch wait for writes in flight (PostgreSQL) |
 | `mode_sync` | `nil` | `nil` follows the gate; `true`; `false` |
 | `mode_sync_interval` | `5` | seconds between a process's checks for a switch made elsewhere |
 
@@ -705,10 +750,26 @@ Lyra::Projections::Rebuild.rebuild(Order, truncate: false)
 
 By default the table is cleared (`delete_all`, publishing nothing) and every
 stream replayed through the same projection code live writes use, in one
-transaction. Rows without a stream are lost, so run Genesis first. Clearing a
-table that other tables reference by foreign key fails, or with
-`ON DELETE CASCADE` removes their rows; use `TRUNCATE=false` there, which
-replays each stream onto the table in place.
+transaction. Clearing deletes every row, so it would lose what the log cannot
+restore: rows of the table without a stream, and the rows of other tables
+that reference it through a foreign key that is `ON DELETE CASCADE` (deleted)
+or `SET NULL`/`SET DEFAULT` (rewritten), monitored or not. From 1.0.1 the
+rebuild looks for both before it clears and refuses, naming them, without
+writing anything (a key that is `RESTRICT` or `NO ACTION` makes the clearing
+fail and roll back). Then:
+
+1. **Back up the database**, and list the foreign keys into the table.
+2. Rows without a stream: import them first (`bin/rails lyra:genesis MODEL=Order`).
+3. Referencing rows: rebuild in place (`TRUNCATE=false`, `truncate: false`),
+   which replays each stream onto the table and deletes only the rows whose
+   records the log destroys. It does not undo a column changed outside Lyra
+   that no later event sets, so compare afterwards
+   (`Lyra::ModeTransition.check(to: "monitor").discrepancies`). Or,
+   if losing or rewriting those rows is what you want, clear anyway
+   (`FORCE=1`, `force: true`).
+
+The rake task rebuilds one model at a time: when it refuses a table, the
+models rebuilt before it stay rebuilt.
 
 **Tables authoritative (Monitor, Disabled): repair the log** with
 `bin/rails lyra:repair` (Phase 3).

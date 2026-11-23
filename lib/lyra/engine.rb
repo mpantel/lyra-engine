@@ -193,6 +193,19 @@ module Lyra
         end
       end
 
+      # Lyra::ModeSync: where the application's record stood when the process
+      # booted, to tell a mode it sets later from the one it was configured
+      # with (a code reload's to_prepare blocks apply that configuration again,
+      # and are no set: ModeSync::Reloads). It must be read after every
+      # after_initialize block, the application's included, so it is the
+      # application's last initializer, appended to the Finisher. An engine's
+      # initializer cannot go there: with after: :finisher_hook, Rails would
+      # run the Finisher ahead of the application's own initializers.
+      ::Rails::Application::Finisher.initializer "lyra.mode_sync_boot" do |app|
+        app.reloader.singleton_class.prepend(Lyra::ModeSync::Reloads)
+        Lyra::ModeSync.remember_boot!
+      end
+
       # Rails loads every lib/tasks/*.rake under an engine's root into the
       # host application. In a development checkout that root also holds its own
       # maintenance tasks (gems:, public:, stats:, ...), and the Lyra task

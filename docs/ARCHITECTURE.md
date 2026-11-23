@@ -911,9 +911,16 @@ catch-up.
 `truncate: false`) and replays every stream through the same projection code
 live writes use; `rebuild_all` does every monitored model, and
 `replay_record(Model, id)` one record. `bin/rails lyra:projections:rebuild
-[MODEL=A,B] [TRUNCATE=false]` runs it from the command line. Rows without a
-stream are lost by a truncating rebuild, so run Genesis first; see
-[MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#recovery).
+[MODEL=A,B] [TRUNCATE=false] [FORCE=1]` runs it from the command line.
+Clearing a table deletes what the log cannot restore wherever another table
+references it through a foreign key that is `ON DELETE CASCADE`, `SET NULL` or
+`SET DEFAULT` (their rows are deleted or rewritten), and wherever the table
+holds rows without a stream. From 1.0.1 a clearing rebuild looks for both
+first (`Rebuild.clear_hazards`, PostgreSQL's catalog for the keys) and refuses
+(`Rebuild::Refused`) naming them, unless `force: true`; `truncate: false`
+replays in place and deletes only what the log destroys. A mode check with
+`rebuild: true` rebuilds and compares in one transaction, rolled back unless
+the check is clean. See [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md#recovery).
 
 ### Analysis Projections
 
@@ -1096,7 +1103,8 @@ CREATE TABLE event_store_events_in_streams (
 );
 ```
 
-Lyra's own tables are created on first use and need no migration:
+Lyra's own tables are created by the migration that `bin/rails generate
+lyra:install` writes (from 1.0.1) or, without it, on first use:
 
 | Table | Holds | Written by |
 |---|---|---|
@@ -1105,6 +1113,7 @@ Lyra's own tables are created on first use and need no migration:
 | `lyra_mode_transitions` | applied mode switches and check certificates | `Lyra::ModeTransition` |
 | `lyra_rights` | one row per restriction or objection: subject key, kind, policy, purpose, fields, ground, article, state, in force, times, the subject stream's version (from 1.0.0) | `Lyra::Rights::Store`, in the transaction that appends to `Lyra::Rights$<subject key>` |
 | `lyra_consents` | one row per subject key and purpose: consent state, requested, granted, expiry and withdrawal times (from 1.0.0) | `Lyra::Rights::ConsentStore`, in the transaction that appends to `Lyra::Consent$<subject key>` |
+| `lyra_stream_heads` | one row per record stream: live or gone, and its last event (from 1.0.1) | `Lyra::StreamHeads`, in the transaction that appends the record's event |
 
 `lyra_rights` and `lyra_consents` are projections of their streams:
 `bin/rails lyra:rights:rebuild` rebuilds them by replay.

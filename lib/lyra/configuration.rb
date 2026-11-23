@@ -45,6 +45,9 @@ module Lyra
     attr_accessor :mode_transition_gate
     # How long a clean check (rake lyra:mode:check) certifies a switch.
     attr_accessor :mode_transition_certificate_ttl
+    # Seconds the gate waits for the writes in flight at its check, or at
+    # the switch, to end before it refuses (ModeTransition#settle; 1.0.1).
+    attr_accessor :mode_transition_settle_timeout
     # Share of writes checked by DualView after commit (0.0, the default, is
     # off; the thesis suggests 0.01-0.05), and what to call on a discrepancy.
     attr_accessor :dual_view_sample_rate, :dual_view_discrepancy_handler
@@ -62,6 +65,14 @@ module Lyra
     # data it carries (Lyra::Privacy.stamp). Off by default: it adds work to
     # every write, measured separately.
     attr_accessor :annotate_privacy
+    # Enforce the history clauses of Hypothesis H where events are appended
+    # (Lyra::StreamHeads, from 1.0.1). false: 1.0.0's behaviour, for comparison.
+    attr_accessor :stream_heads
+    # Check the effect clause of Hypothesis H (H2) at each write through
+    # callbacks in Hijack and ES-Sync: the row against its events, in the
+    # write's transaction (Lyra::EffectCheck, from 1.0.1). Off by default;
+    # LYRA_CHECK_EFFECTS=1 turns it on.
+    attr_accessor :check_effects
     # Record every access the privacy policy validates as an event
     # (Lyra::AccessLog). Off by default: reads can outnumber writes by orders
     # of magnitude, so its cost is measured separately.
@@ -212,6 +223,7 @@ module Lyra
       @unique_index_refresh = 60
       @mode_transition_gate = nil
       @mode_transition_certificate_ttl = 3600
+      @mode_transition_settle_timeout = 30
       @dual_view_sample_rate = 0.0
       @dual_view_discrepancy_handler = nil
       @mode_sync = nil
@@ -236,18 +248,25 @@ module Lyra
       @dashboard_purpose = nil
       @dashboard_max_events = 10_000
       @record_touches = true
+      @stream_heads = true
+      @check_effects = ENV["LYRA_CHECK_EFFECTS"] == "1"
     end
 
-    # One of MODES; a string (from ENV, say) is taken as its symbol.
+    # One of MODES; a string (from ENV, say) is taken as its symbol. Leaving
+    # Hijack clears hijack_enabled, which enable_hijack!, a switch and an
+    # adoption set with it; set on its own, outside Hijack, the flag stays.
     def mode=(mode)
       mode = validate_choice!(:mode, mode, MODES)
       refuse_unrecorded_touches!(mode)
+      @hijack_enabled = false if @mode == :hijack && mode != :hijack
       @mode = mode
+      mode_set!
     end
 
     # One of PROJECTION_MODES; a string is taken as its symbol.
     def projection_mode=(mode)
       @projection_mode = validate_choice!(:projection_mode, mode, PROJECTION_MODES)
+      mode_set!
     end
 
     # One of GENESIS_UNREPRESENTABLE; a string is taken as its symbol.
@@ -320,6 +339,7 @@ module Lyra
     def hijack_enabled=(value)
       refuse_unrecorded_touches!(:hijack) if value
       @hijack_enabled = value
+      mode_set!
     end
 
     # Why +mode+ (a mode, or a ModeTransition label such as
@@ -491,6 +511,7 @@ module Lyra
       refuse_unrecorded_touches!(:hijack)
       @hijack_enabled = true
       @mode = :hijack
+      mode_set!
     end
 
     # Enable monitor mode (only log events, don't override)
@@ -499,6 +520,7 @@ module Lyra
 
       @hijack_enabled = false
       @mode = :monitor
+      mode_set!
     end
 
     # Enable event sourcing mode (events as source of truth, no direct DB writes)
@@ -508,15 +530,22 @@ module Lyra
       refuse_unrecorded_touches!(:event_sourcing)
       @mode = :event_sourcing
       @hijack_enabled = false
+      mode_set!
     end
 
     # Disable Lyra completely
     def disable!
       @mode = :disabled
       @hijack_enabled = false
+      mode_set!
     end
 
     private
+
+    # After boot, a set of this process's own (Lyra::ModeSync.mode_set!).
+    def mode_set!
+      Lyra::ModeSync.mode_set! if defined?(Lyra::ModeSync) && Lyra.config.equal?(self)
+    end
 
     def refuse_unrecorded_touches!(mode)
       refusal = touch_refusal(mode)

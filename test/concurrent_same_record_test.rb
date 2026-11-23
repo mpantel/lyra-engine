@@ -108,6 +108,9 @@ class ConcurrentSameRecordTest < Minitest::Test
   def test_hijack_without_the_lock_can_leave_the_row_and_the_log_in_different_orders
     Lyra.config.enable_hijack!
     Lyra.config.lock_aggregate_before_append = false
+    # The stream heads (1.0.1) order two writers of one record at the append
+    # by themselves: without any lock means without them too.
+    Lyra.config.stream_heads = false
     id = RaceItem.create!(label: "initial").id
 
     interleave(id, pause_at: :after_command)
@@ -133,6 +136,9 @@ class ConcurrentSameRecordTest < Minitest::Test
     Lyra.config.enable_event_sourcing!
     Lyra.config.projection_mode = :sync
     Lyra.config.lock_aggregate_before_append = false
+    # The stream heads (1.0.1) order two writers of one record at the append
+    # by themselves: without any lock means without them too.
+    Lyra.config.stream_heads = false
     id = RaceItem.create!(label: "initial").id
 
     interleave(id, pause_at: :before_projection)
@@ -250,6 +256,9 @@ class ConcurrentSameRecordTest < Minitest::Test
     Lyra.config.projection_mode = :async
     Lyra.config.async_projections_inline = false
     Lyra.config.lock_aggregate_before_append = false
+    # The stream heads (1.0.1) order two writers of one record at the append
+    # by themselves: without any lock means without them too.
+    Lyra.config.stream_heads = false
     id = RaceItem.create!(label: "initial").id
     run_enqueued(adapter)
 
@@ -413,8 +422,14 @@ class ConcurrentSameRecordTest < Minitest::Test
     label
   end
 
+  # The events, and what Lyra keeps about them: a stream head or an ES-Lazy
+  # checkpoint left from an earlier run names events that are gone, and a
+  # checkpoint at the new events' ids skipped them (this test writes nine
+  # each run, from id 1 when the sequence was reset).
   def clean_events
     connection.execute("DELETE FROM event_store_events_in_streams")
     connection.execute("DELETE FROM event_store_events")
+    connection.execute("DELETE FROM #{Lyra::StreamHeads::TABLE}") if connection.table_exists?(Lyra::StreamHeads::TABLE)
+    Lyra::Projections::LazyProjection.reset!
   end
 end

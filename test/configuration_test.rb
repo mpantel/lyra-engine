@@ -43,6 +43,59 @@ module Lyra
       assert @config.monitor_mode?
     end
 
+    # enable_hijack!, a switch and an adoption set the flag with the mode: it
+    # goes with the mode too, or a process told Disabled still intercepts.
+    %i[disabled monitor event_sourcing].each do |mode|
+      define_method("test_leaving_hijack_for_#{mode}_through_the_mode_setter_clears_the_flag") do
+        @config.enable_hijack!
+        @config.mode = mode
+        refute @config.hijack_enabled
+        refute @config.hijack_mode?
+      end
+    end
+
+    def test_setting_hijack_again_keeps_the_flag
+      @config.enable_hijack!
+      @config.mode = "hijack"
+      assert @config.hijack_enabled
+    end
+
+    def test_the_raw_setter_to_hijack_leaves_the_flag_as_it_was
+      @config.mode = :hijack
+      refute @config.hijack_enabled
+      assert @config.hijack_mode?
+    end
+
+    # config.hijack_enabled = true on its own means Hijack whatever mode says
+    # (API reference), also before the mode is set in an initializer.
+    %i[monitor disabled event_sourcing].each do |mode|
+      define_method("test_hijack_enabled_set_on_its_own_survives_mode_#{mode}") do
+        @config.hijack_enabled = true
+        @config.mode = mode
+        assert @config.hijack_mode?
+      end
+    end
+
+    # In an initializer, the last call decides.
+    def test_enable_hijack_then_the_mode_setter_follows_the_setter
+      @config.enable_hijack!
+      @config.mode = :monitor
+      assert @config.monitor_mode?
+      refute @config.hijack_mode?
+    end
+
+    def test_the_mode_setter_then_enable_hijack_follows_enable_hijack
+      @config.mode = :monitor
+      @config.enable_hijack!
+      assert @config.hijack_mode?
+    end
+
+    def test_a_refused_mode_change_keeps_the_flag
+      @config.enable_hijack!
+      assert_raises(ArgumentError) { @config.mode = :monitr }
+      assert @config.hijack_enabled
+    end
+
     def test_monitor_model
       dummy_user = Class.new
       stub_const("DummyUser", dummy_user)

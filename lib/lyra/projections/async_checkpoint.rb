@@ -55,9 +55,22 @@ module Lyra
             connection.select_values(<<~SQL.squish, "Lyra ES-Async rows behind")
               SELECT DISTINCT s.stream FROM event_store_events_in_streams s
               LEFT JOIN #{TABLE} c ON c.stream = s.stream
-              LEFT JOIN event_store_events_in_streams cs ON cs.stream = c.stream AND cs.event_id = c.event_id
+              LEFT JOIN event_store_events_in_streams cs ON cs.stream = c.stream AND #{event_match(connection)}
               WHERE s.stream IN (#{list}) AND (cs.id IS NULL OR s.id > cs.id)
             SQL
+          end
+        end
+
+        # The checkpoint's event in the store: event_id is a string column in
+        # Rails Event Store's default schema and a uuid in some (Solidus's), and
+        # PostgreSQL compares no uuid with a string column (from 1.0.1, when a
+        # locking read in ES-Async came to run this query: Lyra::StreamHeads
+        # matches its event the same way).
+        def event_match(connection)
+          @event_match ||= {}
+          @event_match[connection.pool.db_config.name] ||= begin
+            column = connection.columns("event_store_events_in_streams").find { _1.name == "event_id" }
+            column&.type == :uuid ? "cs.event_id = c.event_id::uuid" : "cs.event_id = c.event_id"
           end
         end
 

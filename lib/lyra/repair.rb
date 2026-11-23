@@ -159,7 +159,9 @@ module Lyra
 
       def load_row(model, id, lock: false)
         scope = lock ? model.unscoped.lock : model.unscoped
-        Lyra::PurposeBoundReads.internal(INTERNAL) { scope.find_by(model.primary_key => id) }
+        # Lyra's own locking read: the row as it is, not first brought up to date.
+        read = -> { scope.find_by(model.primary_key => id) }
+        Lyra::PurposeBoundReads.internal(INTERNAL) { lock ? Lyra::Projections::LazyProjection.own_locking_read(&read) : read.call }
       end
 
       # The values of +row+ the repair of +problem+ would write that the model

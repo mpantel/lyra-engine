@@ -206,3 +206,45 @@ class Minitest::Test
     check
   end
 end
+
+# LYRA_TEST_WATCHDOG=<seconds>: a test running longer prints every thread's
+# backtrace and the database's sessions to stderr, once, and goes on running.
+# For finding where a suite hangs on a test machine; off by default.
+if ENV["LYRA_TEST_WATCHDOG"].to_i.positive?
+  module LyraTestWatchdog
+    LIMIT = ENV["LYRA_TEST_WATCHDOG"].to_i
+
+    def before_setup
+      label = "#{self.class}##{name}"
+      @lyra_watchdog = Thread.new do
+        sleep LIMIT
+        out = +"\n=== LYRA_TEST_WATCHDOG: #{label} still running after #{LIMIT}s\n"
+        Thread.list.each do |thread|
+          next if thread == Thread.current
+
+          out << "--- #{thread.inspect}\n" << (thread.backtrace || []).first(30).map { "    #{_1}\n" }.join
+        end
+        begin
+          ActiveRecord::Base.connection_pool.db_config.then do |config|
+            own = config.new_connection
+            rows = own.select_rows("SELECT pid, state, wait_event_type, wait_event, now() - xact_start, left(query, 160) " \
+                                   "FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid()")
+            out << "--- database sessions\n" << rows.map { "    #{_1.join(' | ')}\n" }.join
+            own.disconnect!
+          end
+        rescue StandardError => e
+          out << "--- database sessions: #{e.class}: #{e.message}\n"
+        end
+        $stderr.write(out)
+      end
+      super
+    end
+
+    def after_teardown
+      super
+    ensure
+      @lyra_watchdog&.kill
+    end
+  end
+  Minitest::Test.prepend(LyraTestWatchdog)
+end

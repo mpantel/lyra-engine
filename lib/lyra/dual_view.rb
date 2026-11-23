@@ -29,9 +29,12 @@ module Lyra
     # reads_without_purpose :deny it needs a purpose that allows the declared
     # fields, as any read does. Lyra's own comparisons (the mode gate, the
     # sampler, repair) read as Lyra. The row is looked up by the model's
-    # primary key, whatever its column is called.
+    # primary key, whatever its column is called, and without the model's
+    # default scope (from 1.0.1): the comparison is of the two stores, and a
+    # soft-deleted row (default_scope { where(deleted_at: nil) }) is still in
+    # the table, as its events say.
     def crud_state
-      record = model_class.find_by(Lyra.key_column(model_class) => model_id)
+      record = model_class.unscoped { model_class.find_by(Lyra.key_column(model_class) => model_id) }
 
       return { exists: false } unless record
 

@@ -70,9 +70,14 @@ gem "orfeas_petri_flow", "~> 1.0", require: "petri_flow"  # optional, verificati
 ```
 
 Create the event store tables with the RailsEventStore 3 generator
-(`bin/rails generate ruby_event_store:active_record:migration`), then add an
-initializer. The [Migration Guide](docs/MIGRATION_GUIDE.md) walks through the
-whole path from Disabled to event sourcing.
+(`bin/rails generate ruby_event_store:active_record:migration`), then Lyra's
+own tables with `bin/rails generate lyra:install` (from 1.0.1): one migration
+with them and the index on `event_store_events_in_streams (stream, id)` that
+Lyra's backward reads use, and `config/initializers/lyra.rb` unless the
+application has one (`--skip-initializer`). Without the migration Lyra creates
+each table the first time it needs it, as before. The
+[Migration Guide](docs/MIGRATION_GUIDE.md) walks through the whole path from
+Disabled to event sourcing.
 
 ## Features
 

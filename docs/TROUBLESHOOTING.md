@@ -284,7 +284,10 @@ bin/rails lyra:mode:check TO=monitor REBUILD=1   # leaving ES-NoProj
 ```
 
 A certificate is valid for `config.mode_transition_certificate_ttl` seconds
-(3600 by default). `LYRA_FORCE_MODE_TRANSITION=1` lets a process start without
+(3600 by default). A check that reports "a write in flight at the check did
+not end" met a transaction that stayed open longer than
+`config.mode_transition_settle_timeout` (30 s): run the check again when it has
+ended, or when writers are stopped. `LYRA_FORCE_MODE_TRANSITION=1` lets a process start without
 one, when you accept that the stores may disagree. Rake tasks are not gated at
 boot, so the check and migrations run in any configuration.
 
@@ -488,19 +491,25 @@ be helped that way. The price of the bulk write's turns: under contention, the
 transactions that share records with it wait while it holds them, and go through
 less often than when it gave its locks back at once.
 
-**Known issue (ES-Lazy): a transaction that reads, then writes.** A read in
-ES-Lazy first brings the tables up to date (the catch-up), and inside a
-transaction the rows it writes stay locked until the transaction ends. The
-catch-up writes those rows without the records' aggregate locks. When the
-transaction then takes a record's aggregate lock (a write through callbacks,
-`update_all`) that a bulk write holds while it waits for one of those rows (to
-bring it up to date before writing it), the two wait for each other.
-PostgreSQL detects it after `deadlock_timeout` and aborts one of them with
-`ActiveRecord::Deadlocked`; nothing of the aborted one is written or recorded.
-Retry the transaction, or do the reads outside it. The transaction's first
-read also takes the catch-up lock and holds it until the transaction ends, so
-a transaction that writes a record and then reads can wait for one that read
-first and then writes that record, with the same outcome.
+**ES-Lazy: a transaction that reads, then writes (fixed in 1.0.1).** In
+1.0.0 a read inside a transaction caught up in that transaction: the rows it
+wrote and the catch-up lock stayed held until the transaction ended, and a
+transaction that held a row and then read could deadlock with another
+reader's catch-up, or with a bulk write. From 1.0.1 such a catch-up runs on a
+connection of its own and commits at once, and it waits at most 100 ms for a
+row another transaction holds, then leaves that record for a later catch-up.
+A read that only the transaction's own writes are behind replays those records
+in the transaction. `lock!`, `with_lock` and `lock.find(ids)` take the records'
+aggregate locks before their row locks, the order every writer takes them in.
+A locking read whose keys are not known before it runs (`Model.lock.where(...)`,
+a `lock` with a join) reads its keys first, takes their aggregate locks, then
+runs. What can still deadlock: raw `FOR UPDATE` SQL and an eager-loading
+locking read, which take rows before aggregate locks; a record that starts to
+match such a read more than twice while it runs; and the fallback when no second connection
+is free in the pool (or the connection is pinned, as in transactional tests),
+where the catch-up runs in the transaction as in 1.0.0. In `REPEATABLE READ`
+and `SERIALIZABLE` the catch-up also runs in the transaction, as in 1.0.0, so
+that the transaction's snapshot sees the rows it applies.
 
 **Fix**:
 

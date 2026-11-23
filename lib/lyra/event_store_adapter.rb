@@ -22,6 +22,62 @@ module Lyra
   # EventStoreUnavailableError if the store fails. Every event Lyra writes
   # goes through here.
   def self.append_events(events, stream_name:, store: config.event_store)
+    # Each replayed CRUD event first moves its record stream's head, in this
+    # transaction: what Hypothesis H excludes is refused here, before anything
+    # is stored (Lyra::StreamHeads). Outside the rescue below, so a refusal
+    # stays the error the application expects (RecordNotUnique, RecordNotFound).
+    if StreamHeads.enabled?
+      Array(events).each do |event|
+        operation = record_operation(event)
+        next unless operation
+
+        # On the record's own database, where Lyra keeps its event store (the
+        # same transaction as the append), not necessarily ActiveRecord::Base's.
+        model = record_model(event)
+        if model
+          model.with_connection { StreamHeads.advance!(stream_name, operation, event.event_id, connection: _1) }
+        else
+          StreamHeads.advance!(stream_name, operation, event.event_id)
+        end
+      end
+    end
+    stored = store_events(events, stream_name: stream_name, store: store)
+    note_own_writes(events) if Projections::LazyProjection.active?
+    stored
+  end
+
+  # ES-Lazy, design c: the records this transaction appended events of, which
+  # a catch-up on a connection of its own cannot see before the commit, so the
+  # transaction's own reads replay them (LazyProjection.own_write!).
+  def self.note_own_writes(events)
+    Array(events).each do |event|
+      next unless record_operation(event)
+
+      model = record_model(event) or next
+      data = event.data
+      Projections::LazyProjection.own_write!(model, data[:model_id] || data["model_id"], event.event_id)
+    end
+  end
+  private_class_method :note_own_writes
+
+  # The replayed CRUD operation of a record's event (Lyra::EventData), or nil
+  # for any other event: domain events added with also:, links, erasures,
+  # access-log and rights events.
+  def self.record_operation(event)
+    data = event.data.is_a?(Hash) ? event.data : {}
+    return nil if (data[:model_class] || data["model_class"]).nil? || (data[:model_id] || data["model_id"]).nil?
+
+    Lyra::Event.operation_of(event)
+  end
+
+  # The Active Record class an event of a record names, or nil.
+  def self.record_model(event)
+    data = event.data.is_a?(Hash) ? event.data : {}
+    klass = (data[:model_class] || data["model_class"]).to_s.safe_constantize
+    klass if klass.is_a?(Class) && klass < ActiveRecord::Base
+  end
+
+  def self.store_events(events, stream_name:, store:)
     # Encrypted attributes go to the log as ciphertext, as they go to the row.
     Array(events).each { |event| EncryptedAttributes.seal!(event) }
     store.publish(events, stream_name: stream_name)
@@ -31,6 +87,7 @@ module Lyra
   rescue => e
     raise EventStoreUnavailableError, "could not store events in #{stream_name}: #{e.class}: #{e.message}"
   end
+  private_class_method :store_events
 
   # Create one of Lyra's own tables (+name+, defined by the block, given a
   # connection) so that it outlives the caller's transaction. Created inside

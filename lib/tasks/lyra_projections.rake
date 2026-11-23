@@ -4,7 +4,8 @@ namespace :lyra do
   namespace :projections do
     desc "Rebuild read-model tables from the event log " \
          "(MODEL=Namespace::Model[,Other] for specific models, or all monitored models; " \
-         "TRUNCATE=false to reconstruct in place)"
+         "TRUNCATE=false to reconstruct in place; FORCE=1 to clear a table even where that loses rows " \
+         "the log cannot restore)"
     task rebuild: :environment do
       models =
         if ENV["MODEL"]
@@ -22,10 +23,15 @@ namespace :lyra do
       end
 
       truncate = ENV.fetch("TRUNCATE", "true") != "false"
+      # Without FORCE, a table whose clearing would lose rows the log cannot
+      # restore is refused before anything of it is written
+      # (Lyra::Projections::Rebuild.clear_hazards); the tables rebuilt
+      # before it stay rebuilt.
+      force = ENV["FORCE"].present?
 
-      puts "Rebuilding #{models.size} model(s) from the event log (truncate=#{truncate})..."
+      puts "Rebuilding #{models.size} model(s) from the event log (truncate=#{truncate}#{', force' if force})..."
       models.each do |model_class|
-        stats = Lyra::Projections::Rebuild.rebuild(model_class, truncate: truncate)
+        stats = Lyra::Projections::Rebuild.rebuild(model_class, truncate: truncate, force: force)
         puts format(
           "  %-30s %5d records, %4d destroyed, %6d events across %5d streams",
           stats[:model], stats[:records], stats[:destroyed], stats[:events], stats[:streams]

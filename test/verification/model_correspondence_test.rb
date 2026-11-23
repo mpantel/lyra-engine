@@ -64,8 +64,11 @@ class ModelCorrespondenceTest < Minitest::Test
 
   # T_publish / P_published: both paths append to the record's stream.
   def test_t_publish_appends_to_the_record_stream
-    assert_match(/Lyra\.append_events\(events, stream_name: lyra_stream_name\)/,
-                 method_source(interceptor, "publish_event").to_s)
+    # The record's own stream by default; a key change in Monitor (1.0.1)
+    # records the old key's destroy on the old key's stream.
+    publish = method_source(interceptor, "publish_event").to_s
+    assert_match(/def publish_event\(operation, data, stream_name: lyra_stream_name\)/, publish)
+    assert_match(/Lyra\.append_events\(events, stream_name: stream_name\)/, publish)
     assert_match(/Lyra\.append_events\(events, stream_name: stream_name\)/, handler)
   end
 

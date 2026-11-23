@@ -295,6 +295,10 @@ module Lyra
           end
         end
 
+        # The tables of +model_class+'s HABTM associations, which a rebuild
+        # clears and restores from their link events.
+        def join_tables(model_class) = join_models(model_class).values.map(&:table_name).uniq
+
         # Remove the rows of +model_class+'s join tables (before the model's
         # table is cleared, which their foreign keys may reference).
         def clear(model_class)

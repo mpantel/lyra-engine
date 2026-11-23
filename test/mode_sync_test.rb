@@ -48,6 +48,23 @@ class ModeSyncTest < Minitest::Test
     assert_equal :hijack, Lyra.config.mode, "adopted before the write, outside its transaction"
   end
 
+  def test_an_adopted_hijack_does_not_outlive_a_later_mode_change
+    other_process_switches_to("hijack")
+    Sync.maybe_sync!
+    Lyra.config.mode = :disabled
+
+    SyncUser.create!(name: "Ann", email: "ann@example.com")
+    assert_equal 0, ActiveRecord::Base.connection.select_value("SELECT count(*) FROM event_store_events").to_i,
+                 "Disabled stores no event"
+  end
+
+  def test_an_applied_hijack_does_not_outlive_a_later_mode_change
+    MT.to!(:hijack, force: true)
+    Lyra.config.mode = :disabled
+
+    refute Lyra.hijack_mode?
+  end
+
   def test_never_inside_a_transaction
     other_process_switches_to("hijack")
 

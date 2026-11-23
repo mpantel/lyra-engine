@@ -102,6 +102,8 @@ Every option of `Lyra::Configuration` (`lib/lyra/configuration.rb`).
 | `privacy_policy` | `nil` | Default privacy policy name for monitored models that name none. |
 | `mode_transition_gate` | `nil` | Gate mode switches: `nil` everywhere but the test environment; `true` always; `false` never. |
 | `mode_transition_certificate_ttl` | `3600` | Seconds a clean `lyra:mode:check` certifies a switch. |
+| `mode_transition_settle_timeout` | `30` | Seconds the check, and the switch, wait for the writes in flight when they read the event store's position (PostgreSQL); a write still open then leaves the check unclean. |
+| `check_effects` | `false` (`LYRA_CHECK_EFFECTS=1`: `true`) | Hijack and ES-Sync: after each write through callbacks, compare the record's row with the replay of its stream in the write's transaction, and raise `Lyra::EffectMismatchError` (rolling the write back) when they differ (Hypothesis H's effect clause, H2). Costs a read of the row and the stream and a replay per write. Writes that skip callbacks are not checked. |
 | `dual_view_sample_rate` | `0.0` | Share of committed writes checked by DualView (opt-in; `0.0` is off). |
 | `dual_view_discrepancy_handler` | `nil` | Called with each `ModeTransition::Discrepancy` the sampler finds. |
 | `mode_sync` | `nil` | Keep every process in the application-wide mode: `nil` follows the gate setting; `true`; `false`. |
@@ -473,7 +475,7 @@ Lyra::ModeTransition.to!(:hijack, force: true)      # no check
 | Method | Description |
 |---|---|
 | `to!(mode, projection_mode: nil, force: false, rebuild: false)` | Switch, gated. Runs a check when the switch changes the authoritative store (escalation from Disabled/Monitor, or leaving ES-NoProj/ES-Lazy/ES-Async for a table-reading mode), unless a fresh certificate covers it. Raises `ModeTransition::Refused` (with `#report`) on discrepancies, and, entering ES-NoProj, when a monitored model has a default scope ES-NoProj cannot evaluate or an unmonitored table has a database foreign key into a monitored one. Records the switch so other processes adopt it. Returns the check's `Report`, or `nil`. |
-| `check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)` | Compare every row with its stream; imports pre-Lyra rows first on escalation (a row holding a value its model cannot represent is a discrepancy and its model is not imported); stores a certificate when clean. Returns a `Report`. |
+| `check(to:, from: current, models: Lyra.config.monitored_models, rebuild: false, batch_size: 1_000)` | Compare every row with its stream; imports pre-Lyra rows first on escalation (a row holding a value its model cannot represent is a discrepancy and its model is not imported); stores a certificate when clean. Returns a `Report`. With `rebuild: true`, leaving ES-NoProj, ES-Lazy or ES-Async, it rebuilds the tables (`Rebuild.rebuild`) and compares them in one transaction (a savepoint in a transaction already open), rolled back unless the check is clean (from 1.0.1): a check that fails leaves the tables as they were (`report.rebuilt` is then 0). When a rebuild refuses to clear a table (see [Rebuild](#rebuild)), it raises `ModeTransition::Refused` and changes no table; rebuild the tables yourself first (`TRUNCATE=false`, or `FORCE=1` after a backup), then check without `rebuild`. |
 | `current` | This process's configuration as a label: `"monitor"`, `"event_sourcing/lazy"`. |
 | `label(mode, projection_mode = nil)` | Build such a label. |
 | `gate_enabled?` | Whether switches are gated (`config.mode_transition_gate`). |
@@ -1158,12 +1160,35 @@ events skipped.
 ```ruby
 Lyra::Projections::Rebuild.rebuild(Registration)               # => { model:, streams:, events:, records:, destroyed: }
 Lyra::Projections::Rebuild.rebuild(Order, truncate: false)     # in place
+Lyra::Projections::Rebuild.rebuild(Order, force: true)         # clear even where rows would be lost
 Lyra::Projections::Rebuild.rebuild_all                         # all monitored models
 Lyra::Projections::Rebuild.replay_record(Order, 42)            # one record; returns events replayed
+Lyra::Projections::Rebuild.clear_hazards(Order)                # => { references:, streamless:, streamless_ids: }
 ```
 
 `rebuild` clears the table (unless `truncate: false`) and replays every stream
-through the same projection code as live projection.
+through the same projection code as live projection, in one transaction.
+Clearing deletes every row, and the database applies each foreign key's
+`ON DELETE` action to the rows that reference them. From 1.0.1 `rebuild`
+refuses to clear a table (`Rebuild::Refused`, before anything is written)
+while that would lose what the log cannot restore, and names it
+(`clear_hazards`):
+
+- rows of another table that reference it through a foreign key that is
+  `ON DELETE CASCADE`, `SET NULL` or `SET DEFAULT` (from PostgreSQL's catalog),
+  whether that table is monitored or not: a rebuild restores one model's table
+  only. A key whose table has no row referencing a row does not count, nor one
+  from the table into itself, nor the model's own HABTM join tables (restored
+  from their link events);
+- rows of the table itself with no event stream (not yet imported: run
+  `Lyra::Genesis.import_all(Model)` or `rake lyra:genesis` first). A row whose
+  stream ends in a destroy is deleted, as the log says.
+
+Back up the database first. Then either rebuild in place (`truncate: false`),
+which deletes only the rows whose records the log destroys but leaves a column
+changed outside Lyra that no later event sets (`ModeTransition.discrepancy`
+finds it), or clear the table anyway (`force: true`). `rebuild_all` passes
+`truncate:` and `force:` to each model's rebuild, one transaction per model.
 
 ### Custom projections
 
@@ -1881,7 +1906,7 @@ loaded by PAM's Railtie when the pam_dsl gem is in the application's bundle.
 | `lyra:erase MODEL=... ID=... REASON=... [FIELDS=a,b] [EVERYWHERE=1] [MAX_COPIES=n] [DRY_RUN=1]` | `Lyra::Erasure.erase!` for one record; `MAX_COPIES` is passed as `max_copies:` (a positive integer; default `config.erasure_max_copies`), `DRY_RUN=1` as `dry_run: true`. Prints the copies erased, the records left behind, the rows erased without events with the remedy for the mode (`lyra:repair`, or a rebuild), and each value left as shared by field, type and holders; after a dry run, with the `MAX_COPIES` that would erase them. `LIFTING=id[,id]` passes `lifting:`; the restrictions lifted and the copies kept under a restriction are printed. |
 | `lyra:retention:apply [DRY_RUN=1] [MODELS=...]` | `Lyra::Retention.apply!`. |
 | `lyra:genesis [MODEL=A,B] [UNREPRESENTABLE=refuse\|skip]` | Import pre-Lyra rows now. Lists the rows whose values a model cannot represent: a refused model (nothing of it imported; exits 1 after the other models), or with `UNREPRESENTABLE=skip` the rows left out. |
-| `lyra:projections:rebuild [MODEL=A,B] [TRUNCATE=false]` | Rebuild tables from the event log. |
+| `lyra:projections:rebuild [MODEL=A,B] [TRUNCATE=false] [FORCE=1]` | Rebuild tables from the event log, one model at a time. Refuses (prints it, exits non-zero) to clear a table where that would lose rows the log cannot restore ([Rebuild](#rebuild)); the models rebuilt before it stay rebuilt. `TRUNCATE=false` rebuilds in place; `FORCE=1` clears anyway. |
 | `lyra:schema:create`, `update`, `verify`, `report`, `history`, `diff[v1,v2]` | Event schema versions in `schema_path`. |
 | `lyra:workflows:generate [MODE=...] [OUTPUT_DIR=...] [REPORTS_DIR=...]`, `lyra:workflows:verify`, `lyra:generate_workflows` | Generate and verify PetriFlow workflows (needs petri_flow). See [WORKFLOW_GENERATOR.md](WORKFLOW_GENERATOR.md). |
 | `pam_dsl:report:full`, `policy`, `pii`, `retention`, `access_patterns`, `article_30`, `export[path]`, `compare[p1,p2,path]` | PAM reports. |
@@ -1900,7 +1925,7 @@ monitored model.
 | `Lyra::EventStoreUnavailableError` | An event could not be stored (fails the write in Hijack and event sourcing, and in Monitor with `monitor_append_failure = :fail_write`). |
 | `Lyra::ModeTransition::Refused` | A gated switch or a boot found discrepancies or no certificate; `#report`. Also a switch, check, adoption or boot into Hijack or event sourcing while `record_touches` is false here or any process has a live `touch_skipping` entry (`force: true` included), and then the gated `enable_hijack!`/`enable_event_sourcing!`; a process with the option off booting into, or finding, an application in such a mode, and `record_touches = false` set at runtime in one. |
 | `Lyra::Repair::Refused` | `Repair.run` outside Monitor/Disabled. |
-| `Lyra::Projections::Rebuild::Refused` | `Rebuild.rebuild` while `record_touches` is false, or a process has a live `touch_skipping` entry. |
+| `Lyra::Projections::Rebuild::Refused` | `Rebuild.rebuild` while `record_touches` is false, or a process has a live `touch_skipping` entry; from 1.0.1 also a clearing rebuild (`truncate: true`, without `force: true`) where clearing the table would lose rows the log cannot restore (`Rebuild.clear_hazards`). |
 | `Lyra::Projections::UnsupportedQuery` | ES-NoProj cannot answer a query exactly. |
 | `Lyra::Temporal::HistoryNotRecorded` | A point-in-time read before an imported record's history begins. |
 | `Lyra::StrictDataAccessViolation` | A callback-bypassing write with `strict_data_access` on. |

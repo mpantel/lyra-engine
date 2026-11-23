@@ -350,7 +350,20 @@ module Lyra
 
         data = Lyra::EventData.build(model_class, id, operation, attributes: attributes, changes: changes)
         event = event_class.new(data: data, metadata: Lyra::Privacy.stamp(model_class, data, metadata))
-        Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, id))
+        begin
+          Lyra.append_events(event, stream_name: Lyra.stream_name(model_class, id))
+        rescue Lyra::RecordDestroyedError
+          # A touch of a record whose stream ends in a destroy while its row
+          # stays: a record soft-deleted under 1.0.0, which recorded a soft
+          # delete as a Destroyed (from 1.0.1 it is the update it is, and its
+          # stream stays live). Its row is written as plain Active Record
+          # writes it, and nothing is recorded, as an update after a destroy
+          # is a history Hypothesis H excludes (Lyra::StreamHeads). Monitor
+          # records it, as it records what its table did.
+          raise unless source.to_s == "touch"
+
+          return nil
+        end
 
         # With projections disabled, reads come from the cached event-stream
         # reconstruction, which would otherwise keep serving the old state.
@@ -385,7 +398,7 @@ module Lyra
           keys = relation.reselect(model_class.arel_table[pk])
           scope = model_class.unscoped.where(pk => keys).lock
         end
-        rows = Lyra::PurposeBoundReads.internal(INTERNAL) { scope.to_a }
+        rows = Lyra::PurposeBoundReads.internal(INTERNAL) { lock ? Lyra::Projections::LazyProjection.own_locking_read { scope.to_a } : scope.to_a }
         rows.to_h { |record| [record_key(model_class, record), record.attributes] }.tap { |by_id| admit(model_class, by_id.keys) }
       end
 
@@ -461,10 +474,22 @@ module Lyra
         return published if ids.blank?
 
         pk = model_class.primary_key
+        # A row the upsert updated although no key was given for it: its
+        # generated key met a live record (a sequence behind the table). The
+        # database updated that record, so its event is an update, not a second
+        # create (1.0.0 recorded a create, in every mode that records events).
+        # Its old values are the replay of its stream.
+        unknown = ids.reject { before.key?(_1) }
+        met = model_class.with_connection { |c| Lyra::StreamHeads.live_streams(unknown.map { Lyra.stream_name(model_class, _1) }, connection: c) }
         Lyra::PurposeBoundReads.internal(INTERNAL) do
           model_class.unscoped.where(pk => ids).find_each do |record|
             id = record_key(model_class, record)
-            if (old_attrs = before[id])
+            old_attrs = before[id]
+            if old_attrs.nil? && met.include?(Lyra.stream_name(model_class, id))
+              state = Lyra::StateProjection.rebuild_state(model_class, id).transform_keys(&:to_s)
+              old_attrs = model_class.instantiate(state.slice(*model_class.column_names)).attributes
+            end
+            if old_attrs
               changes = diff(old_attrs, record.attributes)
               next if changes.empty?
 
