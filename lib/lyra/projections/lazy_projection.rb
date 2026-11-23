@@ -18,8 +18,12 @@ module Lyra
     #   after it, so a parent's row is there before its child's.
     # - A checkpoint records the last event applied. Catch-up runs under a
     #   PostgreSQL advisory lock, so concurrent readers never apply an event
-    #   twice, and in the reader's transaction, so a rolled-back write leaves
-    #   neither rows nor a checkpoint past it.
+    #   twice. Outside a transaction, and in a REPEATABLE READ or SERIALIZABLE
+    #   one, it runs on the reader's connection; inside a READ COMMITTED
+    #   transaction it runs on a connection of its own and commits at once
+    #   (catch_up_on_own_connection), and the reader replays its own
+    #   uncommitted records itself, so a rolled-back write leaves neither rows
+    #   nor a checkpoint past it.
     # - Event ids are assigned before commit, so a slow transaction can make
     #   event 10 visible after event 11. The checkpoint therefore also records
     #   the ids missing below it. When a missing event appears later, it is
@@ -34,10 +38,12 @@ module Lyra
     #
     # That check is all the fourth rule promises. It does not make the mode
     # safe for concurrent read-modify-write, and these limits remain:
-    # - The catch-up comes before the read's SQL: a locking read (lock,
-    #   with_lock) that waited for a row lock does not see what that lock's
-    #   holder committed, as the holder wrote events only. Two increments
-    #   under a row lock can give 1.
+    # - A locking read (lock!, with_lock, lock.find) takes its records'
+    #   aggregate locks before their row locks and reads them up to date
+    #   (orders_locking_reads?), so it sees every committed write of them. One
+    #   Lyra cannot order (raw SQL with FOR UPDATE, an eager-loading locking
+    #   read, one that selects no primary key) can still miss the commit of
+    #   the writer it waited for.
     # - A gap still empty after GAP_TTL seconds is taken to be a rolled-back
     #   transaction and forgotten: the events of a transaction open for longer
     #   than that can be skipped for good.
@@ -48,18 +54,16 @@ module Lyra
     # - A catch-up that cannot be applied fails its read, and every read
     #   after it: events that no order of the log makes valid under the
     #   table's constraints, or one that needs an event skipped for good.
-    # - The catch-up lock is held to the end of the application's transaction,
-    #   so transactions can deadlock on it: one that holds a row and then
-    #   reads waits for the lock, while the lock's holder waits for the row.
-    #   PostgreSQL detects it and aborts one (ActiveRecord::Deadlocked). The
-    #   fourth rule makes a read catch up wherever a gap's event is visible
-    #   to it, where until 1.0.0 the fast path returned stale rows: such a
-    #   read can now wait for the lock, and deadlock, instead. That is
-    #   deliberate, a detected deadlock rather than a silent stale read.
-    #   Reads with only invisible gaps take the lock no more often than
-    #   before. In REPEATABLE READ and SERIALIZABLE, visible means in the
-    #   transaction's snapshot, and a catch-up can fail with
-    #   ActiveRecord::SerializationFailure.
+    # - Where a READ COMMITTED transaction cannot catch up on a connection of
+    #   its own (no connection free, or the lock not had within OWN_LOCK_WAIT),
+    #   it catches up in its own transaction, which then holds the catch-up
+    #   lock to its commit (warn_fallback logs the first for want of a
+    #   connection, once per process): a
+    #   transaction that holds a row and then reads can then deadlock with
+    #   the lock's holder. PostgreSQL detects it and aborts one
+    #   (ActiveRecord::Deadlocked). In REPEATABLE READ and SERIALIZABLE,
+    #   visible means in the transaction's snapshot, and a catch-up can fail
+    #   with ActiveRecord::SerializationFailure.
     # - A query repeated in a query-cache scope can be answered from that
     #   cache, as in Active Record. Reads with no hook (raw SQL, eager_load's
     #   records, ids, count_by_sql, a relation's cache_version) and reads

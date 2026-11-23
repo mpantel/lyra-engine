@@ -894,17 +894,35 @@ catch-up.
 
 - A checkpoint (`lyra_projection_checkpoints`, created on first use, no
   migration) records the last event applied and the ids missing below it.
-  Catch-up runs under a PostgreSQL advisory lock and in the reader's
-  transaction, so concurrent readers never apply an event twice and a
-  rolled-back write leaves nothing behind.
+  Only the holder of a PostgreSQL advisory lock applies events or moves the
+  checkpoint, so concurrent readers never apply an event twice; a reader that
+  finds another's catch-up running waits for it and reads the checkpoint
+  again, catching up itself only for what that one left.
+- Outside a transaction, and in `REPEATABLE READ` or `SERIALIZABLE` (whose
+  snapshot must see what the catch-up applies), the catch-up runs on the
+  reader's connection. Inside a `READ COMMITTED` transaction it runs on a
+  connection of its own and commits at once, so the lock is not held to the
+  application's commit: it waits at most `OWN_LOCK_WAIT` (1 s) for the lock
+  and `SKIP_LOCKED_WAIT` (100 ms) for a row another transaction holds, leaving
+  that record for a later catch-up, and the reader replays its own uncommitted
+  records itself, which the other connection cannot see. Where no second
+  connection is free, or the lock was not had in time, it catches up in the
+  reader's transaction, which then holds the lock to its commit; a wait cycle
+  through it is a deadlock PostgreSQL detects. Lyra logs, once per process, the
+  first fallback for want of a free connection.
 - Event ids are assigned before commit, so a slow transaction can commit an
-  earlier id late: missing ids are watched as gaps and re-checked at most
-  every `GAP_RECHECK` (1 s); a late event replays its record in full. A gap
-  still empty after `LazyProjection::GAP_TTL` (300 s) is taken as a rollback,
-  which bounds the mode: a single transaction open longer than that has its
-  events skipped by the tables.
-- Once caught up, a read costs two small queries to see whether the log has
-  moved on. The tables can be dropped and rebuilt from the log at any time.
+  earlier id late: missing ids are kept as gaps, and every read's check looks
+  for a gap whose event has become visible to it (its own thread's included),
+  so it sees the late event once it has committed; the late event replays its
+  record in full. A gap still empty after `LazyProjection::GAP_TTL` (300 s) is
+  taken as a rollback, which bounds the mode: a single transaction open longer
+  than that has its events skipped by the tables.
+- A locking read (`lock!`, `with_lock`, `lock.find`) takes its records'
+  aggregate locks before their row locks and reads them up to date, so it sees
+  every committed write of them.
+- Once caught up, a read costs one query of the checkpoint and the newest
+  event, and a second while gaps are open. The tables can be dropped and
+  rebuilt from the log at any time.
 
 #### Rebuild
 
