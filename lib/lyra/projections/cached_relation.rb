@@ -3903,10 +3903,26 @@ end
       # StrictDataAccessRelation records it (or rejects upsert_all in the
       # events-only store), and hand back its real result or error.
       def insert_through_table(method_name, *args, **kwargs)
+        args = with_scope_attributes(args)
         Thread.current[:lyra_bypass_read_override] = true
         model_class.unscoped.public_send(method_name, *args, **kwargs)
       ensure
         Thread.current[:lyra_bypass_read_override] = nil
+      end
+
+      # The rows of an insert with the attributes this relation gives a record
+      # it creates (its equality conditions, create_with), as Active Record's
+      # InsertAll gives them: over each row's own values, the inheritance column
+      # left out (1.0.1). The insert runs unscoped, so a class-level insert_all in
+      # where(...).scoping { }, or one on the relation, wrote its rows without
+      # them, where Monitor writes them.
+      def with_scope_attributes(args)
+        scope = scope_for_create.transform_keys(&:to_s).except(model_class.inheritance_column.to_s)
+        return args if scope.empty? || args.empty?
+
+        rows = args.first
+        merged = rows.is_a?(Hash) ? rows.transform_keys(&:to_s).merge(scope) : Array(rows).map { _1.to_h.transform_keys(&:to_s).merge(scope) }
+        [merged, *args.drop(1)]
       end
 
       # Event sourcing with projections disabled: the records exist only in

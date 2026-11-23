@@ -55,4 +55,17 @@ class AsyncLockOrderNetTest < Minitest::Test
   def test_read_your_writes_under_with_lock_can_deadlock_with_a_last_pass
     refute_nil explore(%i[ryw_with_lock with_lock writer])[:deadlock]
   end
+
+  # A record-level write that skips callbacks, as it was before 1.0.1 (the
+  # aggregate lock and the row, no stream lock, the checkpoint unmoved),
+  # against a job's last pass that read the stream first: the job writes its
+  # older value over the write and the row stays behind its log (the Olist
+  # shipments). As it writes from 1.0.1, the bulk write's path (:bypass), never.
+  def test_a_record_level_bypass_write_without_the_stream_lock_leaves_the_row_behind
+    straight = ->(kinds) { N.explore(N::Config.new(name: kinds.join("+"), kinds: kinds, retries: 0, last_pass: :read_first)) }
+    before = straight.(%i[writer record_bypass])
+    assert before[:diverged_at_rest], "the row behind its log: #{before.inspect}"
+    assert_nil straight.(%i[writer bypass])[:diverged_at_rest]
+    assert_nil explore(%i[writer bypass])[:diverged_at_rest]
+  end
 end

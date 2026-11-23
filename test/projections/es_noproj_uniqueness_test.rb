@@ -462,9 +462,12 @@ class EsNoprojUniquenessTest < Minitest::Test
 
   # The copy is kept within its byte budget, beside the projection cache's;
   # a model with more streams than LIMIT is read through the projection
-  # cache instead; a copy is rebuilt when its model's types change.
+  # cache instead; a copy is rebuilt when its model's types change. The copy is
+  # what a check reads where no value stream answers it (from 1.0.1: a column
+  # without a unique index, or value links off, as here).
   def test_the_copy_is_bounded_and_follows_the_schema
     use(:es_noproj)
+    Lyra::Projections::ReferenceLinks.stubs(:values_enabled?).returns(false)
     snapshot = Lyra::Projections::Uniqueness::Snapshot
     snapshot.reset!
     20.times { |i| UqRaced.create!(code: "B#{i}", name: "n#{i}" * 20) }

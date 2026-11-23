@@ -218,7 +218,13 @@ module Lyra
         events_only = Lyra.event_sourcing_mode? && Lyra.config.projection_mode == :disabled
         stored = lyra_events_only_columns(unique) if enabled && events_only && unique
         # ES-Lazy: the row as the stream has it, under the lock just taken.
+        # ES-Async: the events its job has not applied, applied under the
+        # stream's lock (as a bulk write's are), before the row is written: a
+        # job's last pass that had read the stream would otherwise write its
+        # older value over this write once it commits, and set its checkpoint
+        # below this write's event, which then no job applies (1.0.1).
         Lyra::Projections::LazyProjection.refresh_records(self.class, [id]) if enabled && Lyra::BypassEvents.checks_streams?
+        Lyra::Projections::AsyncProjectionJob.project_pending(self.class, [id]) if enabled && Lyra::BypassEvents.projects_pending?
         lyra_projected_unique_columns(unique) if enabled && unique && !events_only && Lyra.event_sourcing_mode?
         known = before || {}
         before = columns.to_h do |c|

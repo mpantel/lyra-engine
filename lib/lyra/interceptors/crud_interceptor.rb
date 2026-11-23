@@ -602,6 +602,12 @@ module Lyra
           define_method(name) do |*args, **kwargs, &block|
             return super(*args, **kwargs, &block) unless lyra_read_from_events? && current_scope.nil?
 
+            # Inside where(...).scoping { } (ES-NoProj keeps that scope itself,
+            # so current_scope is nil): through the scoped relation, whose rows
+            # take its attributes, as Active Record's InsertAll gives them.
+            scoped = Lyra::Projections::CachedRelation.scoped_for(self)
+            return scoped.public_send(name, *args, **kwargs, &block) if scoped
+
             begin
               previous = Thread.current[:lyra_bypass_read_override]
               Thread.current[:lyra_bypass_read_override] = true

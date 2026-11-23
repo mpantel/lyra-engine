@@ -45,6 +45,10 @@ module Lyra
     # The purpose check exemption (PurposeBoundReads::UniquenessExemption)
     # still applies: the validation is part of writing the record.
     module Uniqueness
+      # Thread-local: the class, attribute and value a uniqueness validation is
+      # checking (ValidatorPatch), for holders_of_value.
+      VALUE_HINT = :lyra_uniqueness_value
+
       LOCK = "lyra_unique"
 
       class << self
@@ -96,11 +100,37 @@ module Lyra
             return false
           end
           Genesis.first_use(klass)
-          records = Snapshot.records(klass)
+          records = holders_of_value(klass) || Snapshot.records(klass)
           predicates.prepare(records)
           records.any? { |attributes| true.equal?(test.call(attributes)) }
         end
 
+        # The records a uniqueness check need test (1.0.1): where the validated
+        # attribute is a column of a unique index, every record that ever held the
+        # value has an event in that value's stream (ReferenceLinks, as the index
+        # check reads it: UniqueIndexes.candidate_records), so those are read, not
+        # every record of the model; the where clause is then tested on them as on
+        # all. nil (every record, as before) where that does not hold: no hint (a
+        # relation Rails did not build for a validation), a column without a unique
+        # index, a nil value, a comparison without case on a column whose key keeps
+        # it (only a citext column's key is its LOWER), value links off, or links
+        # another thread is still writing.
+        def holders_of_value(klass)
+          hint = Thread.current[VALUE_HINT]
+          return nil unless hint && hint[:klass].equal?(klass) && !hint[:value].nil?
+
+          table = klass.respond_to?(:base_class) ? klass.base_class : klass
+          column = klass.attribute_aliases.fetch(hint[:attribute].to_s, hint[:attribute].to_s)
+          return nil unless ReferenceLinks.values_enabled? && UniqueIndexes.columns(table).include?(column)
+          return nil if hint[:case_insensitive] && !citext?(table, column)
+
+          key = UniqueIndexes.key(table, column, table.type_for_attribute(column).cast(hint[:value]))
+          return nil if key.nil?
+          return nil unless ReferenceLinks.catch_up(table)
+
+          ids = ReferenceLinks.record_ids_in_any(table, [UniqueIndexes.stream(table, column, key)])
+          ids.empty? ? [] : CachedProjection.find_many(table, ids).compact
+        end
         # A transaction-level advisory lock on (model, attribute, value),
         # taken before the check reads, held until the writer's transaction
         # ends: a second writer of the value waits in its check until the
@@ -451,10 +481,12 @@ module Lyra
         # not pass it): whether its save claims a value (lyra_claims?).
         def validate_each(record, attribute, value)
           previous = Thread.current[RECORD]
+          hint = Thread.current[Uniqueness::VALUE_HINT]
           Thread.current[RECORD] = record
           super
         ensure
           Thread.current[RECORD] = previous
+          Thread.current[Uniqueness::VALUE_HINT] = hint
         end
 
         private
@@ -469,6 +501,9 @@ module Lyra
             case_insensitive = options.key?(:case_sensitive) && !options[:case_sensitive]
             Uniqueness.lock!(klass, attribute, value, case_insensitive: case_insensitive)
           end
+          Thread.current[Uniqueness::VALUE_HINT] =
+            { klass: klass, attribute: attribute, value: value,
+              case_insensitive: options.key?(:case_sensitive) && !options[:case_sensitive] }
           relation.extending!(Relation)
         end
 

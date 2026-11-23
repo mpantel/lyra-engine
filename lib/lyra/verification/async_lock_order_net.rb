@@ -34,6 +34,11 @@ module Lyra
     #   :ryw           a; appends; s; x; writes the row from its own write
     #                  (ReadYourWrites#project, each_write); its job runs after
     #   :ryw_with_lock x; a; appends; s; writes the row; its job runs after
+    #   :record_bypass a record-level write that skips callbacks (touch,
+    #                  update_columns) as it was before 1.0.1: a; x; writes the
+    #                  row and its event, c left where it is. From 1.0.1 it takes
+    #                  the path of :bypass (the stream's lock, the row brought up
+    #                  to date, then the write)
     #   :with_lock_ordered, :ryw_with_lock_ordered  the fix this net checks (1.0.1):
     #                  the locking read takes a, then s, then the row, brings the
     #                  row up to date (project_pending), then writes as above
@@ -54,7 +59,7 @@ module Lyra
       # the events read: the fix this net checks).
       Config = Struct.new(:name, :kinds, :retries, :last_pass, keyword_init: true)
 
-      KINDS = %i[writer with_lock bypass ryw ryw_with_lock with_lock_ordered ryw_with_lock_ordered].freeze
+      KINDS = %i[writer with_lock bypass ryw ryw_with_lock with_lock_ordered ryw_with_lock_ordered record_bypass].freeze
       WITH_JOB = %i[writer with_lock ryw ryw_with_lock with_lock_ordered ryw_with_lock_ordered].freeze
 
       attr_reader :config, :net, :n
@@ -142,6 +147,7 @@ module Lyra
         when :writer then commit_append(w, step(w, :"#{w}_start", :a, "a"), %i[a], job)
         when :with_lock then commit_append(w, step(w, step(w, :"#{w}_start", :x, "x"), :a, "xa"), %i[x a], job)
         when :bypass then build_bypass(w)
+        when :record_bypass then record_bypass_write(w, step(w, step(w, :"#{w}_start", :a, "a"), :x, "ax"))
         when :ryw then build_ryw(w, step(w, :"#{w}_start", :a, "a"), %i[a], job)
         when :ryw_with_lock then build_ryw(w, step(w, step(w, :"#{w}_start", :x, "x"), :a, "xa"), %i[x a], job)
         when :with_lock_ordered then commit_append(w, ordered_read(w), %i[a s x], job)
@@ -238,6 +244,17 @@ module Lyra
         end
       end
 
+      # The record-level write before 1.0.1: the row and the event, c unmoved.
+      def record_bypass_write(w, at)
+        values.each do |lv|
+          values.each do |rv|
+            transition("#{w}: writes row and event #{up(lv)}, commits (c unmoved)",
+                       from: [at, :"l#{lv}", :"r#{rv}", :x_taken],
+                       to: [:"#{w}_done", :"l#{up(lv)}", :"r#{up(lv)}", :a, :x])
+          end
+        end
+      end
+
       # AsyncProjectionJob#perform for one event, enqueued at its writer's commit.
       def build_job(j)
         @actors << j
@@ -245,7 +262,8 @@ module Lyra
         place(:"#{j}_done")
         retries = config.retries || 1
         tries = (0...retries).map { place(:"#{j}_try_#{_1}") }
-        transition("#{j}: starts", from: [:"#{j}_start"], to: [tries.first])
+        # retries 0: straight to the last pass (ROW_WAITS = 0)
+        transition("#{j}: starts", from: [:"#{j}_start"], to: [tries.first || place(:"#{j}_last")])
         tries.each_with_index do |try, k|
           with_s = place(:"#{j}_s_#{k}")
           transition("#{j}: takes s", from: [try, :s], to: [with_s])
@@ -256,7 +274,7 @@ module Lyra
           after = k + 1 < retries ? tries[k + 1] : place(:"#{j}_last")
           transition("#{j}: waits for the row", from: [waiting, :x], to: [after, :x])
         end
-        apply(j, :"#{j}_sx")
+        apply(j, place(:"#{j}_sx")) # unreachable with retries 0
         last = step(j, :"#{j}_last", :s, "last_s")
         if config.last_pass == :row_first
           apply(j, step(j, last, :x, "last_sx"))

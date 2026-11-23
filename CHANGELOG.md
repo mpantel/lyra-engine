@@ -54,6 +54,17 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 ### Fixed
+- **ES-Async: a record-level `touch` or `update_columns` is no longer written over by a projection
+  job.** Such a write took the record's aggregate lock but not its stream's, so a job in its last
+  pass (the stream's lock, the events after its checkpoint, then the row) could read the stream
+  before the write, wait for its row, and then write the older value over it, with its checkpoint
+  below the write's event, which no job then applied: the row stayed behind its log until the
+  record's next write (the Olist replay at 4 threads, `Spree::Shipment`'s `updated_at`; an
+  `update_columns` lost its value). The write now applies the events its job has not, under the
+  stream's lock, before its row, as a bulk write does.
+- **ES-NoProj: inserts inside `where(...).scoping { }` and on a relation take the scope's
+  attributes,** as Active Record's `InsertAll` writes them in Monitor: `insert_all`, `insert_all!`
+  and `insert` wrote their records without them.
 - **ES-Async: a bulk write starts from the row as its stream has it.** `update_all` (an SQL
   expression such as `n = n + 1`), `update_counters`, `increment!` and `touch_all` on a record whose
   projection job had not run read the row the job had not written yet: the update pending in the job
@@ -232,6 +243,12 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   record's stream head first ensures. Elsewhere the position is read as before.
 
 ### Changed
+- **ES-NoProj: a uniqueness validation on a column with a unique index reads its value's holders,
+  not every record of the model.** Every record that ever held the value has an event in that value's
+  stream (the one the unique-index check reads), so those are read and the validation's conditions
+  tested on them as before: at 3,000 records a `valid?` took 0.9 ms instead of 29 ms, and a
+  `create!` 24 ms instead of 70 (dev VM). Without a unique index, under `case_sensitive: false` on a
+  column that is not citext, or with value links off, every record is read as before.
 - **Writes cost more statements.** A create adds the head's insert and a check of its stream; an
   update or a destroy one statement on its head. The cost is measured in the 1.0.1 benchmark
   campaign.
