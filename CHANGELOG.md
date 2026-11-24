@@ -335,6 +335,17 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   regular expression, which a `?format=` query could make fail or backtrack.
 
 ### Known issues
+This release brings one:
+- ES-NoProj: a locking read through `find_by`, which is how Rails reads `lock!`, `with_lock` and
+  `reload(lock: true)` (`all.lock.find_by!(id: ...)`), takes the aggregate locks of every record of the
+  model, and rebuilds each from its events, before it reads its own. No data comes out wrong (it takes
+  more locks, never fewer), but each such read costs a lock and a rebuild per record of the model, every
+  writer of the model waits for it, and on a model with more records than `bulk_write_lock_limit`
+  (5,000 by default) the read is refused (`Lyra::BulkWriteLockLimitError`). Until a release corrects it,
+  read the record with `Model.lock.find(id)` inside the transaction, which locks only that record, in
+  place of `with_lock`, `lock!` or `reload(lock: true)`. On the Olist replay through Solidus, which adjusts stock under
+  `with_lock`, ES-NoProj took 6,480 s against 1.0.0's 3,926 s. `find(ids)` is not affected.
+
 This release does not change these:
 - ES-Lazy, ES-Async and ES-NoProj: a locking read Lyra cannot order runs as in 1.0.0: raw SQL
   (`find_by_sql` with `FOR UPDATE`), an eager-loading locking read (`lock.includes(...).references`),
