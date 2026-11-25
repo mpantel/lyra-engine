@@ -59,8 +59,8 @@ seven configurations:
 - PostgreSQL. Lyra depends on the `pg` gem; the advisory locks behind Genesis
   and ES-Lazy, and id reservation in Hijack mode, need PostgreSQL.
 
-The gems are on RubyGems, all three at 1.0.0 (22 November 2026):
-`orfeas_lyra`, `orfeas_pam_dsl` and `orfeas_petri_flow`. Their names differ from the files to require:
+The gems are on RubyGems: `orfeas_lyra` 1.0.1 (26 November 2026), and `orfeas_pam_dsl` and
+`orfeas_petri_flow` 1.0.0 (22 November 2026). Their names differ from the files to require:
 
 ```ruby
 # Gemfile
