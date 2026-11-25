@@ -860,8 +860,8 @@ module CachedRelationLockedSelection
   # them selects, as Active Record's find_by is where(...).take: Rails reads
   # lock!, with_lock and reload(lock: true) through all.lock.find_by!(id: ...)
   # (Persistence#_find_record), and the relation they are called on selects
-  # every record of the model. 1.0.1 locked, and rebuilt from its events,
-  # every one of them on each such read (#322).
+  # every record of the model. Before the 1.0.1 release this locked, and
+  # rebuilt from its events, every one of them on each such read.
   %i[find_by find_by!].each do |name|
     define_method(name) do |*args, **kwargs, &block|
       conditions = kwargs.empty? ? args.first : kwargs
