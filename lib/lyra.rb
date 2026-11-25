@@ -150,6 +150,7 @@ if PETRI_FLOW_AVAILABLE
       autoload :AsyncLockOrderNet, "lyra/verification/async_lock_order_net"
       autoload :TraceReplay, "lyra/verification/trace_replay"
       autoload :GateSettleNet, "lyra/verification/gate_settle_net"
+      autoload :MultiRecordLockNet, "lyra/verification/multi_record_lock_net"
     end
   end
 end

@@ -53,6 +53,15 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   every table both ways and compares them in PostgreSQL's catalog (columns, types, nulls, defaults,
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
+- **`Lyra::Verification::MultiRecordLockNet`: locks across records.** The other concurrency nets
+  model one record's locks; this one models transactions that write several records of a model
+  and read others under a lock, with each record's aggregate lock and stream head. Over every mix
+  of two transactions of two steps on three records (666 mixes), and of three such transactions
+  (8,436), the mixes that can deadlock with ES-NoProj's locking read are exactly those that can in
+  plain Active Record (writes in opposite orders); a read that locked every record of the model
+  would add 193 of the 666. A test checks that the code takes the aggregate locks in the net's
+  order.
+
 ### Fixed
 - **Hijack imports the rows that predate Lyra before a model's first use, as the event-sourcing
   modes do** (`config.genesis` `:auto`, the default). Its stream heads refuse an update of a record

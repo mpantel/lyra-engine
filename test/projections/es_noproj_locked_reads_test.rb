@@ -169,6 +169,30 @@ class EsNoprojLockedReadsTest < Minitest::Test
     assert_equal [Lyra.stream_name(NoprojLockItem, match)], streams.uniq
   end
 
+  # The code against Lyra::Verification::MultiRecordLockNet: a transaction
+  # that writes one record and then reads another under with_lock takes the
+  # aggregate locks the net's released read takes, in its order (and not the
+  # campaign's, which also locked the third record).
+  def test_aggregate_lock_order_across_records_follows_the_net
+    skip "PetriFlow not available" unless defined?(Lyra::Verification::MultiRecordLockNet)
+
+    ids = [@id] + Array.new(2) { NoprojLockItem.create!(n: 0).id }
+    program = [[:write, 1], [:lock_read, 0]]
+    streams = aggregate_locks_during do
+      NoprojLockItem.transaction do
+        NoprojLockItem.find(ids[1]).update!(n: 1)
+        r = NoprojLockItem.find(ids[0])
+        r.with_lock { r.update!(n: r.n + 1) }
+      end
+    end
+    net = Lyra::Verification::MultiRecordLockNet.new(
+      Lyra::Verification::MultiRecordLockNet::Config.new(name: "trace", records: 3, programs: [], read: :own)
+    )
+    expected = net.aggregate_lock_order(program).map { Lyra.stream_name(NoprojLockItem, ids[_1]) }
+
+    assert_equal expected, streams.uniq
+  end
+
   private
 
   # The streams whose aggregate locks the block takes, in the order taken.
