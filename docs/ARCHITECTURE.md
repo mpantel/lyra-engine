@@ -249,7 +249,7 @@ results[:boundedness][:is_safe]
 
 ### Use Cases
 
-Each evaluation application (in the replication package (https://doi.org/10.5281/zenodo.17770613)) exercises Lyra on a different
+Each evaluation application (in the replication package (https://doi.org/10.5281/zenodo.24390709)) exercises Lyra on a different
 domain: a university payment system (the Aegean e-Pay testbed), a
 loan-application process (the BPI Challenge 2017 replay), and an e-commerce
 platform (the Solidus case study with the Olist orders). Typical uses:
@@ -1141,7 +1141,7 @@ lyra:install` writes (from 1.0.1) or, without it, on first use:
 
 ### Application Tables (Example: Aegean E-Pay Testbed)
 
-See `examples/aegean_epay_testbed/db/schema.rb` in the replication package (https://doi.org/10.5281/zenodo.17770613) for the complete schema; the testbed has a fixed schema and no migration history.
+See `examples/aegean_epay_testbed/db/schema.rb` in the replication package (https://doi.org/10.5281/zenodo.24390709) for the complete schema; the testbed has a fixed schema and no migration history.
 
 ## Extensibility Points
 

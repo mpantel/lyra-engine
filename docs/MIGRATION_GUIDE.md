@@ -213,7 +213,7 @@ end
 
 Real initializers: `examples/aegean_epay_testbed/config/initializers/lyra.rb`
 and `examples/solidus_case_study/config/initializers/lyra.rb`, in
-the replication package (https://doi.org/10.5281/zenodo.17770613).
+the replication package (https://doi.org/10.5281/zenodo.24390709).
 
 **4. Choose the models.** Either in each model:
 

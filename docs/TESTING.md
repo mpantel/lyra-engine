@@ -23,7 +23,7 @@ root bundle.
 The example applications have their own suites: the Aegean e-Pay testbed and
 the BPI 2017 loan application (Minitest), and the Solidus case study (RSpec).
 They, `lib/tasks/testbed.rake` and the tasks it defines are in
-the replication package (https://doi.org/10.5281/zenodo.17770613),
+the replication package (https://doi.org/10.5281/zenodo.24390709),
 not in the `lyra-engine` repository.
 
 ## Prerequisites: PostgreSQL
