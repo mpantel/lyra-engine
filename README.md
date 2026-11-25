@@ -160,7 +160,7 @@ individual calls.
 - **[Architecture Overview](docs/ARCHITECTURE.md)** - System design and components
 - **[Switching Modes](docs/MIGRATION_GUIDE.md#switching-modes)** - Who holds the mode, and how to switch safely (the deploy-time rule)
 - **[Adopting Lyra](docs/MIGRATION_GUIDE.md#adopting-lyra-in-an-existing-application)** - What "non-intrusive" means, the costs, and a checklist for a new codebase
-- **[Performance](docs/PERFORMANCE.md)** - What each mode costs and why (measured on Lyra 0.9.0, with the SQL statements per write)
+- **[Performance](docs/PERFORMANCE.md)** - What each mode costs and why (measured on Lyra 1.0.1, with the SQL statements per write)
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common problems
 - **[Workflow Generator](docs/WORKFLOW_GENERATOR.md)** - The Petri net workflow models of Lyra's modes and their verification
 - **[Concurrency Nets](docs/CONCURRENCY_NETS.md)** - The six Petri nets on which Lyra's lock orders were chosen and are checked

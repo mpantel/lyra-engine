@@ -73,6 +73,10 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   `Lyra::Verification`, their places, writers and properties, and how to run them; and
   `benchmarks/petri-concurrent-writers/export_nets.rb`, which writes one configuration of each as PNML
   and Graphviz DOT, with a summary of its exploration.
+- **`docs/PERFORMANCE.md` gives the 1.0.1 measurement** (23-25 November 2026, three runs, 4, 16 and
+  64 threads, every mode and its controls, the stream heads' included), with the statement traces of
+  1.0.1, in place of 0.9.0's; the README's summary follows it (at 16 threads Hijack about 25%, Monitor
+  about 44%). The runs are in the replication package, https://doi.org/10.5281/zenodo.24390709.
 
 ### Fixed
 - **Hijack imports the rows that predate Lyra before a model's first use, as the event-sourcing
