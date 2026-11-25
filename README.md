@@ -163,6 +163,7 @@ individual calls.
 - **[Performance](docs/PERFORMANCE.md)** - What each mode costs and why (measured on Lyra 0.9.0, with the SQL statements per write)
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common problems
 - **[Workflow Generator](docs/WORKFLOW_GENERATOR.md)** - The Petri net workflow models of Lyra's modes and their verification
+- **[Concurrency Nets](docs/CONCURRENCY_NETS.md)** - The six Petri nets on which Lyra's lock orders were chosen and are checked
 - **[Changelog](CHANGELOG.md)**
 
 ### Theoretical Foundation

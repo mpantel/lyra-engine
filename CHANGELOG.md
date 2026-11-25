@@ -69,6 +69,10 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   Tests check that the code takes the locks in the net's orders: records of two models, Rails'
   writes of other records (`touch: true`, `dependent: :destroy`), a locking read of several records
   and a bulk write.
+- **The concurrency nets documented** (`docs/CONCURRENCY_NETS.md`): the six nets of
+  `Lyra::Verification`, their places, writers and properties, and how to run them; and
+  `benchmarks/petri-concurrent-writers/export_nets.rb`, which writes one configuration of each as PNML
+  and Graphviz DOT, with a summary of its exploration.
 
 ### Fixed
 - **Hijack imports the rows that predate Lyra before a model's first use, as the event-sourcing
