@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.1] - unreleased
+## [1.0.1] - 2026-11-26
 
 A patch release of `orfeas_lyra`; `orfeas_pam_dsl` and `orfeas_petri_flow` stay at 1.0.0. It adds
 one table of Lyra's own, `lyra_stream_heads`, and one column, `lyra_projection_checkpoints.event_id`,
