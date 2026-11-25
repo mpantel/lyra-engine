@@ -5,9 +5,7 @@ require "test_helper"
 # Model correspondence: every element of the core CRUD-to-event net has its
 # counterpart in Lyra's source, found by pattern matching on the code. It checks
 # structure, not behaviour; trace_conformance_test.rb replays real writes on the
-# nets. The checks are those of the formal model's correspondence script
-# (formal_model/verify_model_correspondence.rb in the replication package), run
-# here so that a change to the code that breaks one fails CI.
+# nets. A change to the code that breaks one of these patterns fails the suite.
 class ModelCorrespondenceTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
 

@@ -10,132 +10,66 @@ PetriFlow is a Ruby-based Colored Petri Net (CPN) library that provides:
 - Reachability analysis
 - Simulation of token flow
 
-The correspondence check between the formal model and Lyra's code is done by
-`verify_model_correspondence.rb` (below), by text matching; it is not part of
-PetriFlow.
+The correspondence check between the formal model and Lyra's code is a test in
+Lyra's suite (`test/verification/model_correspondence_test.rb`), by pattern
+matching on the source; it is not part of PetriFlow.
 
 ## Prerequisites
 
-The two verification scripts are in the replication package (https://doi.org/10.5281/zenodo.17770613),
-under `source/formal_model/` (they are not part of the lyra-engine
-repository). Run them from `source/`: `formal_crud_to_event_model.rb` writes its DOT files to `figures/`
-relative to the current directory.
+The checks run with Lyra's own test suite, from the repository root, with the
+test database running (`docs/TESTING.md`):
 
 ```bash
-cd /path/to/lyra
 bundle install  # Ensures PetriFlow gem is available
+bundle exec rake docker:start
 ```
 
-## Verification Scripts
+## Verification Tests
 
 ### 1. Formal Model Verification
 
-Run the formal CPN model verification:
-
 ```bash
-cd source && ruby formal_model/formal_crud_to_event_model.rb
+bundle exec ruby -Itest test/verification/crud_lifecycle_workflow_test.rb
 ```
 
-This script:
-1. **Creates the formal CPN model** matching the paper's Definitions 1-6
-   (five places, including P_orm, and five transitions)
-2. **Verifies structural properties** on a simplified verification net:
-   - Reachable states (expected: 4)
-   - Boundedness (expected: 1-bounded/safe)
-   - Terminal states (expected: 1 - intentional completion)
-3. **Simulates token flow**: P_crud → P_event → P_aggregate → P_published
-4. **Writes** `figures/formal_crud_to_event_model.dot` and `figures/crud_to_event_petri.dot`
+This test builds the core CRUD-to-event net (`P_crud`, `P_event`,
+`P_aggregate`, `P_published`; `T_create`, `T_update`, `T_delete`, `T_apply`,
+`T_publish`) and each mode's net, and checks:
+- **Reachable states:** 4 in the core net, with one terminal marking (the event
+  stored: intentional completion, not a deadlock);
+- **Boundedness:** every place 1-bounded (safe);
+- **Terminal reachability:** from every reachable marking, in every mode's net;
+- **Simulation:** the firing sequence `T_map → T_apply → T_publish`;
+- **Diagrams:** the nets export to DOT and Mermaid (the guards drawn as a choice).
 
-Output (trimmed):
-```
-📋 Creating Colored Petri Net Model...
-  ✓ Token colors defined (Definitions 1-3)
-  ✓ Places defined: P_crud, P_event, P_aggregate, P_published, P_orm
-  ✓ Guards defined: G(T_create), G(T_update), G(T_delete)
-  ✓ Transitions defined: T_create, T_update, T_delete, T_apply, T_publish
-  ✓ Arcs connected with expressions
-
-📊 Structural Verification Results:
-  Reachable states: 4
-  Terminal states:  1
-  Is bounded:       true
-  Is safe (1-bound):true
-  Max tokens/place: 1
-  Deadlock-free:    false
-
-Property 2: Deterministic Mapping
-  Verified by construction: each T_create/T_update/T_delete has exactly one output
-  Guards are mutually exclusive (operation ∈ {CREATE, UPDATE, DELETE})
-
-Property 4: Liveness
-  "All transitions can eventually fire (no deadlock)"
-  ⚠ Terminal state exists (expected: event stored is the final state)
-
-Invariant Check Summary
-  Total invariants: 2
-  Passed: 2
-  Failed: 0
-
-📊 Simulation Results:
-  Steps executed:    3
-  Firing sequence:   t_map → t_apply → t_publish
-  States visited:    4
-
-Properties Verified:
-  ✓ Property 1 (Completeness): Every CRUD generates an event
-  ✓ Property 2 (Determinism): Each CRUD maps to exactly one event type
-  ✓ Property 3 (Consistency): Token conservation holds
-  ✓ Property 4 (Liveness): No unintended deadlocks
-```
+`Lyra.verify_crud_mapping` runs the same verification from a console.
 
 ### 2. Model-Implementation Correspondence Verification
 
-Run the correspondence verification:
-
 ```bash
-cd source && ruby formal_model/verify_model_correspondence.rb
+bundle exec ruby -Itest test/verification/model_correspondence_test.rb
 ```
 
-This script:
-1. **Loads the formal CPN model**
-2. **Parses Lyra implementation files**:
-   - `lib/lyra/interceptors/crud_interceptor.rb`
-   - `lib/lyra/command_handler.rb`
-   - `lib/lyra/domain_events.rb`
-   - `lib/lyra/aggregate.rb`
-3. **Matches formal elements to implementation**:
-   - Places → Implementation components
-   - Transitions → Handler methods
-   - Guards → Pattern matching
-   - Arc expressions → event construction (`CommandHandler#create_event`, `CrudInterceptor#publish_event`)
-4. **Verifies structural isomorphism**
+The test parses Lyra's source and matches each element of the net to its
+counterpart:
 
-Output (trimmed):
-```
-📋 Loading Formal CPN Model...
-  ✓ Formal model: 4 places, 3 transitions
+| Formal (CPN) | Lyra implementation |
+|---|---|
+| `P_crud` | `CrudInterceptor` callbacks |
+| `T_create`, `T_update`, `T_delete` | `CommandHandler#handle_*` |
+| Guards `G(T_x)` | the `Commands::*Command` cases of `CommandHandler#call` |
+| Arc expression `E(T_x)` | `CommandHandler#create_event`, `CrudInterceptor#publish_event` |
+| `P_event` | `Lyra::Event` objects (`create_events`) |
+| `T_apply`, `P_aggregate` | the aggregate's `apply` and its state, before the append |
+| `T_publish` | `Lyra.append_events` to the record's stream |
+| `P_published` | Rails Event Store streams |
 
-📊 Correspondence Table:
-----------------------------------------------------------------------
-| Formal (CPN)                   | Lyra Implementation       | Status   |
-----------------------------------------------------------------------
-| p_crud                         | CrudInterceptor callbacks | ✓ MATCH  |
-| p_event                        | Lyra::Event objects (create_events) | ✓ MATCH  |
-| p_published                    | Rails Event Store streams | ✓ MATCH  |
-| p_aggregate                    | Aggregate state           | ✓ MATCH  |
-| T_map (T_create ∪ T_update ∪ T_delete) | handle_create/update/destroy | ✓ MATCH  |
-| t_publish                      | Lyra.append_events()      | ✓ MATCH  |
-| t_apply                        | aggregate.apply()         | ✓ MATCH  |
-| Guards G(T_x)                  | Commands::*Command pattern matching | ✓ MATCH  |
-| Arc expression E(T_x)          | CommandHandler#create_event, CrudInterceptor#publish_event | ✓ MATCH  |
-----------------------------------------------------------------------
-...
-  Total checks:  12
-  Passed:        12
-  Failed:        0
-
-  🎉 FORMAL MODEL AND IMPLEMENTATION ARE STRUCTURALLY ISOMORPHIC
-```
+It also checks that the core net is safe with one terminal marking. It checks
+structure, not behaviour: `trace_conformance_test.rb` replays the steps of real
+writes, in each mode, on that mode's net, and the concurrency nets
+(`docs/CONCURRENCY_NETS.md` in the repository root) are checked against the
+code's lock traces the same way. A change to the code that breaks a pattern
+fails the suite.
 
 ## Understanding the Formal Model
 

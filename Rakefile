@@ -98,7 +98,7 @@ task default: :test
 TESTBED_DIR = File.expand_path("examples/aegean_epay_testbed", __dir__)
 # The testbed is in the replication package, not in the lyra-engine repository.
 TESTBED_MISSING = "The Aegean testbed is not in this checkout; it is in the replication package " \
-                  "(https://doi.org/10.5281/zenodo.17770613)."
+                  "(https://doi.org/10.5281/zenodo.24390709)."
 
 # =============================================================================
 # Benchmark tasks

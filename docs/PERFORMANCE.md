@@ -7,7 +7,7 @@ trials per cell on one machine, all modes and their controls, with a thread
 sweep from 1 to 64. The runs are published with their machine description,
 settings and statement traces in the replication package,
 https://doi.org/10.5281/zenodo.24390709 (version 1.0.1). Earlier measurements,
-on Lyra 0.9.0 (October 2026, https://doi.org/10.5281/zenodo.23640846) and on
+on Lyra 0.9.0 (October 2026) and on
 Lyra 0.6.0 (July 2026, an Apple M4), are superseded: the code has changed since
 (the stream heads among other changes), and so have the figures.
 
