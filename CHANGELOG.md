@@ -139,6 +139,12 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   10⁵, as at 10⁴. An application that ran the migration of an earlier 1.0.1 build adds it with
   `add_index :event_store_events_in_streams, :event_id, algorithm: :concurrently, if_not_exists: true`.
   Where it is new, the index adds one entry per link row to every append.
+- **ES-Async's check for rows behind their jobs works where Rails Event Store's `event_id` is a
+  uuid column** (Solidus's schema, and others): it compared that column with Lyra's string checkpoint
+  column, which PostgreSQL refuses (`operator does not exist: uuid = character varying`). The
+  query ran for writes that skip callbacks, and from 1.0.1 for every locking read; it now casts
+  the checkpoint's id to the store's type, as the stream heads do. Found by a 20-order Olist replay
+  before the release: read-your-writes then matched Disabled in every order.
 - **DualView reads the row without the model's default scope, and so do ES-Sync's projection
   writes.** DualView, and with it the mode gate, the sampler and `lyra:repair`, looked the row up
   through the model's default scope, so a row it hides (a soft-deleted one) was reported missing
