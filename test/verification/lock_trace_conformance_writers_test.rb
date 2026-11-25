@@ -105,6 +105,10 @@ class LockTraceConformanceWritersTest < Minitest::Test
     end
     Lyra.config.monitor_model(TraceWriter)
     @id = TraceWriter.create!(n: 0).id
+    # A record the scenario never touches: a locking read that took the
+    # aggregate locks of other records of the model (ES-NoProj's with_lock in
+    # 1.0.1, #322) would show a second grant of the net's one lock.
+    TraceWriter.create!(n: 0)
   end
 
   def assert_fits(net_mode, lock, ops)

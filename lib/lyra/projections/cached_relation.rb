@@ -849,8 +849,31 @@ module Lyra
 # transaction ends. find(ids) locks only the ids (locked_find_relation).
 # A window (limit, offset) reads as before (the CHANGELOG's known issues).
 module CachedRelationLockedSelection
-  %i[each to_a records first last take take! first! last! find_by find_by! sole].each do |name|
+  %i[each to_a records first last take take! first! last! sole].each do |name|
     define_method(name) do |*args, **kwargs, &block|
+      lock_selection!
+      super(*args, **kwargs, &block)
+    end
+  end
+
+  # find_by and find_by! with conditions lock what the relation narrowed by
+  # them selects, as Active Record's find_by is where(...).take: Rails reads
+  # lock!, with_lock and reload(lock: true) through all.lock.find_by!(id: ...)
+  # (Persistence#_find_record), and the relation they are called on selects
+  # every record of the model. 1.0.1 locked, and rebuilt from its events,
+  # every one of them on each such read (#322).
+  %i[find_by find_by!].each do |name|
+    define_method(name) do |*args, **kwargs, &block|
+      conditions = kwargs.empty? ? args.first : kwargs
+      if @locking_read && !@selection_locked && !@narrowed_for_find_by &&
+         conditions.is_a?(Hash) && !conditions.empty?
+        narrowed = where(conditions)
+        if narrowed.is_a?(Lyra::Projections::CachedRelation) && !narrowed.equal?(self)
+          narrowed.instance_variable_set(:@locking_read, true)
+          narrowed.instance_variable_set(:@narrowed_for_find_by, true)
+          return narrowed.public_send(name, *args, **kwargs, &block)
+        end
+      end
       lock_selection!
       super(*args, **kwargs, &block)
     end

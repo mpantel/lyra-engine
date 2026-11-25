@@ -135,7 +135,57 @@ class EsNoprojLockedReadsTest < Minitest::Test
     assert_equal 2, value
   end
 
+  # Rails reads lock!, with_lock and reload(lock: true) through
+  # all.lock.find_by!(id: ...) (Persistence#_find_record): the read locks the
+  # record it reads, not every record of the model (1.0.1 locked them all).
+  def test_with_lock_locks_only_its_own_record
+    others = Array.new(4) { NoprojLockItem.create!(n: 5).id }
+    record = NoprojLockItem.find(@id)
+    streams = aggregate_locks_during { record.with_lock { record.update!(n: record.n + 1) } }
+
+    assert_equal [Lyra.stream_name(NoprojLockItem, @id)], streams.uniq, "only the record's own aggregate lock"
+    assert_equal 1, value
+    others.each { assert_equal 5, NoprojLockItem.find(_1).n }
+  end
+
+  # 1.0.1 counted every record of the model against the lock limit, so a
+  # with_lock on a model larger than bulk_write_lock_limit was refused.
+  def test_with_lock_on_a_model_larger_than_the_lock_limit
+    4.times { NoprojLockItem.create!(n: 1) }
+    Lyra.config.bulk_write_lock_limit = 3
+    record = NoprojLockItem.find(@id)
+    record.with_lock { record.update!(n: record.n + 1) }
+
+    assert_equal 1, value
+  ensure
+    Lyra.config.bulk_write_lock_limit = 5_000
+  end
+
+  def test_lock_find_by_locks_only_the_records_it_selects
+    match = NoprojLockItem.create!(n: 7).id
+    3.times { NoprojLockItem.create!(n: 9) }
+    streams = aggregate_locks_during { NoprojLockItem.transaction { NoprojLockItem.lock.find_by!(n: 7) } }
+
+    assert_equal [Lyra.stream_name(NoprojLockItem, match)], streams.uniq
+  end
+
   private
+
+  # The streams whose aggregate locks the block takes, in the order taken.
+  def aggregate_locks_during
+    streams = []
+    sub = ActiveSupport::Notifications.subscribe("sql.active_record") do |*, payload|
+      next unless payload[:sql].to_s.include?("pg_advisory")
+
+      key = payload[:sql][/hashtext\('([^']*)'\)/, 1] ||
+            Array(payload[:binds]).map { _1.respond_to?(:value) ? _1.value.to_s : _1.to_s }.first.to_s
+      streams << key.delete_prefix("lyra_aggregate/") if key.start_with?("lyra_aggregate/")
+    end
+    yield
+    streams
+  ensure
+    ActiveSupport::Notifications.unsubscribe(sub)
+  end
 
   def thread(&block) = Thread.new { ActiveRecord::Base.connection_pool.with_connection(&block) }.tap { _1.report_on_exception = false }
 
