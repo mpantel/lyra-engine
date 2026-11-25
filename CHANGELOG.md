@@ -54,13 +54,21 @@ writes in flight (see Fixed). What remains is listed under Known issues.
   indexes, constraints), and loads them from a dumped `db/schema.rb`.
 
 - **`Lyra::Verification::MultiRecordLockNet`: locks across records.** The other concurrency nets
-  model one record's locks; this one models transactions that write several records of a model
-  and read others under a lock, with each record's aggregate lock and stream head. Over every mix
-  of two transactions of two steps on three records (666 mixes), and of three such transactions
-  (8,436), the mixes that can deadlock with ES-NoProj's locking read are exactly those that can in
-  plain Active Record (writes in opposite orders); a read that locked every record of the model
-  would add 193 of the 666. A test checks that the code takes the aggregate locks in the net's
-  order.
+  model one record's locks; this one models ES-NoProj's transactions on records of one model or
+  several: writes, locking reads of one record or several, and bulk writes, with each record's
+  aggregate lock and stream head, against plain Active Record's row locks in any order its scans
+  take them. Three conditions, checked on the net's structure, make every deadlock ES-NoProj can
+  reach one plain Active Record can reach, for any number of transactions, steps and records: a
+  stream head is taken only under its record's aggregate lock, a step locks only its own records,
+  and in an order plain Active Record's scans can take (stream-name order for a locking read, the
+  keys' hash order for a bulk write). Assumed: each record's lock is its own (two streams whose
+  32-bit lock keys collide share one). Explored: with single-record steps, the mixes of two
+  transactions of two steps on three records that can deadlock are plain Active Record's (48 of
+  666); with every step kind, 8,056 of 19,306 can, all among plain Active Record's 13,192. A read
+  that locked every record of the model would break two conditions and deadlock in 219 of the 666.
+  Tests check that the code takes the locks in the net's orders: records of two models, Rails'
+  writes of other records (`touch: true`, `dependent: :destroy`), a locking read of several records
+  and a bulk write.
 
 ### Fixed
 - **Hijack imports the rows that predate Lyra before a model's first use, as the event-sourcing
@@ -365,7 +373,11 @@ This release does not change these:
 - ES-Lazy: in `REPEATABLE READ` and `SERIALIZABLE` a transaction does not see rows a catch-up
   applied after its snapshot was taken, so it can read stale rows;
 - ES-Lazy: a query repeated in a query-cache scope can be answered from that cache, as in Active
-  Record.
+  Record;
+- ES-NoProj does not keep counter caches: a `belongs_to` with `counter_cache:` leaves the
+  parent's counter as it was when a child is created or destroyed, and the `touch: true` Rails
+  sends in the same statement is left out with it (it takes no lock either). A child's update
+  touches its parent.
 
 
 ## [1.0.0] - 2026-11-22
