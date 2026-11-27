@@ -191,6 +191,12 @@ ORFEAS and Lyra are grounded in peer-reviewed research:
 
 ### Published Papers
 
+**Pantelelis, M., & Kalloniatis, C. (2027).** *Privacy Attribute Matrix: Enterprise Modeling for Trustworthy Systems in Industry 5.0.*
+The Practice of Enterprise Modeling (PoEM 2026), Lecture Notes in Business Information Processing 608, Springer, pp. 239–255.
+DOI: [10.1007/978-3-032-45753-0_14](https://doi.org/10.1007/978-3-032-45753-0_14)
+
+
+
 **Pantelelis, M., & Kalloniatis, C. (2026).** *From ORM to OEM: Object-to-Events Mapping for the OLEP Era.*
 IEEE Software.
 DOI: [10.1109/MS.2026.3734188](https://doi.org/10.1109/MS.2026.3734188)
@@ -336,6 +342,22 @@ PAM, the privacy DSL (`gems/pam_dsl`), from regulation to runtime:
   publisher={Springer},
   year={2026},
   doi={10.1007/s00766-026-00469-6}
+}
+```
+
+PAM's constructs as a GDPR vocabulary for enterprise models (ArchiMate, TOGAF, BMM):
+
+```bibtex
+@inproceedings{pantelelis2026poem,
+  title={Privacy Attribute Matrix: Enterprise Modeling for Trustworthy Systems in Industry 5.0},
+  author={Pantelelis, Michail and Kalloniatis, Christos},
+  booktitle={The Practice of Enterprise Modeling (PoEM 2026)},
+  series={Lecture Notes in Business Information Processing},
+  volume={608},
+  pages={239--255},
+  publisher={Springer},
+  year={2027},
+  doi={10.1007/978-3-032-45753-0_14}
 }
 ```
 
